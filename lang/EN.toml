@@ -1,0 +1,185 @@
+# Qonvo English Translation
+
+[app]
+title = "Qonvo"
+
+[menu]
+file = "File(&F)"
+new_board = "New Board..."
+new_round_table = "New Round Table..."
+save = "Save"
+save_as = "Save As..."
+load = "Open..."
+recent_boards = "Recent Boards"
+exit = "Exit"
+view = "View(&V)"
+reset_view = "Reset View"
+reset_zoom = "Reset Zoom"
+node = "Node(&N)"
+add_node = "Add Node"
+settings = "Settings(&S)"
+preferences = "Preferences..."
+dev_window = "Developer Window"
+no_recent = "(None)"
+
+[welcome]
+instructions = "Press Ctrl+N to Create New Board\nPress Ctrl+O to Open Board"
+recent_boards = "Recent Boards"
+
+[dialog]
+new_board_title = "Create New Board"
+new_board_prompt = "Select board type:"
+save_board_title = "Save Board"
+save_board_prompt = "Board name:"
+load_board_title = "Open Board"
+file_filter = "Qonvo Board (*.qonvo)"
+unsaved_message = "You have unsaved changes.\nWould you like to save them?"
+input_message_title = "Enter Message"
+input_placeholder = "Type your message here..."
+file_select_title = "Select File"
+file_select_filter = "All Files (*.*);;Images (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;PDF (*.pdf)"
+api_key_prompt = "Enter Gemini API Key:"
+api_key_hint = "Can also be set via GEMINI_API_KEY environment variable."
+node_input_title = "Node #{node_id} - Enter Message"
+version_mismatch_title = "Version Mismatch"
+version_mismatch = "This board was saved with a different version of Qonvo.\n\nFile version: {file_version}\nCurrent version: {app_version}\n\nContinue loading?"
+
+[button]
+cancel = "Cancel"
+create = "Create"
+save = "Save"
+show = "Show"
+hide = "Hide"
+copy = "📋 Copy"
+copied = "✓ Copied"
+refresh = "Refresh"
+clear = "Clear"
+compose = "Compose"
+attach = "📎 Attach"
+notepad = "📝 Notepad"
+submit = "Send (Ctrl+Enter)"
+
+[settings]
+title = "Preferences"
+api_key = "API Key"
+api_key_hint = "Gemini API Key. Can also be set via GEMINI_API_KEY environment variable."
+api_key_placeholder = "AIza..."
+default_model = "Default Model"
+default_model_hint = "The model selected by default when creating a new node."
+recent_count = "Recent Boards Count"
+recent_count_hint = "Number of recent boards to display on the welcome screen and menu."
+board_size = "Board Size"
+board_size_hint = "Total size of the whiteboard. Changes will take effect after restarting the app."
+developer_mode = "Developer Mode"
+developer_mode_hint = "Enables the developer window to view project JSON, debug logs, etc."
+experimental_mode = "Experimental Features"
+experimental_mode_hint = "Enable experimental features that may not be stable yet."
+language = "Language"
+language_hint = "Changes will take effect after restarting the app."
+
+[dev]
+title = "Qonvo - Developer Tools"
+tab_json = "Project JSON"
+tab_log = "Log"
+board_not_loaded = "(No board loaded)"
+
+[data_viewer]
+title = "Qonvo - Data Viewer"
+menu_item = "Data Viewer"
+tab_logs = "Logs"
+tab_boards = "Boards"
+tab_files = "Files"
+tab_settings = "Settings"
+search_placeholder = "Search..."
+auto_refresh = "Auto Refresh"
+log_lines = "Lines: {count}"
+log_file_size = "Size: {size}"
+board_list = "Board List"
+board_metadata = "Metadata"
+node_counts = "Node Counts"
+edge_count = "Edge Count"
+attachments = "Attachments"
+attachment_count = "{count} attachments"
+preview = "Preview"
+no_board_selected = "Select a board"
+boards_dir = "boards/"
+temp_dir = "boards/.temp/"
+logs_dir = "logs/"
+total_disk_usage = "Total Disk Usage: {size}"
+no_settings = "(No settings file)"
+download_file = "Save File"
+download_all_zip = "Download All (ZIP)"
+image_gallery = "Images"
+
+[tooltip]
+pin = "Remember (Always include in context)"
+open_original = "Click to open original"
+open_file = "Click to open: {name}"
+
+[error]
+save_failed = "Save Failed"
+load_failed = "Open Failed"
+save_no_board = "Please create or open a board first."
+api_key_not_set = "[Error] API Key is not set."
+api_error = "[Error] {error}"
+notepad_error = "Notepad Error: {error}"
+generic = "Error: {error}"
+plugin_load_failed = "Plugin load failed ({name}): {error}"
+
+[status]
+images_created = "[{count} image(s) created]"
+
+[plugin]
+whiteboard_name = "Whiteboard"
+whiteboard_desc = "Node-based chat board with free placement"
+
+[radial]
+add_node = "Add Node"
+add_pin = "Add Pin"
+add_text = "Add Text"
+add_sticky_note = "Add Memo"
+add_image = "Add Image"
+add_checklist = "Add Checklist"
+add_group = "Add Group"
+
+add_function = "Add Function"
+add_dimension = "Add Dimension"
+add_round_table = "Add Round Table"
+
+[function]
+library_title = "Function Library"
+new_function = "+ New Function"
+edit_function = "Edit"
+delete_function = "Delete"
+duplicate_function = "Duplicate"
+select_function = "Select Function"
+no_functions = "No functions defined. Click '+ New Function' to create one."
+editor_title = "Function Editor"
+validate = "Validate"
+validation_ok = "Function is valid!"
+validation_errors = "Validation Errors"
+no_function_selected = "Select a function"
+confirm_delete = "Delete function '{name}'?"
+
+
+[chat]
+preferred_done = "{count} candidates generated"
+preferred_candidates = "Candidates ({count})"
+
+[search]
+placeholder = "Search nodes..."
+pinned_only = "Pinned"
+images_only = "Images"
+
+[label]
+model = "Model"
+text_default = "Text"
+
+[round_table]
+edit_settings = "Edit Settings"
+config_desc = "Add participants and adjust order. Drag to reorder."
+participants = "Participants"
+participant_name = "Participant Name"
+remove_selected = "Remove Selected"
+no_participants = "No participants. Click settings to add."
+finished = "Discussion Complete"

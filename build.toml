@@ -1,0 +1,4 @@
+[app]
+name = "Qonvo"
+version = "beta-1.0.0"
+default_qonvo = ""

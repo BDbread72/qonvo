@@ -1,0 +1,25 @@
+[settings]
+default_color = "white"
+size = 28
+
+[icons]
+# Level 1 카테고리
+cat_nodes = "tabler:brain"
+cat_notes = "tabler:notes"
+cat_media = "tabler:photo-circle"
+cat_ui = "tabler:layout-grid"
+
+# Level 2 아이템
+node = "tabler:message-dots"
+function = "tabler:math-function"
+round_table = "tabler:users-group"
+
+repository = "tabler:database"
+sticky = "tabler:note"
+text = "tabler:letter-t"
+checklist = "tabler:list-check"
+image = "tabler:photo"
+dimension = "tabler:dimensions"
+button = "tabler:click"
+group = "tabler:layout-board-split"
+pin = "tabler:map-pin"
