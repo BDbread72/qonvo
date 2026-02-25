@@ -1944,25 +1944,36 @@ class WhiteBoardPlugin(BoardPlugin):
         logger.warning(f"[BATCH_RESUME] Failed: {job_name} (node {nid})")
 
     def _on_image_payload(self, node, worker, payload):
+        """이미지 생성 응답(payload)을 처리해 노드에 결과를 반영한다."""
         from v.logger import get_logger
         logger = get_logger("qonvo.plugin")
+        # payload에서 이미지/텍스트/노드 ID를 추출
         images = payload.get("images", [])
         text = payload.get("text", "")
         nid = getattr(node, 'node_id', '?')
         logger.info(f"[IMAGE_PAYLOAD] node={nid}, images={len(images)}, text_len={len(text)}")
-        if not images:
-            # 이미지 없음 = 차단됨 (IMAGE_SAFETY 등) → 에러 표시 + 워커 종료
-            error_msg = text if text else "이미지 생성 실패"
-            node.set_response(error_msg, done=True)
+        try:
+            if not images:
+                # 이미지가 없으면 오류 메시지로 응답 처리
+                error_msg = text if text else "이미지 생성 실패"
+                node.set_response(error_msg, done=True)
+                self._finish_worker(worker)
+                self._emit_complete_signal(node)
+                return
+            # 토큰 사용량을 노드에 기록
+            node.set_tokens(payload.get("prompt_tokens") or 0, payload.get("candidates_tokens") or 0)
+            # 이미지 결과와 부가 정보(사고 서명)를 노드에 반영
+            node.set_image_response(text, images, payload.get("thought_signatures", []))
             self._finish_worker(worker)
-            self._emit_complete_signal(node)
-            return
-        node.set_tokens(payload.get("prompt_tokens") or 0, payload.get("candidates_tokens") or 0)
-        node.set_image_response(text, images, payload.get("thought_signatures", []))
-        self._finish_worker(worker)
-
-        # 이미지 생성 완료 후 신호 발송 (Dimension에 추가하기 위해 필요)
-        self._emit_complete_signal(node, images)
+            self._emit_complete_signal(node, images)
+        except Exception as e:
+            # 처리 중 오류 발생 시 로깅하고 가능한 범위에서 노드에 전달
+            logger.error(f"[IMAGE_PAYLOAD] node={nid} crashed: {e}", exc_info=True)
+            try:
+                node.set_response(f"Error: {e}", done=True)
+            except Exception:
+                pass
+            self._finish_worker(worker)
 
     def _start_worker(self, worker):
         """워커 시작 (동시 실행 수 추적)"""
