@@ -40,12 +40,20 @@ class StreamWorker(QThread):
         self.model = model
         self.messages = messages
         self.options = options
+        self._cancel_requested = False
+        self._node_id = None
+
+    def cancel(self):
+        self._cancel_requested = True
 
     def run(self):
         try:
             result = self.provider.chat(
                 self.model, self.messages, stream=True, **self.options
             )
+
+            if self._cancel_requested:
+                return
 
             # 이미지 모델은 dict 반환
             if isinstance(result, dict):
@@ -61,6 +69,8 @@ class StreamWorker(QThread):
             chunks = []
             last_emit = 0.0
             for chunk in result:
+                if self._cancel_requested:
+                    return
                 if isinstance(chunk, dict) and chunk.get("__usage__"):
                     self.tokens_received.emit(
                         chunk.get("prompt_tokens", 0),
@@ -77,11 +87,14 @@ class StreamWorker(QThread):
                         self.chunk_received.emit("".join(chunks))
                         last_emit = now
 
+            if self._cancel_requested:
+                return
             full_text = "".join(chunks)
             self.finished_signal.emit(full_text)
 
         except Exception as e:
-            self.error_signal.emit(str(e))
+            if not self._cancel_requested:
+                self.error_signal.emit(str(e))
 
 
 class ApiKeyDialog(QDialog):

@@ -434,6 +434,7 @@ class WhiteBoardPlugin(BoardPlugin):
     def add_node(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
         node = ChatNodeWidget(node_id, on_send=self._handle_chat_send, on_modified=self._notify_modified)
+        node.on_cancel = self._cancel_node_workers
         node.on_add_port = self._add_chat_input_port
         node.on_remove_port = self._remove_chat_input_port
         proxy = self._add_proxy(node, node_id, pos, self.proxies)
@@ -653,10 +654,12 @@ class WhiteBoardPlugin(BoardPlugin):
         node_id = self._next_id(node_id)
         if pos is None:
             pos = self._cursor_scene_pos()
-        item = ImageCardItem(pos.x(), pos.y(), image_path)
+        item = ImageCardItem(pos.x(), pos.y())
         item.node_id = node_id
 
-        # width/height를 포트 생성 전에 먼저 설정 (reposition이 올바른 크기를 사용하도록)
+        if image_path:
+            item.set_image(image_path)
+
         if width is not None and height is not None:
             item.prepareGeometryChange()
             item._width = width
@@ -1335,8 +1338,9 @@ class WhiteBoardPlugin(BoardPlugin):
                     system_files=self.system_files,
                     **options,
                 )
+                worker._node_id = node_id
 
-                # Preferred 모드: 스트리밍 청크는 노드에 표시하지 않음
+
                 worker.tokens_received.connect(lambda i, o, n=node: n.set_tokens(i, o))
                 worker.error_signal.connect(
                     lambda err, n=node, w=worker: self._finish_worker(
@@ -1368,6 +1372,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 system_files=self.system_files,
                 **options,
             )
+            worker._node_id = node.node_id
 
             worker.chunk_received.connect(lambda text, n=node: n.set_response(text, done=False))
             worker.tokens_received.connect(lambda i, o, n=node: n.set_tokens(i, o))
@@ -1376,7 +1381,6 @@ class WhiteBoardPlugin(BoardPlugin):
             worker.finished_signal.connect(lambda text, n=node, w=worker: self._finish_worker(w, lambda: (n.set_response(text, done=True), self._emit_complete_signal(n))))
             worker.image_received.connect(lambda payload, n=node, w=worker: self._on_image_payload(n, w, payload))
 
-            # Phase 4: 동시 워커 수 제한 (최대 4개)
             if self._active_workers < self._max_concurrent_workers:
                 self._start_worker(worker)
             else:
@@ -1974,6 +1978,31 @@ class WhiteBoardPlugin(BoardPlugin):
             except Exception:
                 pass
             self._finish_worker(worker)
+
+    def _cancel_node_workers(self, node_id):
+        from v.logger import get_logger
+        logger = get_logger("qonvo.plugin")
+        cancelled = 0
+
+        for w in list(self._workers):
+            if getattr(w, '_node_id', None) == node_id:
+                w.cancel()
+                self._finish_worker(w)
+                cancelled += 1
+
+        self._pending_workers = [
+            (n, w) for n, w in self._pending_workers
+            if getattr(n, 'node_id', None) != node_id
+        ]
+
+        self._preferred_results.pop(node_id, None)
+        self._preferred_expected.pop(node_id, None)
+
+        node = self.app.nodes.get(node_id)
+        if node and hasattr(node, 'set_response'):
+            node.set_response("Cancelled", done=True)
+
+        logger.info(f"[CANCEL] node={node_id}, cancelled_workers={cancelled}")
 
     def _start_worker(self, worker):
         """워커 시작 (동시 실행 수 추적)"""
@@ -2719,7 +2748,7 @@ class WhiteBoardPlugin(BoardPlugin):
         if row.get("opts_panel_visible", False):
             node.btn_opts_toggle.setChecked(True)
         if row.get("ai_response") and not str(node.ai_response or "").startswith("\u26a0\ufe0f"):
-            node.set_response(row.get("ai_response"), done=True)
+            node.set_response(row.get("ai_response"), done=False)
 
     def _materialize_sticky_note(self, row):
         proxy = self.add_sticky(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))

@@ -581,13 +581,15 @@ class WhiteboardView(QGraphicsView):
     def keyPressEvent(self, event: QKeyEvent):
         """키 이벤트 처리"""
         if event.key() == Qt.Key.Key_Delete:
-            self._delete_selected_items()
-            event.accept()
-            return
+            if not self._has_focused_input():
+                self._delete_selected_items()
+                event.accept()
+                return
         elif event.key() == Qt.Key.Key_H and event.modifiers() == Qt.KeyboardModifier.NoModifier:
-            self._toggle_hide_selected_images()
-            event.accept()
-            return
+            if not self._has_focused_input():
+                self._toggle_hide_selected_images()
+                event.accept()
+                return
         elif event.key() == Qt.Key.Key_A and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self._select_all_items()
             event.accept()

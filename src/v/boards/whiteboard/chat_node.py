@@ -266,6 +266,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         # Chat node specific attributes
         self.on_send = on_send
+        self.on_cancel = None
         self.on_add_port = None       # plugin sets: (node, type_str) -> None
         self.on_remove_port = None    # plugin sets: (node, port_name) -> None
         self._running = False
@@ -762,6 +763,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._pref_window = None
         self._running = False
         self._stop_pulse()
+        self.btn_input.setText(t("button.compose"))
         self.btn_input.setEnabled(True)
         self.model_combo.setEnabled(True)
         self._update_status("done")
@@ -915,6 +917,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
     def _open_input(self):
         if self._running:
+            self._request_cancel()
             return
 
         def on_submit(result):
@@ -926,6 +929,11 @@ class ChatNodeWidget(QWidget, BaseNode):
         dialog.raise_()
         dialog.activateWindow()
         dialog.exec()
+
+    def _request_cancel(self):
+        self._send_queue.clear()
+        if self.on_cancel:
+            self.on_cancel(self.node_id)
 
     def send(self, message, files=None):
         self._send(message, files or [])
@@ -992,7 +1000,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._current_streaming = ""
 
         self._update_status("running")
-        self.btn_input.setEnabled(False)
+        self.btn_input.setText("■")
         self.model_combo.setEnabled(False)
         self._btn_pref_view.hide()
         self.pending_results = []
@@ -1001,7 +1009,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self.on_send:
             self.on_send(self.node_id, self.model, send_msg, send_files, prompt_entries)
 
-    def _process_queue(self):  # 대기 큐에서 다음 요청을 FIFO로 처리
+    def _process_queue(self):
         if not self._send_queue:
             return
         entry = self._send_queue.pop(0)
@@ -1023,7 +1031,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._current_streaming = ""
 
         self._update_status("running")
-        self.btn_input.setEnabled(False)
+        self.btn_input.setText("■")
         self.model_combo.setEnabled(False)
         self._btn_pref_view.hide()
         self.pending_results = []
@@ -1044,6 +1052,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         if done:
             self._running = False
             self._stop_pulse()
+            self.btn_input.setText(t("button.compose"))
             self.btn_input.setEnabled(True)
             self.model_combo.setEnabled(True)
             if self._history and (self.tokens_in or self.tokens_out):
@@ -1127,10 +1136,11 @@ class ChatNodeWidget(QWidget, BaseNode):
                 self._history[-1]["tokens_out"] = self.tokens_out
 
         self._running = False
+        self.btn_input.setText(t("button.compose"))
         self.btn_input.setEnabled(True)
         self.model_combo.setEnabled(True)
         self._update_status("done")
-        if self._send_queue:  # 이미지 완료 후 대기 큐 처리
+        if self._send_queue:
             QTimer.singleShot(0, self._process_queue)
 
     def set_tokens(self, tokens_in: int, tokens_out: int):
