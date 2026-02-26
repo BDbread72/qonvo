@@ -168,3 +168,11 @@ from v.settings import get_setting, set_setting, get_api_keys
 ### get_data() / _materialize 체크리스트
 - 새 필드를 `get_data()`에 추가하면 → `_materialize`에서 복원 코드도 반드시 추가
 - UI 위젯 상태 (setChecked, setValue, setEnabled)는 명시적 복원. 시그널 부수효과에 의존하지 말 것
+
+## Command Interpretation (사용자 명령 해석)
+
+사용자의 자연어 명령을 아래 규칙에 따라 해석하고 실행할 것.
+
+| 사용자 표현 | 해석 | 실행 |
+|------------|------|------|
+| "작업 확인", "뭐 했는지 봐", "변경사항 확인" | 현재 작업 내용 리뷰 요청 | `git diff` + `git status`로 변경사항 보여주기 |

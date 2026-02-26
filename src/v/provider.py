@@ -450,8 +450,36 @@ class GeminiProvider:
             raise ValueError(f"Unknown model: {model}")
 
     def cancel(self):
-        """진행 중인 요청 취소"""
         self._cancel_requested = True
+
+    def _is_retryable(self, error):
+        """에러가 재시도 가능한지 판별한다. 503/429 상태코드 및 unavailable, deadline, overloaded, resource exhausted 유형을 재시도 대상으로 본다."""
+        msg = str(error).lower()
+        return (
+            "503" in msg or "unavailable" in msg
+            or "deadline" in msg or "overloaded" in msg
+            or "429" in msg or "resource exhausted" in msg
+            or "10053" in msg or "10054" in msg
+            or "connection" in msg and ("aborted" in msg or "reset" in msg)
+        )
+
+    def _retry_call(self, fn, max_retries=3, base_delay=2.0):
+        """지수 백오프(2s, 4s, 8s)로 fn을 재시도한다. 매 시도 전에 cancel 상태를 확인하고, 재시도 시 로그 경고를 남긴다."""
+        from v.logger import get_logger
+        logger = get_logger("qonvo.provider")
+        for attempt in range(max_retries + 1):
+            try:
+                return fn()
+            except Exception as e:
+                if self._cancel_requested:
+                    raise
+                if attempt == max_retries or not self._is_retryable(e):
+                    raise
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    f"[RETRY] attempt {attempt+1}/{max_retries} failed: {e} — retrying in {delay:.0f}s"
+                )
+                time.sleep(delay)
 
     # ============================================================
     # Gemini 3.0 Pro
@@ -483,10 +511,10 @@ class GeminiProvider:
         if stream:
             return self._stream_with_signatures(model_id, contents, config)
         else:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=contents,
-                config=config,
+            response = self._retry_call(
+                lambda: client.models.generate_content(
+                    model=model_id, contents=contents, config=config,
+                )
             )
             return response.text
 
@@ -519,10 +547,10 @@ class GeminiProvider:
         if stream:
             return self._stream_with_signatures("gemini-3-flash-preview", contents, config)
         else:
-            response = client.models.generate_content(
-                model="gemini-3-flash-preview",
-                contents=contents,
-                config=config,
+            response = self._retry_call(
+                lambda: client.models.generate_content(
+                    model="gemini-3-flash-preview", contents=contents, config=config,
+                )
             )
             return response.text
 
@@ -555,10 +583,10 @@ class GeminiProvider:
         if stream:
             return self._stream_with_signatures("gemini-2.5-pro", contents, config)
         else:
-            response = client.models.generate_content(
-                model="gemini-2.5-pro",
-                contents=contents,
-                config=config,
+            response = self._retry_call(
+                lambda: client.models.generate_content(
+                    model="gemini-2.5-pro", contents=contents, config=config,
+                )
             )
             return response.text
 
@@ -591,10 +619,10 @@ class GeminiProvider:
         if stream:
             return self._stream_with_signatures("gemini-2.5-flash", contents, config)
         else:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=contents,
-                config=config,
+            response = self._retry_call(
+                lambda: client.models.generate_content(
+                    model="gemini-2.5-flash", contents=contents, config=config,
+                )
             )
             return response.text
 
@@ -629,10 +657,10 @@ class GeminiProvider:
             safety_settings=self._get_safety_settings(),
         )
 
-        response = client.models.generate_content(
-            model="gemini-3-pro-image-preview",
-            contents=contents,
-            config=config,
+        response = self._retry_call(
+            lambda: client.models.generate_content(
+                model="gemini-3-pro-image-preview", contents=contents, config=config,
+            )
         )
 
         return self._parse_image_response(response)
@@ -668,10 +696,10 @@ class GeminiProvider:
             safety_settings=self._get_safety_settings(),
         )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
-            contents=contents,
-            config=config,
+        response = self._retry_call(
+            lambda: client.models.generate_content(
+                model="gemini-2.5-flash-image", contents=contents, config=config,
+            )
         )
 
         return self._parse_image_response(response)
@@ -735,10 +763,10 @@ class GeminiProvider:
             logger = None
 
         start_time = time.time()
-        result = client.models.generate_images(
-            model=f"models/{model}",
-            prompt=prompt,
-            config=config_dict,
+        result = self._retry_call(
+            lambda: client.models.generate_images(
+                model=f"models/{model}", prompt=prompt, config=config_dict,
+            )
         )
         elapsed = time.time() - start_time
 
@@ -759,24 +787,35 @@ class GeminiProvider:
         }
 
     def _stream_with_signatures(self, model, contents, config):
-        """스트리밍 + thought_signatures 수집 공통 메서드"""
+        """스트리밍 생성 결과를 전달하면서 thought_signature를 수집한다. 초기 연결 실패 시 재시도한다."""
         def stream_gen():
             usage = None
             sigs = []
             stream_error = None
             try:
-                for chunk in self._get_client().models.generate_content_stream(
-                    model=model,
-                    contents=contents,
-                    config=config,
-                ):
+                stream_iter = None
+                for attempt in range(4):
+                    try:
+                        stream_iter = self._get_client().models.generate_content_stream(
+                            model=model, contents=contents, config=config,
+                        )
+                        break
+                    except Exception as e:
+                        if self._cancel_requested or attempt == 3 or not self._is_retryable(e):
+                            raise
+                        delay = 2.0 * (2 ** attempt)
+                        from v.logger import get_logger
+                        get_logger("qonvo.provider").warning(
+                            f"[RETRY-STREAM] attempt {attempt+1}/3 failed: {e} — retrying in {delay:.0f}s"
+                        )
+                        time.sleep(delay)
+                for chunk in stream_iter:
                     if self._cancel_requested:
                         break
                     if chunk.text:
                         yield chunk.text
                     if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
                         usage = chunk.usage_metadata
-                    # thought_signatures 수집 (thinking 파트 제외)
                     if hasattr(chunk, 'candidates') and chunk.candidates:
                         for part in (chunk.candidates[0].content.parts or []):
                             if getattr(part, 'thought', False):
@@ -786,7 +825,6 @@ class GeminiProvider:
                                 encoded = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else sig
                                 sigs.append(encoded)
             except Exception as e:
-                # P2: 스트리밍 오류 발생 시에도 수집된 메타데이터 전달
                 stream_error = e
             # 메타데이터는 오류 여부와 무관하게 항상 전달
             if usage:

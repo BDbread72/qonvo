@@ -1,0 +1,5 @@
+{
+  "model": "gemini-2.5-flash",
+  "prompt": "What is 7 * 8? Answer with just the number.",
+  "system": "You are a calculator. Only output numbers."
+}

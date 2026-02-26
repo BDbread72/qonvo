@@ -1,0 +1,26 @@
+pyinstaller --onefile --noconsole --name qonvo --icon=icon.ico --distpath . `
+    --add-data "icon.ico;." `
+    --add-data "lang;lang" `
+    --add-data "build.toml;." `
+    --add-data "plugins;plugins" `
+    --add-data "icons;icons" `
+    --hidden-import "v.boards.whiteboard" `
+    --hidden-import "v.boards.whiteboard.plugin" `
+    --hidden-import "v.boards.whiteboard.view" `
+    --hidden-import "v.boards.whiteboard.chat_node" `
+    --hidden-import "v.boards.whiteboard.items" `
+    --hidden-import "v.boards.whiteboard.widgets" `
+    --hidden-import "v.boards.whiteboard.minimap" `
+    --hidden-import "v.boards.whiteboard.radial_menu" `
+    --hidden-import "v.boards.whiteboard.search_bar" `
+    --hidden-import "v.boards.whiteboard.dimension_item" `
+    --hidden-import "v.boards.whiteboard.function_node" `
+    --hidden-import "v.boards.whiteboard.sticky_note" `
+    --hidden-import "v.boards.whiteboard.button_node" `
+    --hidden-import "v.boards.whiteboard.round_table" `
+    --hidden-import "v.boards.whiteboard.checklist" `
+    --hidden-import "v.boards.whiteboard.repository_node" `
+    --hidden-import "v.boards.whiteboard.function_library" `
+    --hidden-import "v.boards.whiteboard.function_editor" `
+    --hidden-import "v.data_viewer" `
+    ./src/main.py

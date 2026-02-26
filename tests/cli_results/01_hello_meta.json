@@ -1,0 +1,7 @@
+{
+  "model": "gemini-2.5-flash",
+  "prompt_tokens": 15,
+  "candidates_tokens": 21,
+  "elapsed_seconds": 2.83,
+  "error": null
+}
