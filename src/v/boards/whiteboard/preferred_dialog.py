@@ -40,8 +40,8 @@ class PreferredResultsWindow(QWidget):
 
     def _setup_ui(self):
         self.setWindowTitle("Preferred Options - 결과 선택")
-        self.setMinimumSize(900, 600)
-        self.resize(1100, 700)
+        self.setMinimumSize(600, 400)
+        self.resize(800, 550)
         self.setStyleSheet(f"background-color: {Theme.BG_PRIMARY};")
 
         layout = QVBoxLayout(self)
@@ -177,11 +177,15 @@ class PreferredResultsWindow(QWidget):
             pixmap = self._decode_pixmap(images[0])
             if pixmap and not pixmap.isNull():
                 img_label = QLabel()
+                dpr = self.devicePixelRatio() or 1.0
+                max_logical = 320
+                max_px = int(max_logical * dpr)
                 scaled = pixmap.scaled(
-                    400, 400,
+                    max_px, max_px,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                scaled.setDevicePixelRatio(dpr)
                 img_label.setPixmap(scaled)
                 img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 img_label.setStyleSheet("border: none; padding: 4px;")

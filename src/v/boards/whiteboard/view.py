@@ -699,14 +699,7 @@ class WhiteboardView(QGraphicsView):
         if event.type() == event.Type.KeyPress:
             key_event = event
             if key_event.key() == Qt.Key.Key_Tab:
-                # Tab 키는 메뉴 열기의 핵심이므로, 포커스 체크 무시
-                # (포커스된 텍스트 입력 필드를 명시적으로 제외해야 함)
-                from PyQt6.QtWidgets import QApplication, QLineEdit, QTextEdit, QPlainTextEdit
-                focus_widget = QApplication.focusWidget()
-
-                # 텍스트 입력 필드 중: 실제 텍스트 편집 중인 경우만 무시
-                if isinstance(focus_widget, (QLineEdit, QTextEdit, QPlainTextEdit)):
-                    # 텍스트 입력 중이면 Tab 키 통과 (포커스 이동)
+                if self._has_focused_input():
                     return False
 
                 if not key_event.isAutoRepeat() and not self._tab_held:
@@ -750,25 +743,28 @@ class WhiteboardView(QGraphicsView):
     # ── 와이어링 모드 (Space 키 포트/엣지 페이드) ──
 
     def _has_focused_input(self):
-        """씬에 포커스된 아이템이 있는지 확인"""
-        # 씬에 포커스된 아이템이 있으면 키 캡처하지 않음
+        from PyQt6.QtWidgets import (
+            QApplication, QLineEdit, QTextEdit, QPlainTextEdit,
+            QGraphicsTextItem, QGraphicsProxyWidget,
+        )
+        _TEXT_TYPES = (QLineEdit, QTextEdit, QPlainTextEdit)
         focus_item = self.scene().focusItem()
-        if focus_item is not None:
-            # 잠긴 그룹은 포커스 차단 대상에서 제외
-            if isinstance(focus_item, GroupFrameItem) and getattr(focus_item, '_locked', False):
-                pass
-            else:
+        if isinstance(focus_item, QGraphicsTextItem):
+            if focus_item.textInteractionFlags() & Qt.TextInteractionFlag.TextEditable:
                 return True
-
-        # 앱 전체에서 포커스 위젯 확인
-        from PyQt6.QtWidgets import QApplication
+        if isinstance(focus_item, QGraphicsProxyWidget):
+            w = focus_item.widget()
+            if w:
+                fw = w.focusWidget()
+                if isinstance(fw, _TEXT_TYPES):
+                    return True
         focus_widget = QApplication.focusWidget()
-
-        # 뷰/뷰포트가 아닌 곳에 포커스가 있으면 키 캡처하지 않음
-        if focus_widget is not None:
-            if focus_widget is not self and focus_widget is not self.viewport():
+        if focus_widget is not None and focus_widget is not self and focus_widget is not self.viewport():
+            if isinstance(focus_widget, _TEXT_TYPES):
                 return True
-
+            parent = focus_widget.parent()
+            if parent and isinstance(parent, _TEXT_TYPES):
+                return True
         return False
 
     def _start_wire_fade(self, show: bool):
