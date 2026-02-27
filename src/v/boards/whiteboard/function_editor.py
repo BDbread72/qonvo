@@ -17,7 +17,7 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QWheelEvent, QMouseEvent
 
 from v.theme import Theme
 from q import t
-from v.model_plugin import get_all_models, get_all_model_ids
+from v.model_plugin import get_all_models, get_all_model_ids, get_all_model_options
 from .function_types import (
     FunctionDefinition, FunctionNode, FunctionEdge, FunctionParameter,
     DataType, NodeType, CATEGORY_COLORS,
@@ -254,8 +254,12 @@ class NodeConfigDialog(QDialog):
         layout.addWidget(self._img_model_combo)
 
         self._add_label(layout, "Aspect Ratio")
+        model_id = config.get("model", "")
+        all_opts = get_all_model_options()
+        ar_spec = all_opts.get(model_id, {}).get("aspect_ratio", {})
+        ratio_values = ar_spec.get("values", ["1:1", "16:9", "9:16", "4:3", "3:4"])
         self._ratio_combo = self._make_combo(
-            ["1:1", "16:9", "9:16", "4:3", "3:4"],
+            ratio_values,
             config.get("aspect_ratio", "1:1"),
         )
         layout.addWidget(self._ratio_combo)

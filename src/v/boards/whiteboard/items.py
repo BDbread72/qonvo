@@ -176,8 +176,8 @@ class PortItem(QGraphicsEllipseItem):
         # 포트 데이터 타입 (기본값: str)
         self.port_data_type = data_type if data_type else self.TYPE_STRING
 
-        # 다중 연결 허용 (True면 INPUT 포트에도 여러 엣지 가능)
         self.multi_connect = False
+        self.port_value = None
 
         # 색상: 지정값 → 타입별 색상 → 인덱스 기반 자동 할당
         if color:

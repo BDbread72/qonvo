@@ -4,7 +4,7 @@ import copy
 import os
 from typing import Any, Dict, List, Optional
 
-from PyQt6.QtCore import QPointF, QRectF, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsProxyWidget, QGraphicsScene
 
 from v.boards.base import BoardPlugin
@@ -31,6 +31,9 @@ from .round_table import RoundTableWidget
 from .checklist import ChecklistWidget
 
 from .repository_node import RepositoryNodeWidget
+from .nixi_node import NixiNodeWidget
+from .ups_node import UpsNodeWidget
+from .rmv_node import RmvNodeWidget
 from .function_library import FunctionLibraryDialog
 from .function_editor import FunctionEditorDialog
 from .function_types import FunctionDefinition
@@ -167,6 +170,9 @@ class WhiteBoardPlugin(BoardPlugin):
         self.checklist_proxies: Dict[int, QGraphicsProxyWidget] = {}
 
         self.repository_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.nixi_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.ups_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.rmv_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.text_items: Dict[int, TextItem] = {}
         self.group_frame_items: Dict[int, GroupFrameItem] = {}
         self.image_card_items: Dict[int, ImageCardItem] = {}
@@ -198,6 +204,7 @@ class WhiteBoardPlugin(BoardPlugin):
         # 차원 간 부모 참조
         self._parent_plugin: Optional['WhiteBoardPlugin'] = None
         self._parent_dimension_item: Optional[DimensionItem] = None
+        self._history_search_window = None
 
         # Phase 4: 30 FPS 타이머 제거, 이벤트 기반 업데이트로 전환
         # self._edge_timer = QTimer()  # [REMOVED]
@@ -328,7 +335,6 @@ class WhiteBoardPlugin(BoardPlugin):
         return port
 
     def _create_ports(self, proxy, widget):
-        """노드에 입출력 포트 생성 (데이터 + 신호)"""
         widget.input_port = self._add_port(
             PortItem.INPUT, proxy, name="이전 대화",
             index=0, total=2, data_type=PortItem.TYPE_STRING)
@@ -341,6 +347,45 @@ class WhiteBoardPlugin(BoardPlugin):
         widget.signal_output_port = self._add_port(
             PortItem.OUTPUT, proxy, name="⚡ 완료",
             index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+
+    def _toggle_meta_ports(self, node):
+        """meta_ports_enabled 상태에 따라 메타 포트를 활성화하거나 비활성화한다."""
+        if node.meta_ports_enabled:
+            self._enable_meta_ports(node)
+        else:
+            self._disable_meta_ports(node)
+
+    def _enable_meta_ports(self, node):
+        """elapsed_time, model_name, tokens 메타 출력 포트 3개를 생성하고 포트 인덱스를 재정렬한다."""
+        proxy = node.proxy
+        if proxy is None or node.meta_output_ports:
+            return
+        node.meta_output_ports["elapsed_time"] = self._add_port(
+            PortItem.OUTPUT, proxy, name="elapsed_time",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        node.meta_output_ports["model_name"] = self._add_port(
+            PortItem.OUTPUT, proxy, name="model_name",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        node.meta_output_ports["tokens"] = self._add_port(
+            PortItem.OUTPUT, proxy, name="tokens",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        self._reindex_chat_input_ports(node)
+
+    def _disable_meta_ports(self, node):
+        """메타 포트와 해당 포트에 연결된 엣지를 삭제하고 포트 인덱스를 재정렬한다."""
+        if not node.meta_output_ports:
+            return
+        for port in list(node.meta_output_ports.values()):
+            for edge in list(port.edges):
+                self.remove_edge(edge)
+            if port.scene():
+                self.scene.removeItem(port)
+            if hasattr(port, 'label') and port.label and port.label.scene():
+                self.scene.removeItem(port.label)
+            if self.view and port in self.view._all_port_items:
+                self.view._all_port_items.discard(port)
+        node.meta_output_ports.clear()
+        self._reindex_chat_input_ports(node)
 
     # ── Chat 노드 동적 입력 포트 관리 ──
 
@@ -395,7 +440,6 @@ class WhiteBoardPlugin(BoardPlugin):
         self._notify_modified()
 
     def _reindex_chat_input_ports(self, node):
-        """Chat 노드의 입력 포트 인덱스 재조정"""
         all_input = []
         if node.input_port:
             all_input.append(node.input_port)
@@ -408,6 +452,20 @@ class WhiteBoardPlugin(BoardPlugin):
         for i, port in enumerate(all_input):
             port.port_index = i
             port.port_total = total
+            port.reposition()
+
+        all_output = []
+        if node.output_port:
+            all_output.append(node.output_port)
+        if node.signal_output_port:
+            all_output.append(node.signal_output_port)
+        meta = getattr(node, 'meta_output_ports', {})
+        for pname in sorted(meta.keys()):
+            all_output.append(meta[pname])
+        out_total = len(all_output)
+        for i, port in enumerate(all_output):
+            port.port_index = i
+            port.port_total = out_total
             port.reposition()
 
     def _notify_modified(self):
@@ -425,7 +483,8 @@ class WhiteBoardPlugin(BoardPlugin):
         for edge in list(self._edges):
             edge.update_path()
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.button_proxies, self.checklist_proxies):
+                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.checklist_proxies, self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             for proxy in d.values():
                 node = proxy.widget()
                 if node and hasattr(node, "reposition_ports"):
@@ -437,6 +496,7 @@ class WhiteBoardPlugin(BoardPlugin):
         node.on_cancel = self._cancel_node_workers
         node.on_add_port = self._add_chat_input_port
         node.on_remove_port = self._remove_chat_input_port
+        node.on_toggle_meta = self._toggle_meta_ports
         proxy = self._add_proxy(node, node_id, pos, self.proxies)
         self._create_ports(proxy, node)
         QTimer.singleShot(0, node.reposition_ports)
@@ -745,6 +805,63 @@ class WhiteBoardPlugin(BoardPlugin):
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
+    def add_nixi(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = NixiNodeWidget(node_id, on_modified=self._notify_modified)
+        proxy = self._add_proxy(node, node_id, pos, self.nixi_proxies)
+        node.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="입력",
+            index=0, total=2, data_type=PortItem.TYPE_STRING)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ 실행",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def _create_signal_ports(self, proxy, widget):
+        widget.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="입력",
+            index=0, total=2, data_type=PortItem.TYPE_FILE)
+        widget.output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="출력",
+            index=0, total=2, data_type=PortItem.TYPE_FILE)
+        widget.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ 실행",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        widget.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 완료",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+
+    def add_ups(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = UpsNodeWidget(node_id, on_modified=self._notify_modified)
+        proxy = self._add_proxy(node, node_id, pos, self.ups_proxies)
+        self._create_signal_ports(proxy, node)
+        _orig_on_done = node._on_done
+        def _ups_done_hook():
+            _orig_on_done()
+            if node.output_port:
+                node.output_port.port_value = node.ai_response
+            self._emit_complete_signal(node)
+        node._on_done = _ups_done_hook
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_rmv(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = RmvNodeWidget(node_id, on_modified=self._notify_modified)
+        proxy = self._add_proxy(node, node_id, pos, self.rmv_proxies)
+        self._create_signal_ports(proxy, node)
+        _orig_on_finished = node._on_finished
+        def _rmv_done_hook(result_path):
+            _orig_on_finished(result_path)
+            if node.output_port:
+                node.output_port.port_value = node.ai_response
+            self._emit_complete_signal(node)
+        node._on_finished = _rmv_done_hook
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
     def add_text_item(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
         if pos is None:
@@ -787,6 +904,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 ("function", "Function", lambda: self.add_function(scene_pos)),
                 ("round_table", "Round Table", lambda: self.add_round_table(scene_pos)),
                 ("repository", "자료함", lambda: self.add_repository(scene_pos)),
+                ("nixi", "Nixi", lambda: self.add_nixi(scene_pos)),
             ]
         elif category == "notes":
             return [
@@ -799,6 +917,8 @@ class WhiteBoardPlugin(BoardPlugin):
             return [
                 ("image", "Image", lambda: self.add_image_card("", scene_pos)),
                 ("dimension", "Dimension", lambda: self.add_dimension_item(scene_pos)),
+                ("ups", "Upscale", lambda: self.add_ups(scene_pos)),
+                ("rmv", "Remove BG", lambda: self.add_rmv(scene_pos)),
             ]
         elif category == "ui":
             return [
@@ -909,7 +1029,8 @@ class WhiteBoardPlugin(BoardPlugin):
 
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.button_proxies,
-                  self.checklist_proxies, self.repository_proxies):
+                  self.checklist_proxies, self.repository_proxies,
+                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             d.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
         if self.scene:
@@ -979,8 +1100,9 @@ class WhiteBoardPlugin(BoardPlugin):
             ToastManager.instance().show_toast(f"{node_name} - 완료", main_window)
 
         # 1. signal_output_port(⚡ 완료)로 신호 전달
+        _node_ai_response = getattr(node, 'ai_response', None)
         if hasattr(node, 'signal_output_port') and node.signal_output_port is not None:
-            self.emit_signal(node.signal_output_port)
+            self.emit_signal(node.signal_output_port, data=_node_ai_response)
 
         # 2. 출력 포트에 연결된 노드들 자동 실행
         output_port_to_check = None
@@ -1025,7 +1147,7 @@ class WhiteBoardPlugin(BoardPlugin):
                     if target_node is None:
                         continue
                     if hasattr(target_node, 'on_signal_input'):
-                        target_node.on_signal_input()
+                        target_node.on_signal_input(input_data=_node_ai_response)
 
     def _update_image_card(self, card: ImageCardItem, source_node, images=None):
         """ImageCardItem에 이미지 데이터 설정 (소스 노드 또는 images에서 추출)"""
@@ -1865,7 +1987,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
         # ⚡ 완료 신호 발송 (타겟 전달은 위에서 이미 처리)
         if hasattr(node, 'signal_output_port') and node.signal_output_port is not None:
-            self.emit_signal(node.signal_output_port)
+            self.emit_signal(node.signal_output_port, data=getattr(node, 'ai_response', None))
 
         # 완료 알림 (토스트)
         notify = getattr(node, 'notify_on_complete', False)
@@ -1958,8 +2080,8 @@ class WhiteBoardPlugin(BoardPlugin):
         logger.info(f"[IMAGE_PAYLOAD] node={nid}, images={len(images)}, text_len={len(text)}")
         try:
             if not images:
-                # 이미지가 없으면 오류 메시지로 응답 처리
-                error_msg = text if text else "이미지 생성 실패"
+                error_msg = text if text else "[이미지 생성 실패: API 응답에 이미지 없음]"
+                logger.warning(f"[IMAGE_PAYLOAD] node={nid} no images: {error_msg!r}")
                 node.set_response(error_msg, done=True)
                 self._finish_worker(worker)
                 self._emit_complete_signal(node)
@@ -2066,6 +2188,18 @@ class WhiteBoardPlugin(BoardPlugin):
         # Keep compatibility with view double-click path.
         pass
 
+    def open_history_search(self):
+        from .history_search import HistorySearchDialog
+        if self._history_search_window is not None:
+            self._history_search_window.raise_()
+            self._history_search_window.activateWindow()
+            return
+        win = HistorySearchDialog(self)
+        win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        win.destroyed.connect(lambda: setattr(self, '_history_search_window', None))
+        self._history_search_window = win
+        win.show()
+
     def collect_data(self):
         data = {
             "type": "WhiteBoard",
@@ -2085,6 +2219,9 @@ class WhiteBoardPlugin(BoardPlugin):
             "checklists": [],
             "group_frames": [],
             "dimensions": [],
+            "nixi_nodes": [],
+            "ups_nodes": [],
+            "rmv_nodes": [],
             "next_id": self.app._next_id,
             "system_prompt": self.system_prompt,
             "system_files": list(self.system_files),
@@ -2107,6 +2244,12 @@ class WhiteBoardPlugin(BoardPlugin):
                 data["checklists"].append(node.get_data())
             elif isinstance(node, RepositoryNodeWidget):
                 data["repository_nodes"].append(node.get_data())
+            elif isinstance(node, NixiNodeWidget):
+                data["nixi_nodes"].append(node.get_data())
+            elif isinstance(node, UpsNodeWidget):
+                data["ups_nodes"].append(node.get_data())
+            elif isinstance(node, RmvNodeWidget):
+                data["rmv_nodes"].append(node.get_data())
             elif isinstance(node, TextItem):
                 data["texts"].append({
                     "id": node.node_id,
@@ -2213,7 +2356,8 @@ class WhiteBoardPlugin(BoardPlugin):
         "repository_nodes": "id", "texts": "id",
         "group_frames": "id", "sticky_notes": "node_id", "prompt_nodes": "node_id",
         "buttons": "node_id", "checklists": "node_id", "image_cards": "node_id",
-        "dimensions": "node_id",
+        "dimensions": "node_id", "nixi_nodes": "node_id",
+        "ups_nodes": "node_id", "rmv_nodes": "node_id",
     }
 
     def _categorize_selected_item(self, item):
@@ -2241,6 +2385,12 @@ class WhiteBoardPlugin(BoardPlugin):
                 return ("checklists", node_id, widget.get_data())
             elif isinstance(widget, RepositoryNodeWidget):
                 return ("repository_nodes", node_id, widget.get_data())
+            elif isinstance(widget, NixiNodeWidget):
+                return ("nixi_nodes", node_id, widget.get_data())
+            elif isinstance(widget, UpsNodeWidget):
+                return ("ups_nodes", node_id, widget.get_data())
+            elif isinstance(widget, RmvNodeWidget):
+                return ("rmv_nodes", node_id, widget.get_data())
         elif isinstance(item, TextItem):
             node_id = getattr(item, 'node_id', None)
             if node_id is None:
@@ -2485,6 +2635,8 @@ class WhiteBoardPlugin(BoardPlugin):
             from .items import ImageCardItem
             ChatNodeWidget._board_temp_dir = str(_temp)
             ImageCardItem._board_temp_dir = str(_temp)
+            UpsNodeWidget._board_temp_dir = str(_temp)
+            RmvNodeWidget._board_temp_dir = str(_temp)
 
         # === clear 로직 (기존 그대로) ===
         for edge in list(self._edges):
@@ -2492,7 +2644,8 @@ class WhiteBoardPlugin(BoardPlugin):
         if self.scene:
             for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                       self.sticky_proxies, self.prompt_proxies, self.button_proxies,
-                      self.checklist_proxies, self.repository_proxies):
+                      self.checklist_proxies, self.repository_proxies,
+                      self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
                 for proxy in d.values():
                     self._remove_ports_and_edges(self._collect_ports(proxy))
             for d in (self.image_card_items, self.dimension_items):
@@ -2515,6 +2668,12 @@ class WhiteBoardPlugin(BoardPlugin):
                 self.scene.removeItem(proxy)
             for proxy in list(self.repository_proxies.values()):
                 self.scene.removeItem(proxy)
+            for proxy in list(self.nixi_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.ups_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.rmv_proxies.values()):
+                self.scene.removeItem(proxy)
             for item in list(self.text_items.values()):
                 self.scene.removeItem(item)
             for item in list(self.group_frame_items.values()):
@@ -2533,6 +2692,9 @@ class WhiteBoardPlugin(BoardPlugin):
         self.checklist_proxies.clear()
 
         self.repository_proxies.clear()
+        self.nixi_proxies.clear()
+        self.ups_proxies.clear()
+        self.rmv_proxies.clear()
         self.text_items.clear()
         self.group_frame_items.clear()
         self.image_card_items.clear()
@@ -2627,6 +2789,9 @@ class WhiteBoardPlugin(BoardPlugin):
             "group_frames": self._materialize_group_frame,
             "image_cards": self._materialize_image_card,
             "dimensions": self._materialize_dimension,
+            "nixi_nodes": self._materialize_nixi_node,
+            "ups_nodes": self._materialize_ups_node,
+            "rmv_nodes": self._materialize_rmv_node,
         }
         handler = dispatch.get(category)
         if handler:
@@ -2656,6 +2821,10 @@ class WhiteBoardPlugin(BoardPlugin):
                 idx = node.ratio_combo.findText(saved_opts["aspect_ratio"])
                 if idx >= 0:
                     node.ratio_combo.setCurrentIndex(idx)
+            if "image_size" in saved_opts:
+                idx = node.size_combo.findText(saved_opts["image_size"])
+                if idx >= 0:
+                    node.size_combo.setCurrentIndex(idx)
             if "temperature" in saved_opts:
                 node.temp_spin.setValue(saved_opts["temperature"])
             if "top_p" in saved_opts:
@@ -2677,6 +2846,11 @@ class WhiteBoardPlugin(BoardPlugin):
         node.pref_count_spin.setEnabled(node.preferred_options_enabled)
         if row.get("opts_panel_visible", False):
             node.btn_opts_toggle.setChecked(True)
+        node.on_toggle_meta = self._toggle_meta_ports
+        if row.get("meta_ports_enabled", False):
+            node.meta_ports_enabled = True
+            node.btn_meta_toggle.setChecked(True)
+            self._enable_meta_ports(node)
         # extra input ports 복원
         for port_def in row.get("extra_input_defs", []):
             self._add_chat_input_port(node, port_def["type"], port_def.get("name"))
@@ -2888,6 +3062,49 @@ class WhiteBoardPlugin(BoardPlugin):
         self.app.nodes[node_id] = item
         self._attach_item_ports(item, PortItem.TYPE_STRING, PortItem.TYPE_STRING)
 
+    def _materialize_nixi_node(self, row):
+        proxy = self.add_nixi(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        value = row.get("current_value", "")
+        if value:
+            node._update_display(value)
+
+    def _materialize_ups_node(self, row):
+        proxy = self.add_ups(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        scale = row.get("scale", 2)
+        node._scale = scale
+        idx = node.scale_combo.findData(scale)
+        if idx >= 0:
+            node.scale_combo.setCurrentIndex(idx)
+        node._last_result_path = row.get("last_result_path")
+        node.ai_response = node._last_result_path
+        if node._last_result_path:
+            node.status_label.setText("Done")
+            node.status_label.setStyleSheet("color: #27ae60; font-size: 10px; border: none; background: transparent;")
+            node._update_preview()
+
+    def _materialize_rmv_node(self, row):
+        proxy = self.add_rmv(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        node._last_result_path = row.get("last_result_path")
+        node.ai_response = node._last_result_path
+        if node._last_result_path:
+            node.status_label.setText("Done")
+            node._update_preview(node._last_result_path)
+
     def _materialize_visible_items(self):
         """뷰포트 변경 시 호출 — 새로 보이는 pending 아이템을 배치 큐에 추가."""
         if not self._lazy_mgr.has_pending():
@@ -2963,11 +3180,14 @@ class WhiteBoardPlugin(BoardPlugin):
                     return port
                 else:
                     logger.debug(f"[RESOLVE PORT] output_port name mismatch: requested={name}, actual={port_name}")
-            # Boolean 신호 출력 포트 (⚡ 완료, ⚡ 신호 등)
             port = getattr(owner, "signal_output_port", None)
             if port is not None and hasattr(port, "port_name") and port.port_name == name:
                 logger.debug(f"[RESOLVE PORT] Found signal_output_port: {port.port_name}")
                 return port
+            meta_ports = getattr(owner, "meta_output_ports", None)
+            if isinstance(meta_ports, dict) and name in meta_ports:
+                logger.debug(f"[RESOLVE PORT] Found in meta_output_ports: {name}")
+                return meta_ports[name]
             logger.debug(f"[RESOLVE PORT] OUTPUT port '{name}' NOT FOUND")
             return None
         # 입력 포트 검색
@@ -3014,6 +3234,12 @@ class WhiteBoardPlugin(BoardPlugin):
             return self.image_card_items[node_id]
         if node_id in self.dimension_items:
             return self.dimension_items[node_id]
+        if node_id in self.nixi_proxies:
+            return self.nixi_proxies[node_id]
+        if node_id in self.ups_proxies:
+            return self.ups_proxies[node_id]
+        if node_id in self.rmv_proxies:
+            return self.rmv_proxies[node_id]
         return None
 
     def _restore_edge(self, row):
@@ -3097,6 +3323,21 @@ class WhiteBoardPlugin(BoardPlugin):
 
         # 자료함 노드
         for proxy in self.repository_proxies.values():
+            node = proxy.widget()
+            if node:
+                invalidated_count += self._invalidate_node_port_caches(node)
+
+        for proxy in self.nixi_proxies.values():
+            node = proxy.widget()
+            if node:
+                invalidated_count += self._invalidate_node_port_caches(node)
+
+        for proxy in self.ups_proxies.values():
+            node = proxy.widget()
+            if node:
+                invalidated_count += self._invalidate_node_port_caches(node)
+
+        for proxy in self.rmv_proxies.values():
             node = proxy.widget()
             if node:
                 invalidated_count += self._invalidate_node_port_caches(node)
@@ -3199,6 +3440,33 @@ class WhiteBoardPlugin(BoardPlugin):
 
         # 자료함 노드
         for proxy in self.repository_proxies.values():
+            node = proxy.widget()
+            if node and hasattr(node, 'reposition_ports'):
+                try:
+                    node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for proxy in self.nixi_proxies.values():
+            node = proxy.widget()
+            if node and hasattr(node, 'reposition_ports'):
+                try:
+                    node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for proxy in self.ups_proxies.values():
+            node = proxy.widget()
+            if node and hasattr(node, 'reposition_ports'):
+                try:
+                    node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for proxy in self.rmv_proxies.values():
             node = proxy.widget()
             if node and hasattr(node, 'reposition_ports'):
                 try:

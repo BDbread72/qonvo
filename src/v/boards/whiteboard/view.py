@@ -594,6 +594,11 @@ class WhiteboardView(QGraphicsView):
             self._select_all_items()
             event.accept()
             return
+        elif event.key() == Qt.Key.Key_H and event.modifiers() == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            if self.plugin:
+                self.plugin.open_history_search()
+            event.accept()
+            return
         elif event.key() == Qt.Key.Key_F and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
             self._toggle_search()
             event.accept()

@@ -19,6 +19,7 @@ MODELS = {
     "gemini-3-flash-preview": "Gemini 3.0 Flash",
     "gemini-2.5-pro": "Gemini 2.5 Pro",
     "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-3.1-flash-image-preview": "🍌Nanobanana 2",
     "gemini-3-pro-image-preview": "🍌Nanobanana Pro",
     "gemini-2.5-flash-image": "🍌Nanobanana",
     "imagen-4.0-generate-001": "🎨 Imagen 4",
@@ -62,13 +63,48 @@ _IMAGE_GEN_OPTIONS = {
     "top_p": _COMMON_GEN_OPTIONS["top_p"],
 }
 
-# 비율 옵션 (이미지 모델 공통)
-_ASPECT_RATIO_OPTION = {
+_IMAGEN_ASPECT_RATIO_OPTION = {
     "aspect_ratio": {
         "type": "choice",
         "label": "비율",
         "values": ["1:1", "16:9", "9:16", "4:3", "3:4"],
         "default": "1:1",
+    },
+}
+
+_NANOBANANA_ASPECT_RATIO_OPTION = {
+    "aspect_ratio": {
+        "type": "choice",
+        "label": "비율",
+        "values": ["1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9"],
+        "default": "1:1",
+    },
+}
+
+_NANOBANANA_31_SIZE_OPTION = {
+    "image_size": {
+        "type": "choice",
+        "label": "해상도",
+        "values": ["512px", "1K", "2K", "4K"],
+        "default": "1K",
+    },
+}
+
+_NANOBANANA_SIZE_OPTION = {
+    "image_size": {
+        "type": "choice",
+        "label": "해상도",
+        "values": ["1K", "2K", "4K"],
+        "default": "1K",
+    },
+}
+
+_IMAGEN_SIZE_OPTION = {
+    "image_size": {
+        "type": "choice",
+        "label": "해상도",
+        "values": ["1K", "2K"],
+        "default": "1K",
     },
 }
 
@@ -121,22 +157,37 @@ MODEL_OPTIONS = {
         },
         **_COMMON_GEN_OPTIONS,
     },
+    "gemini-3.1-flash-image-preview": {
+        "thinking_level": {
+            "type": "choice",
+            "label": "Thinking",
+            "values": ["MINIMAL", "LOW", "MEDIUM", "HIGH"],
+            "default": "MINIMAL",
+        },
+        **_NANOBANANA_ASPECT_RATIO_OPTION,
+        **_NANOBANANA_31_SIZE_OPTION,
+        **_IMAGE_GEN_OPTIONS,
+    },
     "gemini-3-pro-image-preview": {
-        **_ASPECT_RATIO_OPTION,
+        **_NANOBANANA_ASPECT_RATIO_OPTION,
+        **_NANOBANANA_SIZE_OPTION,
         **_IMAGE_GEN_OPTIONS,
     },
     "gemini-2.5-flash-image": {
-        **_ASPECT_RATIO_OPTION,
+        **_NANOBANANA_ASPECT_RATIO_OPTION,
+        **_NANOBANANA_SIZE_OPTION,
         **_IMAGE_GEN_OPTIONS,
     },
     "imagen-4.0-generate-001": {
-        **_ASPECT_RATIO_OPTION,
+        **_IMAGEN_ASPECT_RATIO_OPTION,
+        **_IMAGEN_SIZE_OPTION,
     },
     "imagen-4.0-ultra-generate-001": {
-        **_ASPECT_RATIO_OPTION,
+        **_IMAGEN_ASPECT_RATIO_OPTION,
+        **_IMAGEN_SIZE_OPTION,
     },
     "imagen-4.0-fast-generate-001": {
-        **_ASPECT_RATIO_OPTION,
+        **_IMAGEN_ASPECT_RATIO_OPTION,
     },
 }
 
@@ -440,6 +491,8 @@ class GeminiProvider:
             return self._chat_gemini_25_pro(messages, stream, **options)
         elif model == "gemini-2.5-flash":
             return self._chat_gemini_25_flash(messages, stream, **options)
+        elif model == "gemini-3.1-flash-image-preview":
+            return self._chat_nanobanana_31(messages, stream, **options)
         elif model == "gemini-3-pro-image-preview":
             return self._chat_nanobanana_pro(messages, stream, **options)
         elif model == "gemini-2.5-flash-image":
@@ -632,7 +685,7 @@ class GeminiProvider:
     def _chat_nanobanana_pro(
         self,
         messages: List[ChatMessage],
-        stream: bool,  # 미사용 (이미지 생성은 동기식만)
+        stream: bool,
         **options
     ) -> dict:
         """
@@ -645,12 +698,14 @@ class GeminiProvider:
         contents = self._convert_messages(messages)
 
         aspect_ratio = options.get("aspect_ratio", "1:1")
+        image_size = options.get("image_size", "1K")
 
         config = types.GenerateContentConfig(
             system_instruction=options.get("_sys_instr"),
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(
                 aspect_ratio=aspect_ratio,
+                image_size=image_size,
             ),
             temperature=options.get("temperature"),
             top_p=options.get("top_p"),
@@ -671,7 +726,7 @@ class GeminiProvider:
     def _chat_nanobanana(
         self,
         messages: List[ChatMessage],
-        stream: bool,  # 미사용 (이미지 생성은 동기식만)
+        stream: bool,
         **options
     ) -> dict:
         """
@@ -684,12 +739,14 @@ class GeminiProvider:
         contents = self._convert_messages(messages)
 
         aspect_ratio = options.get("aspect_ratio", "1:1")
+        image_size = options.get("image_size", "1K")
 
         config = types.GenerateContentConfig(
             system_instruction=options.get("_sys_instr"),
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(
                 aspect_ratio=aspect_ratio,
+                image_size=image_size,
             ),
             temperature=options.get("temperature"),
             top_p=options.get("top_p"),
@@ -703,6 +760,91 @@ class GeminiProvider:
         )
 
         return self._parse_image_response(response)
+
+    # ============================================================
+    # Nanobanana 3.1 (스트리밍 이미지 생성)
+    # ============================================================
+    def _chat_nanobanana_31(
+        self,
+        messages: List[ChatMessage],
+        stream: bool,
+        **options
+    ) -> dict:
+        _ = stream
+        client = self._get_client()
+        contents = self._convert_messages(messages)
+
+        aspect_ratio = options.get("aspect_ratio", "1:1")
+        thinking_level = options.get("thinking_level", "MINIMAL")
+
+        image_size = options.get("image_size", "1K")
+
+        config = types.GenerateContentConfig(
+            system_instruction=options.get("_sys_instr"),
+            response_modalities=["IMAGE", "TEXT"],
+            thinking_config=types.ThinkingConfig(
+                thinking_level=thinking_level,
+            ),
+            image_config=types.ImageConfig(
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+            ),
+            temperature=options.get("temperature"),
+            top_p=options.get("top_p"),
+            safety_settings=self._get_safety_settings(),
+        )
+
+        result = {"text": "", "images": [], "thought_signatures": []}
+        image_sigs = []
+        text_sig = None
+        last_chunk = None
+
+        for chunk in self._retry_call(
+            lambda: client.models.generate_content_stream(
+                model="gemini-3.1-flash-image-preview", contents=contents, config=config,
+            )
+        ):
+            last_chunk = chunk
+            if self._cancel_requested:
+                break
+            if chunk.parts is None:
+                continue
+            for part in chunk.parts:
+                if getattr(part, 'thought', False):
+                    continue
+                sig = getattr(part, 'thought_signature', None)
+                if isinstance(sig, bytes):
+                    sig = base64.b64encode(sig).decode('ascii')
+                if part.inline_data and part.inline_data.data:
+                    result["images"].append(part.inline_data.data)
+                    image_sigs.append(sig)
+                elif part.text:
+                    result["text"] += part.text
+                    text_sig = sig
+
+        result["thought_signatures"] = [text_sig] + image_sigs
+
+        if last_chunk and hasattr(last_chunk, 'usage_metadata') and last_chunk.usage_metadata:
+            result["prompt_tokens"] = getattr(last_chunk.usage_metadata, 'prompt_token_count', 0)
+            result["candidates_tokens"] = getattr(last_chunk.usage_metadata, 'candidates_token_count', 0)
+
+        if not result["images"] and not result["text"] and last_chunk:
+            try:
+                cands = getattr(last_chunk, 'candidates', None) or []
+                if cands:
+                    finish_reason = str(getattr(cands[0], 'finish_reason', '') or '')
+                    if finish_reason and finish_reason not in ('STOP', 'FinishReason.STOP'):
+                        result["text"] = f"[이미지 생성 실패: {finish_reason}]"
+                if not result["text"]:
+                    pf = getattr(last_chunk, 'prompt_feedback', None)
+                    if pf:
+                        br = str(getattr(pf, 'block_reason', '') or '')
+                        if br:
+                            result["text"] = f"[프롬프트 차단됨: {br}]"
+            except Exception:
+                pass
+
+        return result
 
     # ============================================================
     # Imagen 4.0 (순수 이미지 생성)
@@ -750,9 +892,8 @@ class GeminiProvider:
             "person_generation": "ALLOW_ADULT",
             "aspect_ratio": aspect_ratio,
         }
-        # image_size는 fast 모델에서 미지원
         if "fast" not in model:
-            config_dict["image_size"] = "1K"
+            config_dict["image_size"] = options.get("image_size", "1K")
 
         # Phase 4: 이미지 생성 소요 시간 로깅
         try:
@@ -774,7 +915,15 @@ class GeminiProvider:
             logger.info(f"Image generation completed in {elapsed:.2f}s")
 
         if not result.generated_images:
-            return {"text": "", "images": [], "thought_signatures": []}
+            reason = ""
+            try:
+                fr = str(getattr(result, 'finish_reason', '') or '')
+                if fr:
+                    reason = fr
+            except Exception:
+                pass
+            error_text = f"[이미지 생성 실패: {reason}]" if reason else "[이미지 생성 실패: 결과 없음]"
+            return {"text": error_text, "images": [], "thought_signatures": []}
 
         images = []
         for generated_image in result.generated_images:
@@ -937,17 +1086,21 @@ class GeminiProvider:
         contents = self._convert_messages(messages)
 
         # 모델별 GenerateContentConfig 빌드
-        is_nanobanana = model in ("gemini-3-pro-image-preview", "gemini-2.5-flash-image")
+        is_nanobanana = model in ("gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "gemini-2.5-flash-image")
 
         config_kwargs = {"safety_settings": self._get_safety_settings()}
         if sys_instr:
             config_kwargs["system_instruction"] = sys_instr
 
         if is_nanobanana:
-            config_kwargs["response_modalities"] = ["TEXT", "IMAGE"]
-            config_kwargs["image_config"] = types.ImageConfig(
-                aspect_ratio=options.get("aspect_ratio", "1:1"),
-            )
+            config_kwargs["response_modalities"] = ["IMAGE", "TEXT"]
+            img_cfg = {"aspect_ratio": options.get("aspect_ratio", "1:1")}
+            if model == "gemini-3.1-flash-image-preview":
+                img_cfg["image_size"] = options.get("image_size", "1K")
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_level=options.get("thinking_level", "MINIMAL"),
+                )
+            config_kwargs["image_config"] = types.ImageConfig(**img_cfg)
         elif model in ("gemini-3.1-pro-preview", "gemini-3-pro-preview", "gemini-3-flash-preview"):
             config_kwargs["thinking_config"] = types.ThinkingConfig(
                 thinking_level=options.get("thinking_level", "HIGH"),

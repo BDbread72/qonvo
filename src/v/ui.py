@@ -258,6 +258,11 @@ class MainWindow(QMainWindow):
         self.action_reset_zoom.triggered.connect(self._reset_zoom)
         self.action_reset_zoom.setEnabled(False)
 
+        self.action_search_history = view_menu.addAction(t("menu.search_history"))
+        self.action_search_history.setShortcut("Ctrl+Shift+H")
+        self.action_search_history.triggered.connect(self._open_history_search)
+        self.action_search_history.setEnabled(False)
+
         # 노드 메뉴 (보드 로드 후 활성화)
         self.node_menu = menubar.addMenu(t("menu.node"))
 
@@ -469,6 +474,7 @@ class MainWindow(QMainWindow):
         self.action_reset_view.setEnabled(True)
         self.action_reset_zoom.setEnabled(True)
         self.action_add_node.setEnabled(True)
+        self.action_search_history.setEnabled(True)
         self._update_title()
 
     def _add_node(self):
@@ -482,6 +488,10 @@ class MainWindow(QMainWindow):
 
         if hasattr(self.current_plugin, 'add_node'):
             self.current_plugin.add_node()
+
+    def _open_history_search(self):
+        if self.current_plugin and hasattr(self.current_plugin, 'open_history_search'):
+            self.current_plugin.open_history_search()
 
     def _center_view(self):
         if not self.current_plugin:

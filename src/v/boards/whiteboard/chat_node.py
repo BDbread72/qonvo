@@ -11,6 +11,7 @@ import copy
 import math
 import os
 import tempfile
+import time
 import uuid
 
 from PyQt6.QtWidgets import (
@@ -28,12 +29,15 @@ from .widgets import DraggableHeader, ResizeHandle, InputDialog
 
 
 class ChatLogWindow(QWidget):
-    """Chat execution history log window."""
+
+    _PAGE_SIZE = 10
 
     def __init__(self, node_id, history, parent=None):
         super().__init__(parent, Qt.WindowType.Window)
         self._node_id = node_id
         self._history = history
+        self._current_page = 0
+        self._total_pages = max(1, (len(history) + self._PAGE_SIZE - 1) // self._PAGE_SIZE)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._setup_ui()
 
@@ -47,38 +51,59 @@ class ChatLogWindow(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(f"""
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(f"""
             QScrollArea {{
                 background-color: {Theme.BG_PRIMARY};
                 border: none;
             }}
         """)
 
-        content = QWidget()
-        content.setStyleSheet("background: transparent;")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(16)
-        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._content = QWidget()
+        self._content.setStyleSheet("background: transparent;")
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(16)
+        self._content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        if not self._history:
-            empty_label = QLabel(t("chat.log_no_history"))
-            empty_label.setStyleSheet(
-                f"color: {Theme.TEXT_DISABLED}; font-size: 13px; padding: 20px;"
-            )
-            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            content_layout.addWidget(empty_label)
-        else:
-            for i, entry in enumerate(self._history):
-                entry_frame = self._create_entry_widget(i, entry)
-                content_layout.addWidget(entry_frame)
+        self._scroll.setWidget(self._content)
+        layout.addWidget(self._scroll)
 
-        scroll.setWidget(content)
-        layout.addWidget(scroll)
+        if len(self._history) > self._PAGE_SIZE:
+            nav_bar = QHBoxLayout()
+            nav_bar.setSpacing(8)
 
-        # close button
+            nav_btn_style = f"""
+                QPushButton {{
+                    background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_PRIMARY};
+                    border: 1px solid {Theme.NODE_BORDER}; border-radius: 6px;
+                    font-size: 11px; padding: 4px 12px;
+                }}
+                QPushButton:hover {{ background-color: {Theme.BG_INPUT}; }}
+                QPushButton:disabled {{ color: {Theme.TEXT_DISABLED}; }}
+            """
+
+            self._btn_prev = QPushButton("< Prev")
+            self._btn_prev.setStyleSheet(nav_btn_style)
+            self._btn_prev.clicked.connect(self._prev_page)
+            nav_bar.addWidget(self._btn_prev)
+
+            nav_bar.addStretch()
+
+            self._page_label = QLabel()
+            self._page_label.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-size: 11px;")
+            nav_bar.addWidget(self._page_label)
+
+            nav_bar.addStretch()
+
+            self._btn_next = QPushButton("Next >")
+            self._btn_next.setStyleSheet(nav_btn_style)
+            self._btn_next.clicked.connect(self._next_page)
+            nav_bar.addWidget(self._btn_next)
+
+            layout.addLayout(nav_bar)
+
         btn_close = QPushButton(t("chat.log_close"))
         btn_close.setFixedHeight(36)
         btn_close.setStyleSheet(f"""
@@ -91,6 +116,46 @@ class ChatLogWindow(QWidget):
         """)
         btn_close.clicked.connect(self.close)
         layout.addWidget(btn_close)
+
+        self._render_page(self._current_page)
+
+    def _prev_page(self):
+        if self._current_page > 0:
+            self._current_page -= 1
+            self._render_page(self._current_page)
+
+    def _next_page(self):
+        if self._current_page < self._total_pages - 1:
+            self._current_page += 1
+            self._render_page(self._current_page)
+
+    def _render_page(self, page):
+        while self._content_layout.count():
+            item = self._content_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not self._history:
+            empty_label = QLabel(t("chat.log_no_history"))
+            empty_label.setStyleSheet(
+                f"color: {Theme.TEXT_DISABLED}; font-size: 13px; padding: 20px;"
+            )
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._content_layout.addWidget(empty_label)
+        else:
+            start = page * self._PAGE_SIZE
+            end = min(start + self._PAGE_SIZE, len(self._history))
+            for i in range(start, end):
+                entry_frame = self._create_entry_widget(i, self._history[i])
+                self._content_layout.addWidget(entry_frame)
+
+        if hasattr(self, '_page_label'):
+            self._page_label.setText(f"{page + 1} / {self._total_pages}")
+            self._btn_prev.setEnabled(page > 0)
+            self._btn_next.setEnabled(page < self._total_pages - 1)
+
+        self._scroll.verticalScrollBar().setValue(0)
 
     def _create_entry_widget(self, index, entry):
         frame = QFrame()
@@ -131,7 +196,54 @@ class ChatLogWindow(QWidget):
 
         fl.addLayout(header)
 
-        # user message
+        extra_texts = entry.get("extra_texts", [])
+        if extra_texts:
+            et_header = QLabel("Extra Inputs")
+            et_header.setStyleSheet(
+                f"color: {Theme.TEXT_TERTIARY}; font-size: 10px; font-weight: bold; border: none;"
+            )
+            fl.addWidget(et_header)
+            for et in extra_texts:
+                et_label = QLabel(et[:200] + ("..." if len(et) > 200 else ""))
+                et_label.setWordWrap(True)
+                et_label.setStyleSheet(
+                    f"background-color: #2a3a2a; border: 1px solid #3a4a3a; border-radius: 6px; "
+                    f"padding: 6px 8px; color: {Theme.TEXT_SECONDARY}; font-size: 11px;"
+                )
+                fl.addWidget(et_label)
+
+        extra_files = entry.get("extra_files", [])
+        if extra_files:
+            ef_header = QLabel("Extra Files")
+            ef_header.setStyleSheet(
+                f"color: {Theme.TEXT_TERTIARY}; font-size: 10px; font-weight: bold; border: none;"
+            )
+            fl.addWidget(ef_header)
+            for ef in extra_files:
+                ef_label = QLabel(os.path.basename(ef))
+                ef_label.setStyleSheet(
+                    f"color: {Theme.ACCENT_PRIMARY}; font-size: 10px; border: none; padding: 2px 4px;"
+                )
+                fl.addWidget(ef_label)
+
+        prompt_entries_list = entry.get("prompt_entries", [])
+        if prompt_entries_list:
+            pe_header = QLabel("Prompt Nodes")
+            pe_header.setStyleSheet(
+                f"color: {Theme.TEXT_TERTIARY}; font-size: 10px; font-weight: bold; border: none;"
+            )
+            fl.addWidget(pe_header)
+            for pe in prompt_entries_list:
+                pe_text = pe.get("text", "")[:150]
+                pe_role = pe.get("role", "system")
+                pe_label = QLabel(f"[{pe_role}] {pe_text}")
+                pe_label.setWordWrap(True)
+                pe_label.setStyleSheet(
+                    f"background-color: #2a2a3a; border: 1px solid #3a3a4a; border-radius: 6px; "
+                    f"padding: 6px 8px; color: {Theme.TEXT_SECONDARY}; font-size: 11px;"
+                )
+                fl.addWidget(pe_label)
+
         user_msg = entry.get("user", "")
         if user_msg:
             user_header = QLabel(t("chat.log_user"))
@@ -289,6 +401,10 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._on_preferred_selected = None
         self._pref_window = None
         self._log_window = None
+        self.meta_output_ports = {}
+        self.meta_ports_enabled = False
+        self.on_toggle_meta = None
+        self._start_time = None
 
         # Multi-run history
         self._history = []            # [{"user": str, "files": [], "response": str, "images": [], "tokens_in": int, "tokens_out": int, "model": str}, ...]
@@ -444,6 +560,30 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.ratio_combo.hide()
         model_layout.addWidget(self.ratio_combo)
 
+        self.size_combo = QComboBox()
+        self.size_combo.setFixedWidth(60)
+        self.size_combo.setStyleSheet(
+            f"""
+            QComboBox {{
+                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
+                border-radius: 4px; padding: 4px 6px; font-size: 11px;
+            }}
+            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; }}
+            QComboBox::drop-down {{ border: none; width: 18px; }}
+            QComboBox::down-arrow {{
+                image: none; border-left: 4px solid transparent;
+                border-right: 4px solid transparent; border-top: 5px solid {Theme.TEXT_SECONDARY};
+                margin-right: 4px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
+                border: 1px solid #444; selection-background-color: {Theme.ACCENT_PRIMARY};
+            }}
+            """
+        )
+        self.size_combo.hide()
+        model_layout.addWidget(self.size_combo)
+
         # Generation options toggle button
         self.btn_opts_toggle = QPushButton("G")
         self.btn_opts_toggle.setFixedSize(24, 24)
@@ -459,6 +599,21 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.btn_opts_toggle.setToolTip("Generation Options")
         self.btn_opts_toggle.clicked.connect(self._toggle_opts_panel)
         model_layout.addWidget(self.btn_opts_toggle)
+
+        self.btn_meta_toggle = QPushButton("M")
+        self.btn_meta_toggle.setFixedSize(24, 24)
+        self.btn_meta_toggle.setCheckable(True)
+        self.btn_meta_toggle.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; border: none; font-size: 11px;
+                border-radius: 4px; color: {Theme.TEXT_TERTIARY};
+            }}
+            QPushButton:checked {{ background-color: #2a6; color: white; }}
+            QPushButton:hover {{ background-color: {Theme.BG_HOVER}; }}
+        """)
+        self.btn_meta_toggle.setToolTip("Meta Output Ports (elapsed_time / model_name / tokens)")
+        self.btn_meta_toggle.clicked.connect(self._on_meta_toggle_clicked)
+        model_layout.addWidget(self.btn_meta_toggle)
 
         model_layout.addStretch()
         layout.addWidget(model_bar)
@@ -660,14 +815,17 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         # Preferred results view button (shown when preferred results are ready)
         self._btn_pref_view = QPushButton("")
-        self._btn_pref_view.setFixedHeight(28)
+        self._btn_pref_view.setFixedHeight(32)
         self._btn_pref_view.setStyleSheet(f"""
             QPushButton {{
                 background-color: {Theme.ACCENT_PRIMARY}; color: white;
-                border: none; border-radius: 6px;
-                font-weight: bold; font-size: 11px; padding: 4px 12px;
+                border: 2px solid {Theme.ACCENT_HOVER}; border-radius: 7px;
+                font-weight: bold; font-size: 12px; padding: 4px 16px;
             }}
-            QPushButton:hover {{ background-color: {Theme.ACCENT_HOVER}; }}
+            QPushButton:hover {{
+                background-color: {Theme.ACCENT_HOVER};
+                border-color: white;
+            }}
         """)
         self._btn_pref_view.clicked.connect(self._open_preferred_window)
         self._btn_pref_view.hide()
@@ -753,14 +911,22 @@ class ChatNodeWidget(QWidget, BaseNode):
     def _toggle_opts_panel(self):
         self.opts_panel.setVisible(self.btn_opts_toggle.isChecked())
 
+    def _on_meta_toggle_clicked(self):
+        """메타 포트 토글 버튼 클릭 시 meta_ports_enabled를 갱신하고 on_toggle_meta 콜백을 호출한다."""
+        self.meta_ports_enabled = self.btn_meta_toggle.isChecked()
+        if self.on_toggle_meta:
+            self.on_toggle_meta(self)
+
     def _toggle_preferred(self, checked):
         self.preferred_options_enabled = checked
         self.pref_count_spin.setEnabled(checked)
 
     def show_preferred_results(self, results):
         """Preferred results ready -- update status and enable viewing."""
+        if self._pref_window is not None:
+            self._pref_window.close()
+            self._pref_window = None
         self.pending_results = results
-        self._pref_window = None
         self._running = False
         self._stop_pulse()
         self.btn_input.setText(t("button.compose"))
@@ -770,8 +936,9 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self._send_queue:  # preferred 완료 후 대기 큐 처리
             QTimer.singleShot(0, self._process_queue)
         count = len(results)
-        self._btn_pref_view.setText(f"{count} results")
+        self._btn_pref_view.setText(t("chat.preferred_candidates", count=count))
         self._btn_pref_view.show()
+        QTimer.singleShot(300, self._open_preferred_window)
 
         # 히스토리에 전체 후보 텍스트 저장 + 응답 텍스트 갱신
         summary = t("chat.preferred_done", count=count)
@@ -850,7 +1017,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         for port_name, port in self.input_ports.items():
             if not port.edges:
                 continue
-            source_proxy = port.edges[0].source_port.parent_proxy
+            source_port = port.edges[0].source_port
+            source_proxy = source_port.parent_proxy
             if not source_proxy:
                 continue
             source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
@@ -858,7 +1026,9 @@ class ChatNodeWidget(QWidget, BaseNode):
             is_image = port.port_data_type == port.TYPE_FILE
             if is_image:
                 path = None
-                if hasattr(source_node, 'image_path') and source_node.image_path:
+                if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+                    path = str(source_port.port_value)
+                elif hasattr(source_node, 'image_path') and source_node.image_path:
                     path = source_node.image_path
                 elif hasattr(source_node, 'ai_response') and source_node.ai_response:
                     path = source_node.ai_response
@@ -866,7 +1036,9 @@ class ChatNodeWidget(QWidget, BaseNode):
                     files.append(path)
             else:
                 text = None
-                if hasattr(source_node, 'ai_response') and source_node.ai_response:
+                if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+                    text = str(source_port.port_value)
+                elif hasattr(source_node, 'ai_response') and source_node.ai_response:
                     text = source_node.ai_response
                 elif hasattr(source_node, 'text_content') and source_node.text_content:
                     text = source_node.text_content
@@ -905,6 +1077,19 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.ratio_combo.show()
         else:
             self.ratio_combo.hide()
+        size_spec = opts.get("image_size")
+        if size_spec and "values" in size_spec:
+            self.size_combo.blockSignals(True)
+            self.size_combo.clear()
+            self.size_combo.addItems(size_spec["values"])
+            default_sz = size_spec.get("default", "")
+            idx = self.size_combo.findText(default_sz)
+            if idx >= 0:
+                self.size_combo.setCurrentIndex(idx)
+            self.size_combo.blockSignals(False)
+            self.size_combo.show()
+        else:
+            self.size_combo.hide()
         if "temperature" in opts:
             self.temp_spin.setValue(opts["temperature"]["default"])
         if "top_p" in opts:
@@ -938,19 +1123,26 @@ class ChatNodeWidget(QWidget, BaseNode):
     def send(self, message, files=None):
         self._send(message, files or [])
 
+    def _collect_node_options(self, model=None):
+        model = model or self.model_combo.currentData()
+        node_options = {}
+        opts = get_all_model_options().get(model, {})
+        if "aspect_ratio" in opts:
+            node_options["aspect_ratio"] = self.ratio_combo.currentText()
+        if "image_size" in opts:
+            node_options["image_size"] = self.size_combo.currentText()
+        if "temperature" in opts:
+            node_options["temperature"] = self.temp_spin.value()
+        if "top_p" in opts:
+            node_options["top_p"] = self.top_p_spin.value()
+        if "max_output_tokens" in opts:
+            node_options["max_output_tokens"] = self.max_tokens_spin.value()
+        return node_options
+
     def _send(self, msg, files):
-        if self._running:  # 이미 실행 중이면 스냅샷 찍어 큐에 적재
+        if self._running:
             model = self.model_combo.currentData()
-            node_options = {}
-            opts = get_all_model_options().get(model, {})
-            if "aspect_ratio" in opts:
-                node_options["aspect_ratio"] = self.ratio_combo.currentText()
-            if "temperature" in opts:
-                node_options["temperature"] = self.temp_spin.value()
-            if "top_p" in opts:
-                node_options["top_p"] = self.top_p_spin.value()
-            if "max_output_tokens" in opts:
-                node_options["max_output_tokens"] = self.max_tokens_spin.value()
+            node_options = self._collect_node_options(model)
             extra_texts, extra_files, prompt_entries = self._collect_all_inputs()
             send_msg = msg
             if extra_texts:
@@ -962,24 +1154,18 @@ class ChatNodeWidget(QWidget, BaseNode):
                 "model": model, "node_options": node_options,
                 "send_msg": send_msg, "send_files": send_files,
                 "prompt_entries": prompt_entries,
+                "extra_texts": extra_texts,
+                "extra_files": extra_files,
             })
             return
 
         self._running = True
+        self._start_time = time.time()
         self.user_message = msg
         self.user_files = files
         self.model = self.model_combo.currentData()
 
-        self.node_options = {}
-        opts = get_all_model_options().get(self.model, {})
-        if "aspect_ratio" in opts:
-            self.node_options["aspect_ratio"] = self.ratio_combo.currentText()
-        if "temperature" in opts:
-            self.node_options["temperature"] = self.temp_spin.value()
-        if "top_p" in opts:
-            self.node_options["top_p"] = self.top_p_spin.value()
-        if "max_output_tokens" in opts:
-            self.node_options["max_output_tokens"] = self.max_tokens_spin.value()
+        self.node_options = self._collect_node_options(self.model)
 
         extra_texts, extra_files, prompt_entries = self._collect_all_inputs()
         send_msg = msg
@@ -996,6 +1182,9 @@ class ChatNodeWidget(QWidget, BaseNode):
             "tokens_in": 0,
             "tokens_out": 0,
             "model": self.model,
+            "extra_texts": list(extra_texts),
+            "extra_files": list(extra_files),
+            "prompt_entries": list(prompt_entries),
         })
         self._current_streaming = ""
 
@@ -1014,6 +1203,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             return
         entry = self._send_queue.pop(0)
         self._running = True
+        self._start_time = time.time()
         self.user_message = entry["msg"]
         self.user_files = entry["files"]
         self.model = entry["model"]
@@ -1027,6 +1217,9 @@ class ChatNodeWidget(QWidget, BaseNode):
             "tokens_in": 0,
             "tokens_out": 0,
             "model": entry["model"],
+            "extra_texts": entry.get("extra_texts", []),
+            "extra_files": entry.get("extra_files", []),
+            "prompt_entries": entry.get("prompt_entries", []),
         })
         self._current_streaming = ""
 
@@ -1058,8 +1251,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             if self._history and (self.tokens_in or self.tokens_out):
                 self._history[-1]["tokens_in"] = self.tokens_in
                 self._history[-1]["tokens_out"] = self.tokens_out
+            elapsed = time.time() - self._start_time if self._start_time else 0
+            self._set_meta_port_values(elapsed)
             self._update_status("done")
-            if self._send_queue:  # 완료 후 대기 큐 처리
+            if self._send_queue:
                 QTimer.singleShot(0, self._process_queue)
 
     def _decode_image_data(self, img_data):
@@ -1136,6 +1331,8 @@ class ChatNodeWidget(QWidget, BaseNode):
                 self._history[-1]["tokens_out"] = self.tokens_out
 
         self._running = False
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        self._set_meta_port_values(elapsed)
         self.btn_input.setText(t("button.compose"))
         self.btn_input.setEnabled(True)
         self.model_combo.setEnabled(True)
@@ -1150,6 +1347,15 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self._history:
             self._history[-1]["tokens_in"] = tokens_in
             self._history[-1]["tokens_out"] = tokens_out
+
+    def _set_meta_port_values(self, elapsed):
+        meta = self.meta_output_ports
+        if "elapsed_time" in meta:
+            meta["elapsed_time"].port_value = f"{elapsed:.1f}s"
+        if "model_name" in meta:
+            meta["model_name"].port_value = self.model_combo.currentData() or ""
+        if "tokens" in meta:
+            meta["tokens"].port_value = f"{self.tokens_in:,} / {self.tokens_out:,}"
 
     def _show_tokens(self):
         self.tokens_label.setText(f"{self.tokens_in:,}  {self.tokens_out:,}")
@@ -1269,6 +1475,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             "preferred_options_enabled": self.preferred_options_enabled,
             "preferred_options_count": self.preferred_options_count,
             "opts_panel_visible": self.btn_opts_toggle.isChecked(),
+            "meta_ports_enabled": self.meta_ports_enabled,
             "history": copy.deepcopy(self._history),
         }
 

@@ -30,6 +30,9 @@ ID_KEY_MAP = {
     "image_cards": "node_id",
     "dimensions": "node_id",
     "prompt_nodes": "node_id",
+    "nixi_nodes": "node_id",
+    "ups_nodes": "node_id",
+    "rmv_nodes": "node_id",
 }
 
 # 기본 아이템 크기 (w, h가 없는 경우 사용)
@@ -47,6 +50,9 @@ _DEFAULT_SIZE = {
     "image_cards": (300, 300),
     "dimensions": (200, 200),
     "prompt_nodes": (240, 180),
+    "nixi_nodes": (200, 180),
+    "ups_nodes": (200, 150),
+    "rmv_nodes": (200, 150),
 }
 
 

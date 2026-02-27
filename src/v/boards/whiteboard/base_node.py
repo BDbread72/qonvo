@@ -82,6 +82,11 @@ class BaseNode:
             for port in out_ports.values():
                 add_port(port)
 
+        meta_ports = getattr(self, "meta_output_ports", None)
+        if isinstance(meta_ports, dict):
+            for port in meta_ports.values():
+                add_port(port)
+
         return ports
 
     def reposition_ports(self) -> None:
@@ -109,6 +114,9 @@ class BaseNode:
             return None
         source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
 
+        source_port = port.edges[0].source_port
+        if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+            return str(source_port.port_value)
         if hasattr(source_node, 'ai_response') and source_node.ai_response:
             return source_node.ai_response
         if hasattr(source_node, 'text_content') and source_node.text_content:
