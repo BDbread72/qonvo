@@ -36,8 +36,8 @@ class ChatLogWindow(QWidget):
         super().__init__(parent, Qt.WindowType.Window)
         self._node_id = node_id
         self._history = history
-        self._current_page = 0
         self._total_pages = max(1, (len(history) + self._PAGE_SIZE - 1) // self._PAGE_SIZE)
+        self._current_page = self._total_pages - 1
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._setup_ui()
 
@@ -155,7 +155,9 @@ class ChatLogWindow(QWidget):
             self._btn_prev.setEnabled(page > 0)
             self._btn_next.setEnabled(page < self._total_pages - 1)
 
-        self._scroll.verticalScrollBar().setValue(0)
+        self._scroll.verticalScrollBar().setValue(
+            self._scroll.verticalScrollBar().maximum()
+        )
 
     def _create_entry_widget(self, index, entry):
         frame = QFrame()
