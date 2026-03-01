@@ -1,0 +1,6 @@
+PyQt6
+google-genai
+cryptography
+prompt-toolkit
+rich
+tomli

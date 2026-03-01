@@ -3,7 +3,10 @@ i18n 모듈
 TOML 기반 다국어 지원. t("section.key") 로 번역 문자열 반환.
 """
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 from pathlib import Path
 
 

@@ -11,7 +11,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QIcon
 
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 from pathlib import Path
 
 from q import t

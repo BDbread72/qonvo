@@ -8,7 +8,10 @@ import shutil
 import struct
 import sys
 import threading
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 import zlib
 import zipfile
 from pathlib import Path
