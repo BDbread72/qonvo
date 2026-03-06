@@ -748,8 +748,8 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
 class ImageCardItem(SceneItemMixin, QGraphicsItem):
     """이미지 카드 아이템 - 보드에 이미지를 배치"""
 
-    # 보드별 이미지 임시 폴더 (plugin이 설정)
     _board_temp_dir: str | None = None
+    _nanobanana_ratio_cache: list[str] | None = None  # 나노바나나 비율 클래스 캐시
 
     def __init__(self, x: float, y: float, image_path: str = "", width: float = 0, height: float = 0):
         super().__init__()
@@ -792,6 +792,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setAcceptHoverEvents(True)
 
         self._resizing = False
         self._resize_start = None
@@ -974,6 +975,62 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._end_resize()
         self._initial_size = None
         super().mouseReleaseEvent(event)
+
+    def _nanobanana_ratios(self) -> list[str]:
+        """provider.py에서 비율을 가져오고 실패 시 fallback을 쓰며 클래스 캐시를 사용한다."""
+        if ImageCardItem._nanobanana_ratio_cache is not None:
+            return ImageCardItem._nanobanana_ratio_cache
+        fallback = [
+            "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1",
+            "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+        ]
+        try:
+            from v.provider import _NANOBANANA_ASPECT_RATIO_OPTION
+            values = _NANOBANANA_ASPECT_RATIO_OPTION.get("aspect_ratio", {}).get("values", [])
+            ImageCardItem._nanobanana_ratio_cache = list(values) if values else fallback
+        except Exception:
+            ImageCardItem._nanobanana_ratio_cache = fallback
+        return ImageCardItem._nanobanana_ratio_cache
+
+    @staticmethod
+    def _closest_ratio_label(actual: float, candidates: list[str]) -> str:
+        """실제 비율에 가장 가까운 비율 라벨을 찾는다."""
+        best, best_diff = "", float('inf')
+        for label in candidates:
+            try:
+                w, h = label.split(":")
+                diff = abs(actual - float(w) / float(h))
+            except Exception:
+                continue
+            if diff < best_diff:
+                best_diff = diff
+                best = label
+        return best
+
+    def _build_inspect_tooltip(self) -> str:
+        """원본 크기와 가장 가까운 나노바나나 비율로 툴팁 문자열을 조합한다."""
+        if self._pixmap.isNull() or self._pixmap.height() <= 0:
+            return ""
+        pw, ph = self._pixmap.width(), self._pixmap.height()
+        actual = pw / ph
+        nano = self._closest_ratio_label(actual, self._nanobanana_ratios())
+        return f"{pw} × {ph}\n🍌 {nano}" if nano else f"{pw} × {ph}"
+
+    def hoverEnterEvent(self, event):
+        """마우스를 올리면 비율 정보 툴팁을 표시한다."""
+        tip = self._build_inspect_tooltip()
+        if tip:
+            self.setToolTip(tip)
+            view = self.scene().views()[0] if self.scene() and self.scene().views() else None
+            if view:
+                pos = view.mapToGlobal(view.mapFromScene(self.scenePos()))
+                QToolTip.showText(pos, tip)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        """마우스를 벗어나면 툴팁을 숨긴다."""
+        QToolTip.hideText()
+        super().hoverLeaveEvent(event)
 
     def get_data(self) -> Dict[str, Any]:
         d = self._base_data()

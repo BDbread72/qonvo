@@ -401,6 +401,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.preferred_options_count = 3
         self.pending_results = []
         self._on_preferred_selected = None
+        self._on_rework = None
+        self._pref_input_image = None
         self._pref_window = None
         self._log_window = None
         self.meta_output_ports = {}
@@ -940,7 +942,6 @@ class ChatNodeWidget(QWidget, BaseNode):
         count = len(results)
         self._btn_pref_view.setText(t("chat.preferred_candidates", count=count))
         self._btn_pref_view.show()
-        QTimer.singleShot(300, self._open_preferred_window)
 
         # 히스토리에 전체 후보 텍스트 저장 + 응답 텍스트 갱신
         summary = t("chat.preferred_done", count=count)
@@ -963,9 +964,17 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         from .preferred_dialog import PreferredResultsWindow
 
-        self._pref_window = PreferredResultsWindow(self.pending_results)
+        self._pref_window = PreferredResultsWindow(
+            self.pending_results,
+            input_image_path=self._pref_input_image,
+        )
         self._pref_window.selection_confirmed.connect(self._on_pref_confirmed)
         self._pref_window.selection_cancelled.connect(self._on_pref_cancelled)
+        if self._on_rework:
+            cb = self._on_rework
+            self._pref_window.rework_requested.connect(
+                lambda _cb=cb: _cb(self)
+            )
         self._pref_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._pref_window.show()
 

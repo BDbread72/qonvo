@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QDialog, QListWidget,
     QListWidgetItem, QInputDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon
 
 import sys
@@ -20,6 +20,26 @@ from pathlib import Path
 from q import t
 from v.app import App
 from v.theme import Theme
+
+
+class _SaveWorker(QThread):
+    """BoardManager.save()를 백그라운드 스레드에서 실행해 UI 블로킹을 방지한다."""
+
+    done = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, name, board_data):
+        super().__init__()
+        self._name = name
+        self._data = board_data
+
+    def run(self):
+        try:
+            from v.board import BoardManager
+            BoardManager.save(self._name, self._data)
+            self.done.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 def _get_version() -> str:
@@ -149,6 +169,7 @@ class MainWindow(QMainWindow):
         self.current_plugin: BoardPlugin | None = None
         self._current_filepath: str | None = None
         self._modified = False
+        self._save_worker: _SaveWorker | None = None
         self.dev_window = None
         self.data_viewer_window = None
 
@@ -568,20 +589,29 @@ class MainWindow(QMainWindow):
         self._save_to_file(filepath)
 
     def _save_to_file(self, filepath):
-        from v.board import BoardManager
         import os
+
+        if self._save_worker and self._save_worker.isRunning():
+            self._save_worker.wait()
 
         board_data = self.current_plugin.collect_data()
         name = os.path.splitext(os.path.basename(filepath))[0]
 
-        try:
-            BoardManager.save(name, board_data)
-            self._current_filepath = filepath
-            self._modified = False
-            self._update_title()
-            self._refresh_recent_boards()
-        except Exception as e:
-            QMessageBox.critical(self, t("error.save_failed"), str(e))
+        self._save_worker = _SaveWorker(name, board_data)
+        self._save_worker.done.connect(lambda: self._on_save_done(filepath))
+        self._save_worker.error.connect(self._on_save_error)
+        self._save_worker.start()
+
+    def _on_save_done(self, filepath):
+        """저장 완료 후 파일 경로와 UI 상태를 갱신한다."""
+        self._current_filepath = filepath
+        self._modified = False
+        self._update_title()
+        self._refresh_recent_boards()
+
+    def _on_save_error(self, msg):
+        """저장 실패 시 에러 메시지를 표시한다."""
+        QMessageBox.critical(self, t("error.save_failed"), msg)
 
     def _update_title(self):
         import os
@@ -615,9 +645,8 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.StandardButton.Save:
                 self._save_board()
-                if self._modified:
-                    event.ignore()
-                    return
+                if self._save_worker and self._save_worker.isRunning():
+                    self._save_worker.wait()
             elif reply == QMessageBox.StandardButton.Cancel:
                 event.ignore()
                 return

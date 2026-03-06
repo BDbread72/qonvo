@@ -294,22 +294,27 @@ class WhiteboardView(QGraphicsView):
         """드래그 완료 후 차원 아이템과 겹침 감지 → 차원 이동."""
         if not self.plugin:
             return
-        selected = [item for item in self.scene().selectedItems()
-                    if not isinstance(item, (EdgeItem, PortItem))]
-        if not selected:
+        if getattr(self, '_in_dimension_drop', False):
             return
-
-        # 차원 아이템 위에 놓으면 해당 차원으로 이동
-        for dim in self.plugin.dimension_items.values():
-            if dim in selected:
-                continue
-            dim_rect = dim.mapToScene(dim.shape()).boundingRect()
-            hits = [s for s in selected
-                    if not isinstance(s, GroupFrameItem)
-                    and dim_rect.contains(s.sceneBoundingRect().center())]
-            if hits:
-                self.plugin.move_items_to_dimension(hits, dim)
+        self._in_dimension_drop = True
+        try:
+            selected = [item for item in self.scene().selectedItems()
+                        if not isinstance(item, (EdgeItem, PortItem))]
+            if not selected:
                 return
+
+            for dim in self.plugin.dimension_items.values():
+                if dim in selected:
+                    continue
+                dim_rect = dim.mapToScene(dim.shape()).boundingRect()
+                hits = [s for s in selected
+                        if isinstance(s, ImageCardItem)
+                        and dim_rect.contains(s.sceneBoundingRect().center())]
+                if hits:
+                    self.plugin.move_items_to_dimension(hits, dim)
+                    return
+        finally:
+            self._in_dimension_drop = False
 
         # 상위 차원 탈출: 뷰포트 가장자리에 닿으면 부모로 이동
         if self.plugin._parent_plugin:

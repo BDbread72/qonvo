@@ -524,7 +524,7 @@ class BoardManager:
             # QONVO 바이너리 포맷으로 기록 (원자적 쓰기)
             entries: Dict[str, bytes] = {}
             entries['board.json'] = json.dumps(
-                data, ensure_ascii=False, indent=2
+                data, ensure_ascii=False
             ).encode('utf-8')
 
             skipped_attachments = []

@@ -188,9 +188,9 @@ class WhiteBoardPlugin(BoardPlugin):
         self._max_concurrent_workers = 4
         self._pending_workers: List[tuple] = []  # (node_id, model, message, files)
 
-        # Preferred Options: 다중 실행 결과 누적
         self._preferred_results: Dict[int, list] = {}   # node_id → [(text, images)]
         self._preferred_expected: Dict[int, int] = {}    # node_id → expected count
+        self._rework_params: Dict[int, dict] = {}        # node_id → rework params
 
         self.system_prompt = ""
         self.system_files: List[str] = []
@@ -205,6 +205,10 @@ class WhiteBoardPlugin(BoardPlugin):
         self._parent_plugin: Optional['WhiteBoardPlugin'] = None
         self._parent_dimension_item: Optional[DimensionItem] = None
         self._history_search_window = None
+
+        self._node_data_cache: Dict[int, Any] = {}  # 노드 직렬화 캐시 (node_id -> data dict)
+        self._dirty_node_ids: set = set()  # 변경된 노드 ID 집합
+        self._save_generation: int = 0  # 저장 횟수 카운터
 
         # Phase 4: 30 FPS 타이머 제거, 이벤트 기반 업데이트로 전환
         # self._edge_timer = QTimer()  # [REMOVED]
@@ -380,8 +384,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 self.remove_edge(edge)
             if port.scene():
                 self.scene.removeItem(port)
-            if hasattr(port, 'label') and port.label and port.label.scene():
-                self.scene.removeItem(port.label)
+            port.scene_remove_label()
             if self.view and port in self.view._all_port_items:
                 self.view._all_port_items.discard(port)
         node.meta_output_ports.clear()
@@ -428,8 +431,7 @@ class WhiteBoardPlugin(BoardPlugin):
             self.remove_edge(edge)
         if port.scene():
             self.scene.removeItem(port)
-        if hasattr(port, 'label') and port.label and port.label.scene():
-            self.scene.removeItem(port.label)
+        port.scene_remove_label()
         if self.view and port in self.view._all_port_items:
             self.view._all_port_items.discard(port)
         del node.input_ports[port_name]
@@ -468,6 +470,11 @@ class WhiteBoardPlugin(BoardPlugin):
             port.port_total = out_total
             port.reposition()
 
+    def _mark_node_dirty(self, node_id):
+        """노드 데이터 캐시를 더티로 마킹하고 수정 상태를 알린다."""
+        self._dirty_node_ids.add(node_id)
+        self._notify_modified()
+
     def _notify_modified(self):
         if callable(self.on_modified):
             self.on_modified()
@@ -492,7 +499,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_node(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = ChatNodeWidget(node_id, on_send=self._handle_chat_send, on_modified=self._notify_modified)
+        node = ChatNodeWidget(node_id, on_send=self._handle_chat_send, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         node.on_cancel = self._cancel_node_workers
         node.on_add_port = self._add_chat_input_port
         node.on_remove_port = self._remove_chat_input_port
@@ -538,8 +545,7 @@ class WhiteBoardPlugin(BoardPlugin):
             # 씬에서 포트 제거
             if port.scene():
                 self.scene.removeItem(port)
-            if hasattr(port, 'label') and port.label and port.label.scene():
-                self.scene.removeItem(port.label)
+            port.scene_remove_label()
             del function_node.input_ports[port_name]
 
         for port_name in list(function_node.output_ports.keys()):
@@ -548,8 +554,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 self.remove_edge(edge)  # 언더스코어 없음!
             if port.scene():
                 self.scene.removeItem(port)
-            if hasattr(port, 'label') and port.label and port.label.scene():
-                self.scene.removeItem(port.label)
+            port.scene_remove_label()
             del function_node.output_ports[port_name]
 
         # 2. 파라미터 기반 입력 포트 생성
@@ -636,7 +641,7 @@ class WhiteBoardPlugin(BoardPlugin):
         node = FunctionNodeWidget(
             node_id,
             on_send=self._execute_function_graph,
-            on_modified=self._notify_modified,
+            on_modified=lambda nid=node_id: self._mark_node_dirty(nid),
             on_open_library=self._open_function_library
         )
         proxy = self._add_proxy(node, node_id, pos, self.function_proxies)
@@ -660,7 +665,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_sticky(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = StickyNoteWidget(on_modified=self._notify_modified)
+        node = StickyNoteWidget(on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         node.node_id = node_id
         proxy = self._add_proxy(node, node_id, pos, self.sticky_proxies)
         node.output_port = self._add_port(
@@ -671,7 +676,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_prompt_node(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = PromptNodeWidget(on_modified=self._notify_modified)
+        node = PromptNodeWidget(on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         node.node_id = node_id
         proxy = self._add_proxy(node, node_id, pos, self.prompt_proxies)
         node.output_port = self._add_port(
@@ -682,7 +687,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_button(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = ButtonNodeWidget(node_id, on_signal=self._on_button_signal, on_modified=self._notify_modified)
+        node = ButtonNodeWidget(node_id, on_signal=self._on_button_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         proxy = self._add_proxy(node, node_id, pos, self.button_proxies)
 
         node.input_port = self._add_port(
@@ -766,7 +771,7 @@ class WhiteBoardPlugin(BoardPlugin):
         node = RoundTableWidget(
             node_id,
             on_send=self._handle_round_table_send,
-            on_modified=self._notify_modified
+            on_modified=lambda nid=node_id: self._mark_node_dirty(nid)
         )
         proxy = self._add_proxy(node, node_id, pos, self.round_table_proxies)
         self._create_ports(proxy, node)
@@ -776,7 +781,7 @@ class WhiteBoardPlugin(BoardPlugin):
     def add_checklist(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None,
                       title: str = "", items: list = None):
         node_id = self._next_id(node_id)
-        node = ChecklistWidget(title=title, items=items, on_modified=self._notify_modified)
+        node = ChecklistWidget(title=title, items=items, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         node.node_id = node_id
         proxy = self._add_proxy(node, node_id, pos, self.checklist_proxies)
         node.output_port = self._add_port(
@@ -787,7 +792,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_repository(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = RepositoryNodeWidget(node_id, on_modified=self._notify_modified)
+        node = RepositoryNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         proxy = self._add_proxy(node, node_id, pos, self.repository_proxies)
         node.input_port = self._add_port(
             PortItem.INPUT, proxy, name="입력",
@@ -807,7 +812,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_nixi(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = NixiNodeWidget(node_id, on_modified=self._notify_modified)
+        node = NixiNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         proxy = self._add_proxy(node, node_id, pos, self.nixi_proxies)
         node.input_port = self._add_port(
             PortItem.INPUT, proxy, name="입력",
@@ -834,7 +839,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_ups(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = UpsNodeWidget(node_id, on_modified=self._notify_modified)
+        node = UpsNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         proxy = self._add_proxy(node, node_id, pos, self.ups_proxies)
         self._create_signal_ports(proxy, node)
         _orig_on_done = node._on_done
@@ -849,7 +854,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def add_rmv(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
-        node = RmvNodeWidget(node_id, on_modified=self._notify_modified)
+        node = RmvNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
         proxy = self._add_proxy(node, node_id, pos, self.rmv_proxies)
         self._create_signal_ports(proxy, node)
         _orig_on_finished = node._on_finished
@@ -1003,10 +1008,7 @@ class WhiteBoardPlugin(BoardPlugin):
         # 2. 포트 + 라벨을 씬에서 제거
         for port in ports:
             if port and self.scene:
-                if hasattr(port, '_label_bg') and port._label_bg:
-                    self.scene.removeItem(port._label_bg)
-                if hasattr(port, '_label') and port._label:
-                    self.scene.removeItem(port._label)
+                port.scene_remove_label()
                 self.scene.removeItem(port)
                 if self.view:
                     self.view._all_port_items.discard(port)
@@ -1033,6 +1035,8 @@ class WhiteBoardPlugin(BoardPlugin):
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             d.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
+        self._node_data_cache.pop(node_id, None)
+        self._dirty_node_ids.discard(node_id)
         if self.scene:
             self.scene.removeItem(proxy)
         self._notify_modified()
@@ -1048,6 +1052,8 @@ class WhiteBoardPlugin(BoardPlugin):
         self._remove_ports_and_edges(self._collect_ports(item))
         registry.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
+        self._node_data_cache.pop(node_id, None)
+        self._dirty_node_ids.discard(node_id)
         if hasattr(item, 'stop_animation'):
             item.stop_animation()
         if self.scene:
@@ -1445,13 +1451,37 @@ class WhiteBoardPlugin(BoardPlugin):
         pref_count = getattr(node, 'preferred_options_count', 3) if pref_enabled else 1
 
         if pref_enabled:
-            self._preferred_results[node_id] = []
-            self._preferred_expected[node_id] = pref_count
-            node._on_preferred_selected = self._on_chat_preferred_option_selected
-            node.set_response(f"생성 중... (0/{pref_count})", done=False)
+            dim_images = self._extract_dimension_images(node)
+            non_dim_files = list(files or [])
 
-            for _ in range(pref_count):
-                messages = list(prefix_messages) + [ChatMessage(role="user", content=message or "", attachments=files or None)]
+            if dim_images:
+                actual_count = len(dim_images)
+                files_per_index = [non_dim_files + [img] for img in dim_images]
+            else:
+                actual_count = pref_count
+                files_per_index = [list(files or []) for _ in range(actual_count)]
+
+            self._preferred_results[node_id] = []
+            self._preferred_expected[node_id] = actual_count
+            node._on_preferred_selected = self._on_chat_preferred_option_selected
+            node._on_rework = self._on_chat_rework_requested
+            first_img = next((f for f in (files or []) if isinstance(f, str) and os.path.exists(f)), None)
+            node._pref_input_image = first_img
+            node.set_response(f"생성 중... (0/{actual_count})", done=False)
+
+            self._rework_params[node_id] = {
+                'model': model,
+                'message': message,
+                'system_prompt': effective_system_prompt,
+                'system_files': list(self.system_files),
+                'options': dict(options),
+                'prefix_messages': list(prefix_messages),
+                'files_per_index': files_per_index,
+            }
+
+            for i in range(actual_count):
+                wk_files = files_per_index[i]
+                messages = list(prefix_messages) + [ChatMessage(role="user", content=message or "", attachments=wk_files or None)]
                 worker = StreamWorker(
                     provider,
                     model,
@@ -1461,7 +1491,6 @@ class WhiteBoardPlugin(BoardPlugin):
                     **options,
                 )
                 worker._node_id = node_id
-
 
                 worker.tokens_received.connect(lambda i, o, n=node: n.set_tokens(i, o))
                 worker.error_signal.connect(
@@ -1547,8 +1576,108 @@ class WhiteBoardPlugin(BoardPlugin):
         if len(self._preferred_results[nid]) >= expected:
             node.show_preferred_results(self._preferred_results[nid])
 
+    def _extract_dimension_images(self, node):
+        """연결된 DimensionItem 보드에서 이미지 경로를 수집한다."""
+        dim_images = []
+        if not hasattr(node, 'input_ports'):
+            return dim_images
+        for port_name, port in node.input_ports.items():
+            # 파일 타입 포트만 대상
+            if port.port_data_type != PortItem.TYPE_FILE:
+                continue
+            if not port.edges:
+                continue
+            source_proxy = port.edges[0].source_port.parent_proxy
+            # DimensionItem에서만 이미지 카드를 가져온다
+            if not isinstance(source_proxy, DimensionItem):
+                continue
+            board_data = source_proxy.get_board_data()
+            for card in board_data.get("image_cards", []):
+                img_path = card.get("image_path", "")
+                if not img_path:
+                    continue
+                # 절대 경로가 아니거나 파일이 없으면 임시 디렉터리를 후보로 확인
+                if not os.path.isabs(img_path) or not os.path.exists(img_path):
+                    if ImageCardItem._board_temp_dir:
+                        candidate = os.path.join(
+                            ImageCardItem._board_temp_dir,
+                            os.path.basename(img_path),
+                        )
+                        if os.path.exists(candidate):
+                            img_path = candidate
+                if os.path.exists(img_path):
+                    dim_images.append(img_path)
+        return dim_images
+
+    def _on_chat_rework_requested(self, node):
+        """전체 재작업 요청을 처리한다 — 모든 인덱스에 대해 워커를 재생성한다."""
+        nid = node.node_id
+        params = self._rework_params.get(nid)
+        if not params:
+            return
+        provider = self._ensure_provider()
+        for index in range(len(params['files_per_index'])):
+            wk_files = params['files_per_index'][index]
+            messages = list(params['prefix_messages']) + [
+                ChatMessage(
+                    role="user",
+                    content=params['message'] or "",
+                    attachments=wk_files or None,
+                )
+            ]
+            worker = StreamWorker(
+                provider,
+                params['model'],
+                messages,
+                system_prompt=params['system_prompt'],
+                system_files=params['system_files'],
+                **params['options'],
+            )
+            worker._node_id = nid
+
+            worker.tokens_received.connect(lambda i, o, n=node: n.set_tokens(i, o))
+            worker.error_signal.connect(
+                lambda err, n=node, w=worker, idx=index: self._finish_worker(
+                    w, lambda: self._on_chat_rework_done(n, idx, f"Error: {err}", [])
+                )
+            )
+            worker.finished_signal.connect(
+                lambda text, n=node, w=worker, idx=index: self._finish_worker(
+                    w, lambda: self._on_chat_rework_done(n, idx, text, [])
+                )
+            )
+            worker.image_received.connect(
+                lambda payload, n=node, w=worker, idx=index: self._finish_worker(
+                    w, lambda: self._on_chat_rework_image(n, idx, payload)
+                )
+            )
+
+            if self._active_workers < self._max_concurrent_workers:
+                self._start_worker(worker)
+            else:
+                self._pending_workers.append((node, worker))
+
+    def _on_chat_rework_image(self, node, index, payload):
+        """이미지 생성 응답을 재작업 결과 처리로 전달한다."""
+        images = payload.get("images", [])
+        text = payload.get("text", "")
+        if not images:
+            text = text if text else "이미지 생성 실패"
+        self._on_chat_rework_done(node, index, text, images)
+
+    def _on_chat_rework_done(self, node, index, text, images):
+        """재작업 결과를 저장하고 UI를 갱신한다."""
+        nid = node.node_id
+        results = self._preferred_results.get(nid)
+        # 내부 결과 캐시에 업데이트
+        if results is not None and index < len(results):
+            results[index] = (text, images)
+        # 선호 결과 창이 있으면 카드 내용을 갱신
+        pref_window = getattr(node, '_pref_window', None)
+        if pref_window:
+            pref_window.update_card(index, text, images)
+
     def _on_chat_preferred_option_selected(self, node, selections):
-        """Chat Preferred: 사용자가 결과를 선택한 후 호출"""
         nid = node.node_id
 
         if not selections:
@@ -1592,6 +1721,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
         self._preferred_results.pop(nid, None)
         self._preferred_expected.pop(nid, None)
+        self._rework_params.pop(nid, None)
 
     def _handle_round_table_send(self, node_id, model, message, files):
         """라운드 테이블 전송 핸들러"""
@@ -1954,6 +2084,7 @@ class WhiteBoardPlugin(BoardPlugin):
         if not selections:
             self._preferred_results.pop(nid, None)
             self._preferred_expected.pop(nid, None)
+            self._rework_params.pop(nid, None)
             return
 
         # 첫 번째 결과를 노드 응답으로 설정
@@ -2001,6 +2132,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
         self._preferred_results.pop(nid, None)
         self._preferred_expected.pop(nid, None)
+        self._rework_params.pop(nid, None)
 
     def _resume_pending_batches(self):
         """앱 재시작 후 persistent batch queue에서 pending job 폴링 재개"""
@@ -2067,6 +2199,7 @@ class WhiteBoardPlugin(BoardPlugin):
         nid = node.node_id
         self._preferred_results.pop(nid, None)
         self._preferred_expected.pop(nid, None)
+        self._rework_params.pop(nid, None)
         logger.warning(f"[BATCH_RESUME] Failed: {job_name} (node {nid})")
 
     def _on_image_payload(self, node, worker, payload):
@@ -2119,6 +2252,7 @@ class WhiteBoardPlugin(BoardPlugin):
 
         self._preferred_results.pop(node_id, None)
         self._preferred_expected.pop(node_id, None)
+        self._rework_params.pop(node_id, None)
 
         node = self.app.nodes.get(node_id)
         if node and hasattr(node, 'set_response'):
@@ -2200,81 +2334,121 @@ class WhiteBoardPlugin(BoardPlugin):
         self._history_search_window = win
         win.show()
 
+    @staticmethod
+    def _copy_chat_data(nd):
+        """ChatNode 데이터의 저장 안전 복사본을 생성한다 (user_files, ai_image_paths, history[].images만 복사)."""
+        r = dict(nd)
+        r['user_files'] = list(r.get('user_files', []))
+        r['ai_image_paths'] = list(r.get('ai_image_paths', []))
+        hist = r.get('history')
+        if hist:
+            r['history'] = [{**e, 'images': list(e.get('images', []))} for e in hist]
+        return r
+
+    def _get_cached_or_fresh(self, node):
+        """더티/미캐시 노드는 get_data()로 갱신하고 클린 노드는 캐시에서 위치만 갱신해 반환한다."""
+        nid = node.node_id
+        cache = self._node_data_cache
+        dirty = self._dirty_node_ids
+
+        if nid in dirty or nid not in cache:
+            if isinstance(node, TextItem):
+                nd = {
+                    "id": nid, "x": node.pos().x(), "y": node.pos().y(),
+                    "text": node.toPlainText(),
+                    "font_size": getattr(node, "_font_size", 16),
+                    "rotation": node.rotation(),
+                }
+            elif isinstance(node, GroupFrameItem):
+                nd = {
+                    "id": nid, "x": node.pos().x(), "y": node.pos().y(),
+                    "width": node.rect().width(), "height": node.rect().height(),
+                    "label": node._label.toPlainText() if hasattr(node, "_label") else "",
+                    "color": getattr(node, "color_name", "blue"),
+                    "locked": getattr(node, "_locked", False),
+                }
+            elif isinstance(node, ButtonNodeWidget):
+                nd = node.to_dict()
+            elif hasattr(node, 'get_data'):
+                nd = node.get_data()
+            else:
+                return None
+            cache[nid] = nd
+        else:
+            nd = cache[nid]
+            if isinstance(node, (TextItem, GroupFrameItem)):
+                nd['x'] = node.pos().x()
+                nd['y'] = node.pos().y()
+                if isinstance(node, GroupFrameItem):
+                    nd['width'] = node.rect().width()
+                    nd['height'] = node.rect().height()
+            elif hasattr(node, 'proxy') and node.proxy:
+                nd['x'] = node.proxy.pos().x()
+                nd['y'] = node.proxy.pos().y()
+                if hasattr(node, 'width'):
+                    nd['width'] = node.width()
+                    nd['height'] = node.height()
+        return nd
+
     def collect_data(self):
+        """더티 캐시를 활용해 변경된 노드만 직렬화하고 저장 안전 복사본으로 데이터를 구성한다."""
         data = {
             "type": "WhiteBoard",
-            "nodes": [],
-            "function_nodes": [],
-            "round_tables": [],
-
-            "buttons": [],
-            "repository_nodes": [],
-            "functions_library": [],
-            "edges": [],
-            "pins": [],
-            "texts": [],
-            "sticky_notes": [],
-            "prompt_nodes": [],
-            "image_cards": [],
-            "checklists": [],
-            "group_frames": [],
-            "dimensions": [],
-            "nixi_nodes": [],
-            "ups_nodes": [],
-            "rmv_nodes": [],
+            "nodes": [], "function_nodes": [], "round_tables": [],
+            "buttons": [], "repository_nodes": [], "functions_library": [],
+            "edges": [], "pins": [], "texts": [], "sticky_notes": [],
+            "prompt_nodes": [], "image_cards": [], "checklists": [],
+            "group_frames": [], "dimensions": [], "nixi_nodes": [],
+            "ups_nodes": [], "rmv_nodes": [],
             "next_id": self.app._next_id,
             "system_prompt": self.system_prompt,
             "system_files": list(self.system_files),
         }
 
         for node in self.app.nodes.values():
+            nd = self._get_cached_or_fresh(node)
+            if nd is None:
+                continue
             if isinstance(node, ChatNodeWidget):
-                data["nodes"].append(node.get_data())
+                data["nodes"].append(self._copy_chat_data(nd))
             elif isinstance(node, FunctionNodeWidget):
-                data["function_nodes"].append(node.get_data())
+                data["function_nodes"].append(dict(nd))
             elif isinstance(node, RoundTableWidget):
-                data["round_tables"].append(node.get_data())
+                data["round_tables"].append(dict(nd))
             elif isinstance(node, PromptNodeWidget):
-                data["prompt_nodes"].append(node.get_data())
+                data["prompt_nodes"].append(dict(nd))
             elif isinstance(node, StickyNoteWidget):
-                data["sticky_notes"].append(node.get_data())
+                data["sticky_notes"].append(dict(nd))
             elif isinstance(node, ButtonNodeWidget):
-                data["buttons"].append(node.to_dict())
+                data["buttons"].append(dict(nd))
             elif isinstance(node, ChecklistWidget):
-                data["checklists"].append(node.get_data())
+                data["checklists"].append(dict(nd))
             elif isinstance(node, RepositoryNodeWidget):
-                data["repository_nodes"].append(node.get_data())
+                data["repository_nodes"].append(dict(nd))
             elif isinstance(node, NixiNodeWidget):
-                data["nixi_nodes"].append(node.get_data())
+                data["nixi_nodes"].append(dict(nd))
             elif isinstance(node, UpsNodeWidget):
-                data["ups_nodes"].append(node.get_data())
+                data["ups_nodes"].append(dict(nd))
             elif isinstance(node, RmvNodeWidget):
-                data["rmv_nodes"].append(node.get_data())
+                data["rmv_nodes"].append(dict(nd))
             elif isinstance(node, TextItem):
-                data["texts"].append({
-                    "id": node.node_id,
-                    "x": node.pos().x(),
-                    "y": node.pos().y(),
-                    "text": node.toPlainText(),
-                    "font_size": getattr(node, "_font_size", 16),
-                    "rotation": node.rotation(),
-                })
+                data["texts"].append(dict(nd))
             elif isinstance(node, GroupFrameItem):
-                data["group_frames"].append({
-                    "id": node.node_id,
-                    "x": node.pos().x(),
-                    "y": node.pos().y(),
-                    "width": node.rect().width(),
-                    "height": node.rect().height(),
-                    "label": node._label.toPlainText() if hasattr(node, "_label") else "",
-                    "color": getattr(node, "color_name", "blue"),
-                    "locked": getattr(node, "_locked", False),
-                })
+                data["group_frames"].append(dict(nd))
 
         for card in self.image_card_items.values():
-            data["image_cards"].append(card.get_data())
+            nid = card.node_id
+            if nid in self._dirty_node_ids or nid not in self._node_data_cache:
+                nd = card.get_data()
+                self._node_data_cache[nid] = nd
+            else:
+                nd = self._node_data_cache[nid]
+            data["image_cards"].append(dict(nd))
         for dim in self.dimension_items.values():
             data["dimensions"].append(dim.get_data())
+
+        self._dirty_node_ids.clear()
+        self._save_generation += 1
 
         from v.logger import get_logger
         logger = get_logger("qonvo.plugin")
@@ -2545,26 +2719,48 @@ class WhiteBoardPlugin(BoardPlugin):
     def move_items_to_dimension(self, scene_items, target_dimension):
         """선택 아이템을 대상 DimensionItem 내부로 이동."""
         board_data = target_dimension.get_board_data()
+        seen_items = []
+        seen_ids = set()
         for item in list(scene_items):
             result = self._categorize_selected_item(item)
             if not result:
                 continue
             category, node_id, data = result
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            seen_items.append(item)
             data = copy.deepcopy(data)
             id_key = self._ID_KEY_MAP.get(category, "id")
             new_id = board_data.get("next_id", 1)
             data[id_key] = new_id
             board_data["next_id"] = new_id + 1
-            # 차원 내부 중앙에 배치
-            data["x"] = target_dimension._width / 2 - 50
-            data["y"] = target_dimension._height / 2
+            col = (len(seen_items) - 1) % 3
+            row = (len(seen_items) - 1) // 3
+            data["x"] = 30 + col * 320
+            data["y"] = 30 + row * 280
             board_data.setdefault(category, []).append(data)
         target_dimension.set_board_data(board_data)
-        # 현재 씬에서 삭제
-        for item in list(scene_items):
-            self._delete_item_by_scene_item(item)
+        for item in seen_items:
+            nid = getattr(item, 'node_id', None)
+            self._remove_ports_and_edges(self._collect_ports(item))
+            if isinstance(item, ImageCardItem):
+                self.image_card_items.pop(nid, None)
+            elif isinstance(item, DimensionItem):
+                self.dimension_items.pop(nid, None)
+            elif isinstance(item, GroupFrameItem):
+                self.group_frame_items.pop(nid, None)
+            elif isinstance(item, TextItem):
+                self.text_items.pop(nid, None)
+            self.app.nodes.pop(nid, None)
+            self._node_data_cache.pop(nid, None)
+            self._dirty_node_ids.discard(nid)
+            if hasattr(item, 'stop_animation'):
+                item.stop_animation()
+            if self.scene:
+                self.scene.removeItem(item)
         self._notify_modified()
-        logger.info(f"[DIM-MOVE] {len(scene_items)} items -> dimension #{getattr(target_dimension, 'node_id', '?')}")
+        logger.info(f"[DIM-MOVE] {len(seen_items)} items -> dimension #{getattr(target_dimension, 'node_id', '?')}")
 
     def move_items_to_parent(self, scene_items):
         """선택 아이템을 상위 차원(부모 플러그인)으로 이동."""

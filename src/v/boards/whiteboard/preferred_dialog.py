@@ -3,9 +3,10 @@ import base64
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QScrollArea, QLabel, QCheckBox, QPushButton, QFrame,
+    QSlider,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtGui import QPixmap, QImage, QPainter
 
 from v.theme import Theme
 
@@ -53,9 +54,9 @@ class _ImageLoader(QThread):
 class PreferredResultsWindow(QWidget):
     selection_confirmed = pyqtSignal(list)
     selection_cancelled = pyqtSignal()
+    rework_requested = pyqtSignal()
 
-    def __init__(self, results, parent=None):
-        """결과를 받아 창을 초기화하고 이미지 로더를 시작한다."""
+    def __init__(self, results, parent=None, input_image_path=None):
         super().__init__(parent, Qt.WindowType.Window)
         self.results = results
         self._checkboxes: list[QCheckBox] = []
@@ -63,8 +64,17 @@ class PreferredResultsWindow(QWidget):
         self._loaders: list[_ImageLoader] = []
         self._img_placeholders: dict[int, QLabel] = {}
         self._size_placeholders: dict[int, QLabel] = {}
+        self._loaded_images: dict[int, QImage] = {}
+        self._compare_active = False
+        self._compare_opacity = 0.5
+        self._input_original: QImage | None = None
+        self._input_image_path = input_image_path
+        self._rework_in_flight: set[int] = set()
+        self._cards: dict[int, QFrame] = {}
+        self._text_labels: dict[int, QLabel] = {}
         self._setup_ui()
         self._start_image_loaders()
+        self._load_input_original()
 
     def _setup_ui(self):
         """스크롤 그리드와 하단 버튼 바 레이아웃을 구성한다."""
@@ -118,6 +128,68 @@ class PreferredResultsWindow(QWidget):
         """)
         btn_select_all.clicked.connect(self._toggle_all)
         btn_bar.addWidget(btn_select_all)
+
+        self._btn_rework = QPushButton("Rework")
+        self._btn_rework.setFixedHeight(32)
+        self._btn_rework.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {Theme.BG_SECONDARY};
+                color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.GRID_LINE};
+                border-radius: 6px;
+                padding: 4px 16px;
+                font-size: 12px;
+            }}
+            QPushButton:hover {{ background-color: {Theme.BG_HOVER}; }}
+            QPushButton:disabled {{ color: {Theme.TEXT_DISABLED}; }}
+        """)
+        self._btn_rework.clicked.connect(self._request_rework_all)
+        btn_bar.addWidget(self._btn_rework)
+
+        if self._input_image_path:
+            self._btn_compare = QPushButton("Show with Original")
+            self._btn_compare.setCheckable(True)
+            self._btn_compare.setFixedHeight(32)
+            self._btn_compare.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {Theme.BG_SECONDARY};
+                    color: {Theme.TEXT_PRIMARY};
+                    border: 1px solid {Theme.GRID_LINE};
+                    border-radius: 6px;
+                    padding: 4px 12px;
+                    font-size: 12px;
+                }}
+                QPushButton:hover {{ background-color: {Theme.BG_HOVER}; }}
+                QPushButton:checked {{
+                    background-color: {Theme.ACCENT_PRIMARY};
+                    color: white;
+                    border-color: {Theme.ACCENT_PRIMARY};
+                }}
+            """)
+            self._btn_compare.toggled.connect(self._on_compare_toggled)
+            btn_bar.addWidget(self._btn_compare)
+
+            self._slider_opacity = QSlider(Qt.Orientation.Horizontal)
+            self._slider_opacity.setRange(10, 90)
+            self._slider_opacity.setValue(50)
+            self._slider_opacity.setFixedWidth(80)
+            self._slider_opacity.setFixedHeight(28)
+            self._slider_opacity.setStyleSheet(f"""
+                QSlider::groove:horizontal {{
+                    height: 4px;
+                    background: {Theme.GRID_LINE};
+                    border-radius: 2px;
+                }}
+                QSlider::handle:horizontal {{
+                    width: 14px; height: 14px;
+                    margin: -5px 0;
+                    background: {Theme.ACCENT_PRIMARY};
+                    border-radius: 7px;
+                }}
+            """)
+            self._slider_opacity.valueChanged.connect(self._on_opacity_changed)
+            self._slider_opacity.hide()
+            btn_bar.addWidget(self._slider_opacity)
 
         btn_bar.addStretch()
 
@@ -213,20 +285,25 @@ class PreferredResultsWindow(QWidget):
             self._img_placeholders[index] = placeholder
             self._size_placeholders[index] = size_lbl
 
+        text_label = QLabel("")
+        text_label.setWordWrap(True)
+        text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        text_label.setStyleSheet(
+            f"color: {Theme.TEXT_SECONDARY}; font-size: 11px; "
+            f"padding: 6px; border: none;"
+        )
         if text:
             preview = text[:300] + "..." if len(text) > 300 else text
-            text_label = QLabel(preview)
-            text_label.setWordWrap(True)
-            text_label.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
-            text_label.setStyleSheet(
-                f"color: {Theme.TEXT_SECONDARY}; font-size: 11px; "
-                f"padding: 6px; border: none;"
-            )
-            card_layout.addWidget(text_label)
+            text_label.setText(preview)
+        else:
+            text_label.hide()
+        card_layout.addWidget(text_label)
+        self._text_labels[index] = text_label
 
         card_layout.addStretch()
+        self._cards[index] = card
         return card
 
     def _start_image_loaders(self):
@@ -256,8 +333,11 @@ class PreferredResultsWindow(QWidget):
             int(qimage.height() / dpr),
         )
         placeholder.setStyleSheet("border: none; padding: 4px;")
+        self._loaded_images[index] = qimage
         if size_lbl is not None:
             size_lbl.setText(f"{orig_w} x {orig_h}")
+        if self._compare_active:
+            self._refresh_compare()
 
     def _on_check_changed(self):
         """체크박스 변경 시 확인 버튼 텍스트를 업데이트한다."""
@@ -276,6 +356,116 @@ class PreferredResultsWindow(QWidget):
         selected = [i for i, cb in enumerate(self._checkboxes) if cb.isChecked()]
         self.selection_confirmed.emit(selected)
         self.close()
+
+    def _load_input_original(self):
+        if not self._input_image_path:
+            return
+        import os
+        path = self._input_image_path
+        if not os.path.exists(path):
+            return
+        img = QImage(path)
+        if not img.isNull():
+            dpr = self.devicePixelRatio() or 1.0
+            max_px = int(320 * dpr)
+            self._input_original = img.scaled(
+                max_px, max_px,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+
+    def _on_compare_toggled(self, checked):
+        self._compare_active = checked
+        if hasattr(self, '_slider_opacity'):
+            self._slider_opacity.setVisible(checked)
+        if checked:
+            self._refresh_compare()
+        else:
+            self._restore_original_images()
+
+    def _on_opacity_changed(self, value):
+        self._compare_opacity = value / 100.0
+        if self._compare_active:
+            self._refresh_compare()
+
+    def _refresh_compare(self):
+        orig_img = self._input_original
+        if orig_img is None:
+            return
+        dpr = self.devicePixelRatio() or 1.0
+        opacity = self._compare_opacity
+
+        for idx, placeholder in self._img_placeholders.items():
+            cand_img = self._loaded_images.get(idx)
+            if cand_img is None:
+                continue
+            tw = max(orig_img.width(), cand_img.width())
+            th = max(orig_img.height(), cand_img.height())
+            composed = QImage(tw, th, QImage.Format.Format_ARGB32)
+            composed.fill(Qt.GlobalColor.transparent)
+            p = QPainter(composed)
+            p.setOpacity(opacity)
+            p.drawImage(
+                0, 0,
+                orig_img.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation),
+            )
+            p.setOpacity(1.0 - opacity)
+            p.drawImage(
+                0, 0,
+                cand_img.scaled(tw, th, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation),
+            )
+            p.end()
+            pm = QPixmap.fromImage(composed)
+            pm.setDevicePixelRatio(dpr)
+            placeholder.setPixmap(pm)
+            placeholder.setFixedSize(int(tw / dpr), int(th / dpr))
+
+    def _restore_original_images(self):
+        dpr = self.devicePixelRatio() or 1.0
+        for idx, placeholder in self._img_placeholders.items():
+            img = self._loaded_images.get(idx)
+            if img is None:
+                continue
+            pm = QPixmap.fromImage(img)
+            pm.setDevicePixelRatio(dpr)
+            placeholder.setPixmap(pm)
+            placeholder.setFixedSize(int(img.width() / dpr), int(img.height() / dpr))
+
+    def _request_rework_all(self):
+        if self._rework_in_flight:
+            return
+        self._rework_in_flight.update(range(len(self.results)))
+        self._btn_rework.setEnabled(False)
+        self._btn_rework.setText("Reworking...")
+        self.rework_requested.emit()
+
+    def update_card(self, index, text, images):
+        self._rework_in_flight.discard(index)
+        if not self._rework_in_flight:
+            self._btn_rework.setEnabled(True)
+            self._btn_rework.setText("Rework")
+
+        if index < len(self.results):
+            self.results[index] = (text, images)
+
+        text_lbl = self._text_labels.get(index)
+        if text_lbl:
+            if text:
+                preview = text[:300] + "..." if len(text) > 300 else text
+                text_lbl.setText(preview)
+                text_lbl.show()
+            else:
+                text_lbl.setText("")
+                text_lbl.hide()
+
+        if images and index in self._img_placeholders:
+            dpr = self.devicePixelRatio() or 1.0
+            loader = _ImageLoader(index, images[0], 320, dpr)
+            loader.loaded.connect(self._on_image_loaded)
+            self._loaders.append(loader)
+            loader.start()
 
     def closeEvent(self, event):
         """로더 스레드를 기다리고, 확정되지 않았으면 취소 시그널을 방출한다."""
