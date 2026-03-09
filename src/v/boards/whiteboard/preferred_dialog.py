@@ -3,7 +3,7 @@ import base64
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QScrollArea, QLabel, QCheckBox, QPushButton, QFrame,
-    QSlider,
+    QSlider, QComboBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QPixmap, QImage, QPainter
@@ -56,7 +56,7 @@ class PreferredResultsWindow(QWidget):
     selection_cancelled = pyqtSignal()
     rework_requested = pyqtSignal()
 
-    def __init__(self, results, parent=None, input_image_path=None):
+    def __init__(self, results, parent=None, input_images=None):
         super().__init__(parent, Qt.WindowType.Window)
         self.results = results
         self._checkboxes: list[QCheckBox] = []
@@ -67,14 +67,16 @@ class PreferredResultsWindow(QWidget):
         self._loaded_images: dict[int, QImage] = {}
         self._compare_active = False
         self._compare_opacity = 0.5
-        self._input_original: QImage | None = None
-        self._input_image_path = input_image_path
+        self._input_images: list[str] = input_images or []
+        self._input_originals: dict[int, QImage] = {}
+        self._selected_input_idx: int = 0
         self._rework_in_flight: set[int] = set()
         self._cards: dict[int, QFrame] = {}
         self._text_labels: dict[int, QLabel] = {}
         self._setup_ui()
         self._start_image_loaders()
-        self._load_input_original()
+        if self._input_images:
+            self._load_input_image(0)
 
     def _setup_ui(self):
         """스크롤 그리드와 하단 버튼 바 레이아웃을 구성한다."""
@@ -146,7 +148,7 @@ class PreferredResultsWindow(QWidget):
         self._btn_rework.clicked.connect(self._request_rework_all)
         btn_bar.addWidget(self._btn_rework)
 
-        if self._input_image_path:
+        if self._input_images:
             self._btn_compare = QPushButton("Show with Original")
             self._btn_compare.setCheckable(True)
             self._btn_compare.setFixedHeight(32)
@@ -168,6 +170,36 @@ class PreferredResultsWindow(QWidget):
             """)
             self._btn_compare.toggled.connect(self._on_compare_toggled)
             btn_bar.addWidget(self._btn_compare)
+
+            if len(self._input_images) > 1:
+                import os
+                self._combo_input = QComboBox()
+                self._combo_input.setFixedHeight(28)
+                self._combo_input.setStyleSheet(f"""
+                    QComboBox {{
+                        background-color: {Theme.BG_INPUT};
+                        color: {Theme.TEXT_PRIMARY};
+                        border: 1px solid {Theme.GRID_LINE};
+                        border-radius: 4px;
+                        padding: 2px 8px;
+                        font-size: 11px;
+                    }}
+                    QComboBox::drop-down {{
+                        border: none;
+                        width: 20px;
+                    }}
+                    QComboBox QAbstractItemView {{
+                        background-color: {Theme.BG_SECONDARY};
+                        color: {Theme.TEXT_PRIMARY};
+                        selection-background-color: {Theme.ACCENT_PRIMARY};
+                    }}
+                """)
+                for i, path in enumerate(self._input_images):
+                    name = os.path.basename(path)
+                    self._combo_input.addItem(f"{i+1}. {name}", i)
+                self._combo_input.currentIndexChanged.connect(self._on_input_selection_changed)
+                self._combo_input.hide()
+                btn_bar.addWidget(self._combo_input)
 
             self._slider_opacity = QSlider(Qt.Orientation.Horizontal)
             self._slider_opacity.setRange(10, 90)
@@ -357,18 +389,20 @@ class PreferredResultsWindow(QWidget):
         self.selection_confirmed.emit(selected)
         self.close()
 
-    def _load_input_original(self):
-        if not self._input_image_path:
+    def _load_input_image(self, idx):
+        if idx in self._input_originals:
+            return
+        if idx < 0 or idx >= len(self._input_images):
             return
         import os
-        path = self._input_image_path
+        path = self._input_images[idx]
         if not os.path.exists(path):
             return
         img = QImage(path)
         if not img.isNull():
             dpr = self.devicePixelRatio() or 1.0
             max_px = int(320 * dpr)
-            self._input_original = img.scaled(
+            self._input_originals[idx] = img.scaled(
                 max_px, max_px,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
@@ -378,10 +412,20 @@ class PreferredResultsWindow(QWidget):
         self._compare_active = checked
         if hasattr(self, '_slider_opacity'):
             self._slider_opacity.setVisible(checked)
+        if hasattr(self, '_combo_input'):
+            self._combo_input.setVisible(checked)
         if checked:
             self._refresh_compare()
         else:
             self._restore_original_images()
+
+    def _on_input_selection_changed(self, combo_idx):
+        if combo_idx < 0:
+            return
+        self._selected_input_idx = combo_idx
+        self._load_input_image(combo_idx)
+        if self._compare_active:
+            self._refresh_compare()
 
     def _on_opacity_changed(self, value):
         self._compare_opacity = value / 100.0
@@ -389,7 +433,7 @@ class PreferredResultsWindow(QWidget):
             self._refresh_compare()
 
     def _refresh_compare(self):
-        orig_img = self._input_original
+        orig_img = self._input_originals.get(self._selected_input_idx)
         if orig_img is None:
             return
         dpr = self.devicePixelRatio() or 1.0

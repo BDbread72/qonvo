@@ -1465,8 +1465,14 @@ class WhiteBoardPlugin(BoardPlugin):
             self._preferred_expected[node_id] = actual_count
             node._on_preferred_selected = self._on_chat_preferred_option_selected
             node._on_rework = self._on_chat_rework_requested
-            first_img = next((f for f in (files or []) if isinstance(f, str) and os.path.exists(f)), None)
-            node._pref_input_image = first_img
+            input_imgs = [f for f in (files or []) if isinstance(f, str) and os.path.exists(f)]
+            if dim_images:
+                seen = set(input_imgs)
+                for di in dim_images:
+                    if di not in seen:
+                        input_imgs.append(di)
+                        seen.add(di)
+            node._pref_input_images = input_imgs
             node.set_response(f"생성 중... (0/{actual_count})", done=False)
 
             self._rework_params[node_id] = {

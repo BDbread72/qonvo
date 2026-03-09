@@ -402,7 +402,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.pending_results = []
         self._on_preferred_selected = None
         self._on_rework = None
-        self._pref_input_image = None
+        self._pref_input_images = []
         self._pref_window = None
         self._log_window = None
         self.meta_output_ports = {}
@@ -966,7 +966,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         self._pref_window = PreferredResultsWindow(
             self.pending_results,
-            input_image_path=self._pref_input_image,
+            input_images=self._pref_input_images,
         )
         self._pref_window.selection_confirmed.connect(self._on_pref_confirmed)
         self._pref_window.selection_cancelled.connect(self._on_pref_cancelled)
