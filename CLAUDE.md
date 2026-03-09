@@ -169,6 +169,33 @@ from v.settings import get_setting, set_setting, get_api_keys
 - 새 필드를 `get_data()`에 추가하면 → `_materialize`에서 복원 코드도 반드시 추가
 - UI 위젯 상태 (setChecked, setValue, setEnabled)는 명시적 복원. 시그널 부수효과에 의존하지 말 것
 
+## Versioning (버전 관리)
+
+### 형식: `beta-X.Y.Z`
+- **X** (major): 대규모 변경, 호환성 변경. main 브랜치 = X.0.0만 보관
+- **Y** (minor): 새 기능 추가. main에서 `Y` 브랜치 생성 (예: `1.0`, `1.1`)
+- **Z** (patch): 버그 수정, 소규모 개선. minor 브랜치에서 작업
+- `beta-` 접두사 유지
+
+### 브랜치 전략
+```
+main              ← X.0.0 릴리스만 (beta-1.0.0, beta-2.0.0, ...)
+ ├── 1.0          ← 1.0.x 패치 라인
+ ├── 1.1          ← 1.1.x 기능 라인 (서버 모드 등)
+ └── 2.0          ← (미래) 2.0.x
+```
+
+- **main**: X.0.0 태그가 찍힌 안정 버전만. 직접 커밋 금지
+- **Y 브랜치** (1.0, 1.1, ...): minor 버전 작업 브랜치. main에서 분기
+- 작업은 항상 해당 minor 브랜치에서 수행
+- 버전은 `build.toml`의 `[app] version` 필드로 관리
+- 태그: `beta-X.Y.Z` (릴리스 시)
+
+### 버전 변경 시
+1. `build.toml`의 version 업데이트
+2. 커밋 + 태그
+3. push (브랜치 + 태그)
+
 ## Command Interpretation (사용자 명령 해석)
 
 사용자의 자연어 명령을 아래 규칙에 따라 해석하고 실행할 것.
