@@ -50,6 +50,7 @@ class WhiteboardView(QGraphicsView):
         self._pan_start = QPointF()
         self._pan_scroll_start_h = 0
         self._pan_scroll_start_v = 0
+        self._right_click_origin = None
         self._zoom = 1.0
 
         # 다중 선택 (러버밴드)
@@ -232,6 +233,11 @@ class WhiteboardView(QGraphicsView):
         if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton):
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            if event.button() == Qt.MouseButton.RightButton and self._right_click_origin is not None:
+                delta = event.position() - self._right_click_origin
+                if (delta.x() ** 2 + delta.y() ** 2) < 25:
+                    self._show_context_menu(event.position())
+            self._right_click_origin = None
         elif event.button() == Qt.MouseButton.LeftButton and self._port_dragging:
             # 포트 드래그 완료
             scene_pos = self.mapToScene(event.pos())
@@ -289,6 +295,76 @@ class WhiteboardView(QGraphicsView):
                     if cursor.hasSelection():
                         cursor.clearSelection()
                         item.setTextCursor(cursor)
+
+    def _show_context_menu(self, view_pos):
+        from PyQt6.QtWidgets import QMenu
+        scene_pos = self.mapToScene(view_pos.toPoint())
+        item = self.scene().itemAt(scene_pos, self.transform())
+
+        from .items import ImageCardItem
+        img_card = None
+        check = item
+        while check is not None:
+            if isinstance(check, ImageCardItem):
+                img_card = check
+                break
+            check = check.parentItem()
+
+        if img_card is None:
+            return
+
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {Theme.BG_SECONDARY};
+                color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.GRID_LINE};
+                border-radius: 4px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 3px;
+            }}
+            QMenu::item:selected {{
+                background-color: {Theme.ACCENT_PRIMARY};
+                color: white;
+            }}
+        """)
+
+        from v.services.vision import has_vision_api_key
+        vision_action = menu.addAction("Use Vision")
+        vision_action.setEnabled(bool(img_card.image_path))
+        vision_action.triggered.connect(lambda: self._open_vision_dialog(img_card))
+
+        global_pos = self.mapToGlobal(view_pos.toPoint())
+        menu.exec(global_pos)
+
+    def _open_vision_dialog(self, img_card):
+        from .vision_dialog import VisionDialog
+        import os
+
+        image_path = img_card.image_path
+        if not image_path or not os.path.exists(image_path):
+            if ImageCardItem._board_temp_dir and image_path:
+                candidate = os.path.join(
+                    ImageCardItem._board_temp_dir,
+                    os.path.basename(image_path),
+                )
+                if os.path.exists(candidate):
+                    image_path = candidate
+            if not image_path or not os.path.exists(image_path):
+                return
+
+        existing = getattr(img_card, '_vision_results', None)
+        dialog = VisionDialog(image_path, existing_results=existing, parent=self)
+        dialog.results_ready.connect(
+            lambda raw, card=img_card: self._on_vision_results(card, raw)
+        )
+        dialog.show()
+
+    def _on_vision_results(self, img_card, raw: dict):
+        img_card._vision_results = raw
 
     def _check_dimension_drop(self):
         """드래그 완료 후 차원 아이템과 겹침 감지 → 차원 이동."""
@@ -412,6 +488,7 @@ class WhiteboardView(QGraphicsView):
             self._pan_scroll_start_h = self.horizontalScrollBar().value()
             self._pan_scroll_start_v = self.verticalScrollBar().value()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._right_click_origin = event.position() if event.button() == Qt.MouseButton.RightButton else None
         elif event.button() == Qt.MouseButton.LeftButton:
             # 클릭한 위치의 아이템 확인
             item = self.itemAt(event.pos())

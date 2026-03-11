@@ -1038,6 +1038,8 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                  width=self._width, height=self._height,
                  image_path=self.image_path,
                  hidden=self._hidden)
+        if hasattr(self, '_vision_results') and self._vision_results:
+            d["vision_results"] = self._vision_results
         return d
 
 

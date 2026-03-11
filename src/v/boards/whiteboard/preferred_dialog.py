@@ -24,22 +24,27 @@ class _ImageLoader(QThread):
 
     def run(self):
         """백그라운드에서 이미지를 디코딩하고 스케일링한 뒤 로드 완료 시그널을 방출한다."""
-        raw = None
-        try:
-            if isinstance(self._img_data, bytes):
-                raw = self._img_data
-            elif isinstance(self._img_data, str):
-                if self._img_data.startswith("data:image"):
-                    _, encoded = self._img_data.split(",", 1)
-                    raw = base64.b64decode(encoded)
-                else:
-                    raw = base64.b64decode(self._img_data)
-        except Exception:
-            return
-        if not raw:
-            return
-        img = QImage.fromData(raw)
-        if img.isNull():
+        import os
+        img = None
+        if isinstance(self._img_data, str) and os.path.isfile(self._img_data):
+            img = QImage(self._img_data)
+        else:
+            raw = None
+            try:
+                if isinstance(self._img_data, bytes):
+                    raw = self._img_data
+                elif isinstance(self._img_data, str):
+                    if self._img_data.startswith("data:image"):
+                        _, encoded = self._img_data.split(",", 1)
+                        raw = base64.b64decode(encoded)
+                    else:
+                        raw = base64.b64decode(self._img_data)
+            except Exception:
+                return
+            if not raw:
+                return
+            img = QImage.fromData(raw)
+        if img is None or img.isNull():
             return
         orig_w, orig_h = img.width(), img.height()
         max_px = int(self._max_px * self._dpr)

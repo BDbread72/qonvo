@@ -203,7 +203,7 @@ def _extract_qonvo_to_dir(filepath: Path, temp_dir: Path) -> bytes:
                     raw = zlib.decompress(raw)
                 board_json_data = raw
 
-            elif name.startswith('attachments/') or name.startswith('repositories/'):
+            elif name.startswith('attachments/') or name.startswith('repositories/') or name.startswith('archives/'):
                 # 첨부파일은 디스크에 직접 스트리밍 (메모리 최소화)
                 out_path = temp_dir / name
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,38 +343,57 @@ class BoardManager:
         boards_dir = BoardManager.get_boards_dir()
         filepath = boards_dir / f"{name}.qonvo"
         temp_filepath = boards_dir / f"{name}.qonvo.tmp"
-        backup_filepath = boards_dir / f"{name}.qonvo.backup"
 
         logger.info(f"[SAVE] Starting board save: {name}")
 
         with BoardManager._io_lock:
-          return BoardManager._save_impl(name, data, boards_dir, filepath, temp_filepath, backup_filepath)
+          return BoardManager._save_impl(name, data, boards_dir, filepath, temp_filepath)
 
     @staticmethod
-    def _save_impl(name, data, boards_dir, filepath, temp_filepath, backup_filepath):
+    def _get_backup_dir() -> Path:
+        from v.settings import get_setting
+        custom = get_setting("backup_path")
+        if custom and Path(custom).is_absolute():
+            d = Path(custom)
+        else:
+            if os.name == 'nt':
+                base = Path(os.environ.get('APPDATA', Path.home()))
+            else:
+                base = Path.home() / '.config'
+            d = base / 'Qonvo' / 'backups'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _save_impl(name, data, boards_dir, filepath, temp_filepath):
         try:
-            # D1: 기존 파일 백업 (최대 3세대 유지, 각 단계 보호)
-            if filepath.exists():
-                backup3 = boards_dir / f"{name}.qonvo.backup3"
-                backup2 = boards_dir / f"{name}.qonvo.backup2"
+            from v.settings import get_setting
+            backup_enabled = get_setting("backup_enabled")
+            if backup_enabled is None:
+                backup_enabled = True
+            backup_count = get_setting("backup_count")
+            if not isinstance(backup_count, int) or backup_count < 1:
+                backup_count = 5
+
+            if filepath.exists() and backup_enabled:
                 try:
-                    if backup2.exists():
+                    backup_dir = BoardManager._get_backup_dir()
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    backup_path = backup_dir / f"{name}_{ts}.qonvo.bak"
+                    shutil.copy2(filepath, backup_path)
+                    logger.info(f"[SAVE] Backup created: {backup_path} ({filepath.stat().st_size:,} bytes)")
+
+                    existing = sorted(
+                        backup_dir.glob(f"{name}_*.qonvo.bak"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    for old in existing[backup_count:]:
                         try:
-                            if backup3.exists():
-                                backup3.unlink()
-                        except OSError as e:
-                            logger.warning(f"[SAVE] Failed to remove backup3: {e}")
-                        try:
-                            backup2.rename(backup3)
-                        except OSError as e:
-                            logger.warning(f"[SAVE] Failed to rotate backup2->backup3: {e}")
-                    if backup_filepath.exists():
-                        try:
-                            backup_filepath.rename(backup2)
-                        except OSError as e:
-                            logger.warning(f"[SAVE] Failed to rotate backup->backup2: {e}")
-                    shutil.copy2(filepath, backup_filepath)
-                    logger.info(f"[SAVE] Backup created: {backup_filepath} ({filepath.stat().st_size:,} bytes)")
+                            old.unlink()
+                            logger.debug(f"[SAVE] Removed old backup: {old.name}")
+                        except OSError:
+                            pass
                 except OSError as e:
                     logger.error(f"[SAVE] Backup creation failed: {e}")
 
@@ -399,7 +418,7 @@ class BoardManager:
                     return fpath
                 normalized = fpath.replace('\\', '/')  # Windows 경로 구분자 정규화
                 # Lazy loading 미생성 아이템: attachments/xxx.png → temp_dir/attachments/xxx.png
-                if normalized.startswith('attachments/') or normalized.startswith('repositories/'):
+                if normalized.startswith('attachments/') or normalized.startswith('repositories/') or normalized.startswith('archives/'):
                     resolved = temp_dir / normalized
                     if resolved.exists():
                         logger.debug(f"[SAVE] Resolved lazy path: {fpath} → {resolved}")
@@ -445,7 +464,6 @@ class BoardManager:
                         logger.warning(f"[SAVE] Missing AI image: {fpath}")
                 node['ai_image_paths'] = new_ai_imgs
 
-                # 히스토리 이미지
                 for entry in node.get('history', []):
                     new_imgs = []
                     for fpath in entry.get('images', []):
@@ -456,8 +474,26 @@ class BoardManager:
                             missing_files.append(fpath)
                     entry['images'] = new_imgs
 
+                    for cand in entry.get('preferred_candidates', []):
+                        new_cand_imgs = []
+                        for fpath in cand.get('images', []):
+                            mapped = _map_file(fpath) if fpath else None
+                            if mapped:
+                                new_cand_imgs.append(mapped)
+                            elif fpath:
+                                missing_files.append(fpath)
+                        cand['images'] = new_cand_imgs
+
             for node in data.get('nodes', []):
                 _process_node_attachments(node)
+
+            for node in data.get('nodes', []):
+                archive_rel = node.get('archive_path', '')
+                if archive_rel:
+                    resolved = _resolve_attachment(archive_rel)
+                    if resolved and resolved not in attachments_map:
+                        attachments_map[resolved] = archive_rel
+                        logger.info(f"[SAVE] Mapped archive: {archive_rel}")
 
             # 이미지 카드 첨부파일 처리
             for card in data.get('image_cards', []):
@@ -680,7 +716,7 @@ class BoardManager:
 
                         attachment_count = 0
                         for name in zf.namelist():
-                            if name.startswith('attachments/') or name.startswith('repositories/'):
+                            if name.startswith('attachments/') or name.startswith('repositories/') or name.startswith('archives/'):
                                 try:
                                     zf.extract(name, staging_dir)
                                     attachment_count += 1

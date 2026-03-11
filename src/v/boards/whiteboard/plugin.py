@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, QThread, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsProxyWidget, QGraphicsScene
 
+from q import t
 from v.boards.base import BoardPlugin
 from v.settings import get_board_size, get_api_key, get_api_keys, get_model_options
 from v.provider import GeminiProvider, ChatMessage
@@ -1168,11 +1169,17 @@ class WhiteBoardPlugin(BoardPlugin):
             if isinstance(raw, bytes):
                 img_bytes = raw
             elif isinstance(raw, str):
-                if raw.startswith("data:image"):
+                if os.path.isfile(raw):
+                    card.set_image(raw)
+                    return
+                elif raw.startswith("data:image"):
                     _, encoded = raw.split(",", 1)
                     img_bytes = base64.b64decode(encoded)
                 else:
-                    img_bytes = base64.b64decode(raw)
+                    try:
+                        img_bytes = base64.b64decode(raw)
+                    except Exception:
+                        pass
 
         # 2. 소스 노드의 image_path가 있으면 직접 사용
         if not img_bytes:
@@ -1301,29 +1308,37 @@ class WhiteBoardPlugin(BoardPlugin):
             img_dir.mkdir(parents=True, exist_ok=True)
 
             for idx, img_data in enumerate(images):
-                # 이미지 데이터 디코딩
-                raw_bytes = None
-                if isinstance(img_data, bytes):
-                    raw_bytes = img_data
-                elif isinstance(img_data, str):
-                    if img_data.startswith("data:image"):
-                        header, encoded = img_data.split(",", 1)
-                        raw_bytes = base64.b64decode(encoded)
-                    else:
-                        raw_bytes = base64.b64decode(img_data)
+                img_path = None
+                if isinstance(img_data, str) and os.path.isfile(img_data):
+                    img_path = img_data
+                else:
+                    raw_bytes = None
+                    if isinstance(img_data, bytes):
+                        raw_bytes = img_data
+                    elif isinstance(img_data, str):
+                        if img_data.startswith("data:image"):
+                            header, encoded = img_data.split(",", 1)
+                            raw_bytes = base64.b64decode(encoded)
+                        else:
+                            try:
+                                raw_bytes = base64.b64decode(img_data)
+                            except Exception:
+                                continue
 
-                if not raw_bytes:
-                    continue
+                    if not raw_bytes:
+                        continue
 
-                # 보드별 temp에 UUID 파일로 저장
-                img_filename = f"{uuid.uuid4().hex}.png"
-                img_path = os.path.join(img_dir, img_filename)
-                try:
-                    with open(img_path, "wb") as f:
-                        f.write(raw_bytes)
-                    logger.info(f"[DIM] Saved image: {img_path} ({len(raw_bytes)} bytes)")
-                except Exception as e:
-                    logger.error(f"[DIM] Failed to save image: {e}")
+                    img_filename = f"{uuid.uuid4().hex}.png"
+                    img_path = os.path.join(img_dir, img_filename)
+                    try:
+                        with open(img_path, "wb") as f:
+                            f.write(raw_bytes)
+                        logger.info(f"[DIM] Saved image: {img_path} ({len(raw_bytes)} bytes)")
+                    except Exception as e:
+                        logger.error(f"[DIM] Failed to save image: {e}")
+                        continue
+
+                if not img_path:
                     continue
 
                 # 이미지 실제 크기 확인
@@ -1565,12 +1580,31 @@ class WhiteBoardPlugin(BoardPlugin):
                 )
 
     def _on_chat_pref_image(self, node, payload):
-        """Chat Preferred: 이미지 모델 워커 완료"""
         images = payload.get("images", [])
         text = payload.get("text", "")
         if not images:
             text = text if text else "이미지 생성 실패"
-        self._on_chat_pref_finished(node, text, images)
+            self._on_chat_pref_finished(node, text, [])
+            return
+        import uuid, os
+        from v.temp_file_manager import TempFileManager
+        from .chat_node import ChatNodeWidget
+        temp_manager = TempFileManager()
+        saved_paths = []
+        for img_data in images:
+            raw_bytes = node._decode_image_data(img_data)
+            if not raw_bytes:
+                continue
+            temp_dir = ChatNodeWidget._board_temp_dir or __import__('tempfile').gettempdir()
+            temp_path = os.path.join(temp_dir, f"{uuid.uuid4().hex}.png")
+            try:
+                with open(temp_path, "wb") as f:
+                    f.write(raw_bytes)
+                temp_manager.register(temp_path)
+                saved_paths.append(temp_path)
+            except Exception:
+                continue
+        self._on_chat_pref_finished(node, text, saved_paths)
 
     def _on_chat_pref_error(self, node, error):
         """Chat Preferred: 워커 에러"""
@@ -2498,7 +2532,25 @@ class WhiteBoardPlugin(BoardPlugin):
                 if category not in data:
                     data[category] = []
                 data[category].extend(copy.deepcopy(rows))
-            data["edges"].extend(self._lazy_mgr.get_pending_edges())
+            saved_edge_keys = {
+                (e.get("source_node_id", e.get("start_node_id")),
+                 e.get("target_node_id", e.get("end_node_id")),
+                 e.get("source_port_name", e.get("start_key", "_default")),
+                 e.get("target_port_name", e.get("end_key", "_default")))
+                for e in data["edges"]
+            }
+            for pe in self._lazy_mgr.get_pending_edges():
+                key = (
+                    pe.get("source_node_id", pe.get("start_node_id")),
+                    pe.get("target_node_id", pe.get("end_node_id")),
+                    pe.get("source_port_name", pe.get("start_key", "_default")),
+                    pe.get("target_port_name", pe.get("end_key", "_default")),
+                )
+                if key not in saved_edge_keys:
+                    data["edges"].append(pe)
+                    saved_edge_keys.add(key)
+                else:
+                    logger.warning(f"[EDGE DEDUP] Skipped duplicate pending edge: {key}")
 
         # 사용된 플러그인 모델 수집
         used_models = set()
@@ -3070,6 +3122,16 @@ class WhiteBoardPlugin(BoardPlugin):
                 "tokens_out": row.get("tokens_out", 0),
                 "model": row.get("model", ""),
             }]
+        node._archive_path = row.get("archive_path")
+        node._archived_count = row.get("archived_count", 0)
+        if node._history:
+            last = node._history[-1]
+            candidates = last.get("preferred_candidates", [])
+            if candidates:
+                node.pending_results = [(c["text"], c.get("images", [])) for c in candidates]
+                node._btn_pref_view.setText(t("chat.preferred_candidates", count=len(candidates)))
+                node._btn_pref_view.show()
+                node._on_preferred_selected = self._on_chat_preferred_option_selected
         node._running = False  # Always idle on load
         node._update_status("done" if node._history else "idle")
 
@@ -3253,6 +3315,8 @@ class WhiteBoardPlugin(BoardPlugin):
         if item and row.get("hidden", False):
             item._hidden = True
             logger.info(f"[IMAGE_CARD] Restored hidden state: node_id={item.node_id} path={row.get('image_path', '')}")
+        if item and row.get("vision_results"):
+            item._vision_results = row["vision_results"]
 
     def _materialize_dimension(self, row):
         item = DimensionItem.from_data(row)
@@ -3436,6 +3500,10 @@ class WhiteBoardPlugin(BoardPlugin):
             return self.image_card_items[node_id]
         if node_id in self.dimension_items:
             return self.dimension_items[node_id]
+        if node_id in self.text_items:
+            return self.text_items[node_id]
+        if node_id in self.group_frame_items:
+            return self.group_frame_items[node_id]
         if node_id in self.nixi_proxies:
             return self.nixi_proxies[node_id]
         if node_id in self.ups_proxies:
@@ -3673,6 +3741,22 @@ class WhiteBoardPlugin(BoardPlugin):
             if node and hasattr(node, 'reposition_ports'):
                 try:
                     node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for item in self.image_card_items.values():
+            if hasattr(item, '_reposition_own_ports'):
+                try:
+                    item._reposition_own_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for item in self.dimension_items.values():
+            if hasattr(item, '_reposition_own_ports'):
+                try:
+                    item._reposition_own_ports()
                     reposition_count += 1
                 except Exception:
                     pass

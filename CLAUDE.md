@@ -135,7 +135,8 @@ from v.settings import get_setting, set_setting, get_api_keys
 
 ## Data Storage (Windows)
 - **Settings**: `%APPDATA%/Qonvo/settings.json`
-- **Boards**: `%APPDATA%/Qonvo/boards/*.qonvo` (+ `.backup`, `.backup2`, `.backup3`)
+- **Boards**: `%APPDATA%/Qonvo/boards/*.qonvo`
+- **Backups**: `%APPDATA%/Qonvo/backups/{name}_{timestamp}.qonvo.bak` (settings: `backup_enabled`, `backup_path`, `backup_count`)
 - **Logs (Primary)**: `%APPDATA%/Qonvo/logs/qonvo.db` (SQLite, WAL mode)
 - **Logs (Backup)**: `%APPDATA%/Qonvo/logs/qonvo.log` (rotating 5MB x 3)
 - **Temp**: `%APPDATA%/Qonvo/boards/.temp/<board>/attachments/` (board-isolated)
@@ -157,8 +158,9 @@ from v.settings import get_setting, set_setting, get_api_keys
 - **상대 경로 해석 필수** — `attachments/xxx.png` 같은 상대 경로는 반드시 `_resolve_attachment()` 헬퍼로 temp 디렉토리에서 실제 파일 찾기. `Path(relative).exists()`는 항상 False 반환
 
 ### 백업
-- **3세대 백업 로테이션** — `.backup` → `.backup2` → `.backup3` 자동 관리. 저장 시 이전 파일 반드시 백업
-- 백업 없이 파일 덮어쓰기 절대 금지
+- **타임스탬프 기반 백업** — `%APPDATA%/Qonvo/backups/{name}_{YYYYMMDD_HHMMSS}.qonvo.bak`
+- 최근 N개만 유지 (기본 5, settings.json `backup_count`로 설정)
+- `backup_enabled: false`로 비활성화 가능, `backup_path`로 경로 변경 가능
 
 ### 로깅
 - **저장/로드 모든 단계에 로그 기록** — 파일 매핑, 경로 해석, 무결성 검증 등

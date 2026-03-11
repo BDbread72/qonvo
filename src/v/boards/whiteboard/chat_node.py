@@ -8,6 +8,8 @@ Chat node widget.
 """
 import base64
 import copy
+import gzip
+import json
 import math
 import os
 import tempfile
@@ -32,10 +34,15 @@ class ChatLogWindow(QWidget):
 
     _PAGE_SIZE = 10
 
-    def __init__(self, node_id, history, parent=None):
+    def __init__(self, node_id, history, parent=None,
+                 archived_count=0, on_pack=None, on_unpack=None, on_view_archive=None):
         super().__init__(parent, Qt.WindowType.Window)
         self._node_id = node_id
         self._history = history
+        self._archived_count = archived_count
+        self._on_pack = on_pack
+        self._on_unpack = on_unpack
+        self._on_view_archive = on_view_archive
         self._total_pages = max(1, (len(history) + self._PAGE_SIZE - 1) // self._PAGE_SIZE)
         self._current_page = self._total_pages - 1
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -50,6 +57,43 @@ class ChatLogWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+
+        action_btn_style = f"""
+            QPushButton {{
+                background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.NODE_BORDER}; border-radius: 4px;
+                font-size: 10px; padding: 3px 10px;
+            }}
+            QPushButton:hover {{ background-color: {Theme.ACCENT_PRIMARY}; color: white; }}
+        """
+
+        if self._archived_count > 0:
+            archive_bar = QHBoxLayout()
+            archive_bar.setSpacing(6)
+            archive_lbl = QLabel(f"{self._archived_count}entries packed")
+            archive_lbl.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-size: 11px;")
+            archive_bar.addWidget(archive_lbl)
+            archive_bar.addStretch()
+            if self._on_view_archive:
+                btn_view = QPushButton("View Archive")
+                btn_view.setStyleSheet(action_btn_style)
+                btn_view.clicked.connect(self._on_view_archive)
+                archive_bar.addWidget(btn_view)
+            if self._on_unpack:
+                btn_unpack = QPushButton("Unpack")
+                btn_unpack.setStyleSheet(action_btn_style)
+                btn_unpack.clicked.connect(self._on_unpack)
+                archive_bar.addWidget(btn_unpack)
+            layout.addLayout(archive_bar)
+
+        if len(self._history) > 20 and self._on_pack:
+            pack_bar = QHBoxLayout()
+            pack_bar.addStretch()
+            btn_pack = QPushButton(f"Pack ({len(self._history) - 20} entries)")
+            btn_pack.setStyleSheet(action_btn_style)
+            btn_pack.clicked.connect(self._on_pack)
+            pack_bar.addWidget(btn_pack)
+            layout.addLayout(pack_bar)
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -312,44 +356,58 @@ class ChatLogWindow(QWidget):
                         img_label.mousePressEvent = lambda e, p=img_path: self._open_file(p)
                         fl.addWidget(img_label)
 
-        # preferred candidates
-        preferred_texts = entry.get("preferred_texts", [])
-        if preferred_texts:
-            pref_header = QLabel(t("chat.preferred_candidates", count=len(preferred_texts)))
+        candidates = entry.get("preferred_candidates", [])
+        if not candidates:
+            old_texts = entry.get("preferred_texts", [])
+            if old_texts:
+                candidates = [{"text": t_, "images": []} for t_ in old_texts]
+        if candidates:
+            pref_header = QLabel(t("chat.preferred_candidates", count=len(candidates)))
             pref_header.setStyleSheet(
                 f"color: {Theme.ACCENT_PRIMARY}; font-size: 10px; font-weight: bold; border: none;"
             )
             fl.addWidget(pref_header)
 
-            for i, ptext in enumerate(preferred_texts):
-                if not ptext:
+            for i, cand in enumerate(candidates):
+                ptext = cand.get("text", "") if isinstance(cand, dict) else str(cand)
+                cand_images = cand.get("images", []) if isinstance(cand, dict) else []
+                if not ptext and not cand_images:
                     continue
-                # candidate number
                 num_label = QLabel(f"#{i + 1}")
                 num_label.setStyleSheet(
                     f"color: {Theme.TEXT_DISABLED}; font-size: 10px; font-weight: bold; "
                     f"border: none; margin-top: 4px;"
                 )
                 fl.addWidget(num_label)
-                # candidate text
-                cand_label = QLabel(ptext)
-                cand_label.setWordWrap(True)
-                cand_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                cand_label.setStyleSheet(
-                    f"background-color: {Theme.BG_TERTIARY}; border: 1px solid {Theme.BG_HOVER}; "
-                    f"border-radius: 6px; padding: 6px 8px; color: {Theme.TEXT_PRIMARY}; font-size: 11px;"
-                )
-                fl.addWidget(cand_label)
-                # copy button
-                cp_btn = QPushButton(t("button.copy"))
-                cp_btn.setStyleSheet(
-                    f"QPushButton {{ background: transparent; color: {Theme.TEXT_TERTIARY}; "
-                    f"border: none; font-size: 10px; padding: 2px 4px; }}"
-                    f"QPushButton:hover {{ color: #aaa; }}"
-                )
-                cp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                cp_btn.clicked.connect(lambda checked, txt=ptext, btn=cp_btn: self._copy_text(txt, btn))
-                fl.addWidget(cp_btn, alignment=Qt.AlignmentFlag.AlignRight)
+                if ptext:
+                    cand_label = QLabel(ptext)
+                    cand_label.setWordWrap(True)
+                    cand_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                    cand_label.setStyleSheet(
+                        f"background-color: {Theme.BG_TERTIARY}; border: 1px solid {Theme.BG_HOVER}; "
+                        f"border-radius: 6px; padding: 6px 8px; color: {Theme.TEXT_PRIMARY}; font-size: 11px;"
+                    )
+                    fl.addWidget(cand_label)
+                    cp_btn = QPushButton(t("button.copy"))
+                    cp_btn.setStyleSheet(
+                        f"QPushButton {{ background: transparent; color: {Theme.TEXT_TERTIARY}; "
+                        f"border: none; font-size: 10px; padding: 2px 4px; }}"
+                        f"QPushButton:hover {{ color: #aaa; }}"
+                    )
+                    cp_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    cp_btn.clicked.connect(lambda checked, txt=ptext, btn=cp_btn: self._copy_text(txt, btn))
+                    fl.addWidget(cp_btn, alignment=Qt.AlignmentFlag.AlignRight)
+                for img_path in cand_images:
+                    if img_path and os.path.exists(img_path):
+                        pix = QPixmap(img_path)
+                        if not pix.isNull():
+                            scaled = pix.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                            img_label = QLabel()
+                            img_label.setPixmap(scaled)
+                            img_label.setStyleSheet("border: none;")
+                            img_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                            img_label.mousePressEvent = lambda e, p=img_path: self._open_file(p)
+                            fl.addWidget(img_label)
 
         return frame
 
@@ -413,6 +471,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         # Multi-run history
         self._history = []            # [{"user": str, "files": [], "response": str, "images": [], "tokens_in": int, "tokens_out": int, "model": str}, ...]
         self._current_streaming = ""
+        self._archive_path = None
+        self._archived_count = 0
 
         self.setMinimumSize(280, 200)
         self.resize(280, 200)
@@ -898,15 +958,44 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._btn_log.hide()
 
     def _open_log_window(self):
-        """Open the log window to view execution history."""
         if self._log_window is not None:
             self._log_window.raise_()
             self._log_window.activateWindow()
             return
-        self._log_window = ChatLogWindow(self.node_id, list(self._history))
-        # U2: weak ref 방식으로 안전한 콜백 (부모 노드 삭제 후 접근 방지)
         import weakref
         weak_self = weakref.ref(self)
+
+        def _do_pack():
+            s = weak_self()
+            if s and s.pack_history():
+                if s._log_window:
+                    s._log_window.close()
+                s._open_log_window()
+
+        def _do_unpack():
+            s = weak_self()
+            if s and s.unpack_history():
+                if s._log_window:
+                    s._log_window.close()
+                s._open_log_window()
+
+        def _do_view_archive():
+            s = weak_self()
+            if not s:
+                return
+            entries = s.load_archive_entries()
+            if entries:
+                win = ChatLogWindow(s.node_id, entries, parent=None)
+                win.setWindowTitle(f"Chat #{s.node_id} - Archive ({len(entries)} entries)")
+                win.show()
+
+        self._log_window = ChatLogWindow(
+            self.node_id, list(self._history),
+            archived_count=self._archived_count,
+            on_pack=_do_pack,
+            on_unpack=_do_unpack if self._archive_path else None,
+            on_view_archive=_do_view_archive if self._archive_path else None,
+        )
         self._log_window.destroyed.connect(
             lambda: (lambda ws=weak_self: setattr(ws(), '_log_window', None) if ws() is not None else None)()
         )
@@ -943,14 +1032,17 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._btn_pref_view.setText(t("chat.preferred_candidates", count=count))
         self._btn_pref_view.show()
 
-        # 히스토리에 전체 후보 텍스트 저장 + 응답 텍스트 갱신
         summary = t("chat.preferred_done", count=count)
         self.ai_response = summary
         if self._history:
-            preferred_texts = []
-            for text, _images in results:
-                preferred_texts.append(text or "")
-            self._history[-1]["preferred_texts"] = preferred_texts
+            preferred_candidates = []
+            for text, images in results:
+                preferred_candidates.append({
+                    "text": text or "",
+                    "images": list(images or []),
+                })
+            self._history[-1]["preferred_candidates"] = preferred_candidates
+            self._history[-1]["preferred_texts"] = [c["text"] for c in preferred_candidates]
             self._history[-1]["response"] = summary
 
     def _open_preferred_window(self):
@@ -1462,8 +1554,89 @@ class ChatNodeWidget(QWidget, BaseNode):
         else:
             super().paintEvent(event)
 
+    def pack_history(self, keep_recent=20):
+        if len(self._history) <= keep_recent:
+            return False
+        to_archive = self._history[:-keep_recent]
+        self._history = self._history[-keep_recent:]
+
+        temp_dir = self._board_temp_dir
+        if not temp_dir:
+            return False
+        archive_dir = os.path.join(temp_dir, "archives")
+        os.makedirs(archive_dir, exist_ok=True)
+        archive_file = os.path.join(archive_dir, f"chat_{self.node_id}.json.gz")
+
+        existing = []
+        if os.path.exists(archive_file):
+            try:
+                with gzip.open(archive_file, "rt", encoding="utf-8") as f:
+                    data = json.loads(f.read())
+                    existing = data.get("entries", [])
+            except Exception:
+                pass
+
+        all_entries = existing + to_archive
+        payload = {
+            "node_id": self.node_id,
+            "packed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "entries": all_entries,
+        }
+        with gzip.open(archive_file, "wt", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False))
+
+        self._archive_path = f"archives/chat_{self.node_id}.json.gz"
+        self._archived_count = len(all_entries)
+        self._update_status("done")
+        if callable(self.on_modified):
+            self.on_modified()
+        return True
+
+    def unpack_history(self):
+        if not self._archive_path:
+            return False
+        temp_dir = self._board_temp_dir
+        if not temp_dir:
+            return False
+        archive_file = os.path.join(temp_dir, "archives", f"chat_{self.node_id}.json.gz")
+        if not os.path.exists(archive_file):
+            return False
+        try:
+            with gzip.open(archive_file, "rt", encoding="utf-8") as f:
+                data = json.loads(f.read())
+            archived = data.get("entries", [])
+        except Exception:
+            return False
+        self._history = archived + self._history
+        try:
+            os.remove(archive_file)
+        except OSError:
+            pass
+        self._archive_path = None
+        self._archived_count = 0
+        self._update_status("done")
+        if callable(self.on_modified):
+            self.on_modified()
+        return True
+
+    def load_archive_entries(self):
+        if not self._archive_path:
+            return []
+        temp_dir = self._board_temp_dir
+        if not temp_dir:
+            return []
+        archive_file = os.path.join(temp_dir, "archives", f"chat_{self.node_id}.json.gz")
+        if not os.path.exists(archive_file):
+            return []
+        try:
+            with gzip.open(archive_file, "rt", encoding="utf-8") as f:
+                data = json.loads(f.read())
+            return data.get("entries", [])
+        except Exception:
+            return []
+
     def get_data(self):
-        return {
+        d = {
             "type": "chat_node",
             "id": self.node_id,
             "x": self.proxy.pos().x() if self.proxy else 0,
@@ -1489,6 +1662,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             "meta_ports_enabled": self.meta_ports_enabled,
             "history": copy.deepcopy(self._history),
         }
+        if self._archive_path:
+            d["archive_path"] = self._archive_path
+            d["archived_count"] = self._archived_count
+        return d
 
     def cleanup_temp_files(self):
         """Clean up temp files created by this node."""
