@@ -109,11 +109,6 @@ class _BatchResumeWorker(QThread):
 
 
 class NodeProxyWidget(QGraphicsProxyWidget):
-    """노드 위젯을 감싸는 커스텀 프록시 (Phase 4: 이벤트 기반 업데이트)
-
-    노드 이동 시 포트 재배치를 자동으로 호출하여 엣지가 실시간으로 따라오도록 함.
-    스냅 엔진을 통해 PPT 스타일 정렬을 지원.
-    """
     def itemChange(self, change, value):
         import v.boards.whiteboard.items as _items_mod
 
@@ -149,6 +144,20 @@ class NodeProxyWidget(QGraphicsProxyWidget):
                             _items_mod._group_moving = False
 
         return result
+
+    def mouseReleaseEvent(self, event):
+        # 드래그 완료 시 서버에 node_move op 전송
+        # (ItemPositionHasChanged는 매 프레임 발생하므로 release에서만 전송)
+        super().mouseReleaseEvent(event)
+        pre = getattr(self, '_pre_move_pos', None)
+        if pre is not None and self.pos() != pre:
+            widget = self.widget()
+            node_id = getattr(widget, 'node_id', None) if widget else None
+            if node_id is not None:
+                scene = self.scene()
+                if scene and hasattr(scene, '_plugin') and hasattr(scene._plugin, '_send_node_move_op'):
+                    pos = self.pos()
+                    scene._plugin._send_node_move_op(node_id, pos.x(), pos.y())
 
 
 class WhiteBoardPlugin(BoardPlugin):
@@ -207,9 +216,12 @@ class WhiteBoardPlugin(BoardPlugin):
         self._parent_dimension_item: Optional[DimensionItem] = None
         self._history_search_window = None
 
-        self._node_data_cache: Dict[int, Any] = {}  # 노드 직렬화 캐시 (node_id -> data dict)
-        self._dirty_node_ids: set = set()  # 변경된 노드 ID 집합
-        self._save_generation: int = 0  # 저장 횟수 카운터
+        self._node_data_cache: Dict[int, Any] = {}
+        self._dirty_node_ids: set = set()
+        self._save_generation: int = 0
+
+        self._server_client = None
+        self._applying_remote_op = False
 
         # Phase 4: 30 FPS 타이머 제거, 이벤트 기반 업데이트로 전환
         # self._edge_timer = QTimer()  # [REMOVED]
@@ -268,6 +280,7 @@ class WhiteBoardPlugin(BoardPlugin):
         half = size / 2
         self.scene = QGraphicsScene()
         self.scene.setSceneRect(-half, -half, size, size)
+        self.scene._plugin = self
         self.app.bind(self.scene)
 
         # Create origin marker
@@ -326,6 +339,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.proxies[node_id] = proxy
         type_dict[node_id] = proxy
         self.app.nodes[node_id] = widget
+        self._send_node_add_op(node_id, widget, pos)
         self._notify_modified()
         return proxy
 
@@ -481,6 +495,354 @@ class WhiteBoardPlugin(BoardPlugin):
             self.on_modified()
         if self.view and hasattr(self.view, '_branch_graph'):
             self.view._branch_graph.mark_dirty()
+
+    # ── 서버 모드 ──────────────────────────────────────────────
+
+    _NODE_CATEGORY_MAP = {
+        'ChatNodeWidget': 'nodes',
+        'FunctionNodeWidget': 'function_nodes',
+        'RoundTableWidget': 'round_tables',
+        'StickyNoteWidget': 'sticky_notes',
+        'PromptNodeWidget': 'prompt_nodes',
+        'ButtonNodeWidget': 'buttons',
+        'ChecklistWidget': 'checklists',
+        'RepositoryNodeWidget': 'repository_nodes',
+        'NixiNodeWidget': 'nixi_nodes',
+        'UpsNodeWidget': 'ups_nodes',
+        'RmvNodeWidget': 'rmv_nodes',
+        'TextItem': 'texts',
+        'GroupFrameItem': 'group_frames',
+        'ImageCardItem': 'image_cards',
+        'DimensionItem': 'dimensions',
+    }
+
+    def _node_category(self, node) -> str:
+        return self._NODE_CATEGORY_MAP.get(type(node).__name__, 'nodes')
+
+    @property
+    def server_mode(self) -> bool:
+        """서버 연결 상태를 반환한다."""
+        return self._server_client is not None and self._server_client.is_connected
+
+    def set_server_client(self, client):
+        """서버 클라이언트를 연결하고 시그널을 바인딩한다."""
+        from .server_client import ServerClient
+        self._server_client = client
+        client.sync_received.connect(self._on_server_sync)
+        client.remote_ops.connect(self._on_remote_ops)
+        client.ai_progress.connect(self._on_ai_progress)
+        client.ai_complete.connect(self._on_ai_complete)
+
+    def detach_server_client(self):
+        """서버 클라이언트 연결을 해제하고 시그널을 정리한다."""
+        if self._server_client:
+            try:
+                self._server_client.sync_received.disconnect(self._on_server_sync)
+                self._server_client.remote_ops.disconnect(self._on_remote_ops)
+                self._server_client.ai_progress.disconnect(self._on_ai_progress)
+                self._server_client.ai_complete.disconnect(self._on_ai_complete)
+            except Exception:
+                pass
+        self._server_client = None
+
+    def _send_op(self, op_type: str, target, data: dict | None = None):
+        """원격 op 적용 중이 아닐 때만 서버에 op 전송."""
+        if self._applying_remote_op:
+            return
+        if self._server_client and self._server_client.is_connected:
+            self._server_client.send_op(op_type, str(target), data)
+
+    def _on_server_sync(self, snapshot: dict):
+        """서버 스냅샷 수신 시 restore_data()로 보드 복원 (루프 방지)."""
+        self._applying_remote_op = True
+        try:
+            self.restore_data(snapshot)
+        finally:
+            self._applying_remote_op = False
+
+    def _on_remote_ops(self, ops: list, author: str):
+        """서버에서 수신한 op 목록을 순차 적용 (루프 방지)."""
+        self._applying_remote_op = True
+        try:
+            for op in ops:
+                self._apply_remote_op(op)
+        finally:
+            self._applying_remote_op = False
+
+    def _on_ai_progress(self, node_id_str: str, chunk: str):
+        """서버에서 AI 스트리밍 청크 수신 → 해당 노드에 중간 응답 표시."""
+        node_id = int(node_id_str) if node_id_str.isdigit() else None
+        if node_id is None:
+            return
+        node = self.app.nodes.get(node_id)
+        if node and isinstance(node, ChatNodeWidget):
+            node.set_response(chunk, done=False)
+
+    def _on_ai_complete(self, node_id_str: str, result: dict):
+        """서버에서 AI 완료 수신 → 최종 응답 반영 + 완료 시그널."""
+        node_id = int(node_id_str) if node_id_str.isdigit() else None
+        if node_id is None:
+            return
+        node = self.app.nodes.get(node_id)
+        if node and isinstance(node, ChatNodeWidget):
+            text = result.get("text", "")
+            images = result.get("images", [])
+            tokens_in = result.get("tokens_in", 0)
+            tokens_out = result.get("tokens_out", 0)
+            if tokens_in or tokens_out:
+                node.set_tokens(tokens_in, tokens_out)
+            if images:
+                node.set_image_response(text, images)
+            else:
+                node.set_response(text, done=True)
+            self._emit_complete_signal(node)
+
+    def _handle_chat_send_server(self, node_id, node, model, message, files, prompt_entries):
+        """서버 모드: AI 요청을 서버에 위임한다. 로컬 히스토리에 먼저 추가."""
+        if not model:
+            node.set_response("No model selected", done=True)
+            return
+
+        effective_system_prompt = self.system_prompt
+        if prompt_entries:
+            sorted_entries = sorted(prompt_entries, key=lambda e: e.get("priority", 0))
+            system_parts = [e.get("text", "") for e in sorted_entries
+                           if e.get("role") == "system" and e.get("text")]
+            if system_parts:
+                effective_system_prompt = f"{effective_system_prompt}\n\n{''.join(system_parts)}".strip()
+
+        node.set_response("서버 처리 중...", done=False)
+
+        self._server_client.send_ai_request(
+            node_id=node_id,
+            model=model,
+            message=message or "",
+            files=[f for f in (files or []) if isinstance(f, str)],
+            system_prompt=effective_system_prompt,
+            options=get_model_options(model),
+        )
+
+    def _apply_remote_op(self, op: dict):
+        """op_type별 원격 처리 디스패치."""
+        op_type = op.get("op_type", "")
+        target = op.get("target", "")
+        data = op.get("data", {})
+
+        if op_type == "node_add":
+            self._remote_add_node(target, data)
+        elif op_type == "node_remove":
+            self._remote_remove_node(target)
+        elif op_type == "node_move":
+            self._remote_move_node(target, data)
+        elif op_type == "node_prop":
+            self._remote_node_prop(target, data)
+        elif op_type == "edge_add":
+            self._remote_add_edge(data)
+        elif op_type == "edge_remove":
+            self._remote_remove_edge(data)
+        elif op_type == "chat_append":
+            self._remote_chat_append(target, data)
+
+    def _remote_add_node(self, target: str, data: dict):
+        """원격 노드 생성."""
+        category = data.get("_category", "nodes")
+        node_id = int(target) if target.isdigit() else self._next_id()
+        self.app._next_id = max(self.app._next_id, node_id + 1)
+        pos = QPointF(data.get("x", 0), data.get("y", 0))
+
+        add_map = {
+            "nodes": self.add_node,
+            "function_nodes": self.add_function,
+            "round_tables": self.add_round_table,
+            "sticky_notes": self.add_sticky,
+            "prompt_nodes": self.add_prompt_node,
+            "buttons": self.add_button,
+            "checklists": self.add_checklist,
+            "repository_nodes": self.add_repository,
+            "nixi_nodes": self.add_nixi,
+            "ups_nodes": self.add_ups,
+            "rmv_nodes": self.add_rmv,
+            "texts": self.add_text_item,
+            "group_frames": self.add_group_frame,
+            "image_cards": self.add_image_card,
+        }
+        add_fn = add_map.get(category)
+        if add_fn:
+            add_fn(pos=pos, node_id=node_id)
+
+    def _remote_remove_node(self, target: str):
+        """원격 노드 삭제."""
+        node_id = int(target) if target.isdigit() else None
+        if node_id is None:
+            return
+        for d in (self.proxies, self.function_proxies, self.round_table_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.checklist_proxies, self.repository_proxies,
+                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+            if node_id in d:
+                self.delete_proxy_item(d[node_id])
+                return
+        for d in (self.image_card_items, self.dimension_items,
+                  self.text_items, self.group_frame_items):
+            if node_id in d:
+                self._delete_scene_item(d[node_id], d)
+                return
+
+    def _remote_move_node(self, target: str, data: dict):
+        """원격 노드 이동."""
+        node_id = int(target) if target.isdigit() else None
+        if node_id is None:
+            return
+        x, y = data.get("x", 0), data.get("y", 0)
+        for d in (self.proxies, self.function_proxies, self.round_table_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.checklist_proxies, self.repository_proxies,
+                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+            if node_id in d:
+                d[node_id].setPos(QPointF(x, y))
+                return
+        for d in (self.image_card_items, self.dimension_items,
+                  self.text_items, self.group_frame_items):
+            if node_id in d:
+                d[node_id].setPos(QPointF(x, y))
+                return
+
+    def _remote_node_prop(self, target: str, data: dict):
+        """원격 노드 속성 변경."""
+        node_id = int(target) if target.isdigit() else None
+        if node_id is None:
+            return
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+        key = data.get("key", "")
+        value = data.get("value")
+        if key and hasattr(node, key):
+            try:
+                setattr(node, key, value)
+            except Exception:
+                pass
+
+    def _remote_add_edge(self, data: dict):
+        """원격 엣지 추가."""
+        src_id = data.get("source_node_id")
+        tgt_id = data.get("target_node_id")
+        src_port_name = data.get("source_port_name", "_default")
+        tgt_port_name = data.get("target_port_name", "_default")
+        if src_id is None or tgt_id is None:
+            return
+
+        src_id = int(src_id) if isinstance(src_id, str) and src_id.isdigit() else src_id
+        tgt_id = int(tgt_id) if isinstance(tgt_id, str) and tgt_id.isdigit() else tgt_id
+
+        src_port = self._find_port(src_id, src_port_name, PortItem.OUTPUT)
+        tgt_port = self._find_port(tgt_id, tgt_port_name, PortItem.INPUT)
+        if src_port and tgt_port:
+            self.create_edge(src_port, tgt_port)
+
+    def _remote_remove_edge(self, data: dict):
+        """원격 엣지 제거."""
+        src_id = data.get("source_node_id")
+        tgt_id = data.get("target_node_id")
+        src_port_name = data.get("source_port_name", "_default")
+        tgt_port_name = data.get("target_port_name", "_default")
+
+        src_id = int(src_id) if isinstance(src_id, str) and src_id.isdigit() else src_id
+        tgt_id = int(tgt_id) if isinstance(tgt_id, str) and tgt_id.isdigit() else tgt_id
+
+        for edge in list(self._edges):
+            s_nid = self._owner_node_id(edge.source_port.parent_proxy)
+            t_nid = self._owner_node_id(edge.target_port.parent_proxy)
+            if (s_nid == src_id and t_nid == tgt_id
+                    and edge.source_port.port_name == src_port_name
+                    and edge.target_port.port_name == tgt_port_name):
+                self.remove_edge(edge)
+                return
+
+    def _remote_chat_append(self, target: str, data: dict):
+        """원격 채팅 메시지 추가."""
+        node_id = int(target) if target.isdigit() else None
+        if node_id is None:
+            return
+        node = self.app.nodes.get(node_id)
+        if node and isinstance(node, ChatNodeWidget) and hasattr(node, '_history'):
+            message = data.get("message", {})
+            if message:
+                node._history.append(message)
+                node._redraw_chat_area()
+
+    def _find_port(self, node_id, port_name: str, port_type: int) -> Optional[PortItem]:
+        """node_id + port_name으로 PortItem을 검색한다."""
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return None
+        if hasattr(node, 'iter_ports'):
+            for p in node.iter_ports():
+                if p.port_name == port_name and p.port_type == port_type:
+                    return p
+        proxy = getattr(node, 'proxy', None)
+        if proxy and hasattr(proxy, 'widget'):
+            w = proxy.widget()
+            if w and hasattr(w, 'iter_ports'):
+                for p in w.iter_ports():
+                    if p.port_name == port_name and p.port_type == port_type:
+                        return p
+        return None
+
+    # ── 서버 op 전송 헬퍼 ───────────────────────────────────────
+
+    def _send_node_add_op(self, node_id: int, node, pos: QPointF):
+        """op 전송 헬퍼: 노드 추가."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        category = self._node_category(node)
+        self._send_op("node_add", node_id, {
+            "_category": category,
+            "x": pos.x(),
+            "y": pos.y(),
+        })
+
+    def _send_node_remove_op(self, node_id):
+        """op 전송 헬퍼: 노드 제거."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        self._send_op("node_remove", node_id, {})
+
+    def _send_node_move_op(self, node_id: int, x: float, y: float):
+        """op 전송 헬퍼: 노드 이동."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        self._send_op("node_move", node_id, {"x": x, "y": y})
+
+    def _send_edge_add_op(self, edge: EdgeItem):
+        """op 전송 헬퍼: 엣지 추가."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        s_id = self._owner_node_id(edge.source_port.parent_proxy)
+        t_id = self._owner_node_id(edge.target_port.parent_proxy)
+        if s_id is None or t_id is None:
+            return
+        self._send_op("edge_add", "", {
+            "source_node_id": s_id,
+            "target_node_id": t_id,
+            "source_port_name": edge.source_port.port_name or "_default",
+            "target_port_name": edge.target_port.port_name or "_default",
+        })
+
+    def _send_edge_remove_op(self, edge: EdgeItem):
+        """op 전송 헬퍼: 엣지 제거."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        s_id = self._owner_node_id(edge.source_port.parent_proxy)
+        t_id = self._owner_node_id(edge.target_port.parent_proxy)
+        if s_id is None or t_id is None:
+            return
+        self._send_op("edge_remove", "", {
+            "source_node_id": s_id,
+            "target_node_id": t_id,
+            "source_port_name": edge.source_port.port_name or "_default",
+            "target_port_name": edge.target_port.port_name or "_default",
+        })
 
     def _manual_update_all_edges(self):
         """수동 엣지 업데이트 (초기화/디버그용)
@@ -737,6 +1099,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.app.nodes[node_id] = item
 
         self._attach_item_ports(item, PortItem.TYPE_FILE, PortItem.TYPE_FILE)
+        self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
 
@@ -752,6 +1115,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.app.nodes[node_id] = item
 
         self._attach_item_ports(item, PortItem.TYPE_STRING, PortItem.TYPE_STRING)
+        self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
 
@@ -877,6 +1241,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.scene.addItem(item)
         self.text_items[node_id] = item
         self.app.nodes[node_id] = item
+        self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
 
@@ -889,6 +1254,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.scene.addItem(item)
         self.group_frame_items[node_id] = item
         self.app.nodes[node_id] = item
+        self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
 
@@ -969,10 +1335,12 @@ class WhiteBoardPlugin(BoardPlugin):
         self._edges.append(edge)
         self.app.edges.append(edge)
         logger.debug(f"[EDGE CREATE] Success: {start_port.port_name} -> {end_port.port_name} (is_type_valid={edge.is_type_valid})")
+        self._send_edge_add_op(edge)
         self._notify_modified()
         return edge
 
     def remove_edge(self, edge: EdgeItem):
+        self._send_edge_remove_op(edge)
         if edge in self._edges:
             self._edges.remove(edge)
         if edge in self.app.edges:
@@ -1018,12 +1386,12 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def delete_proxy_item(self, proxy):
         node = proxy.widget()
-        # U3: proxy.widget()이 None일 수 있음 (이미 삭제된 경우)
         if node is None:
             if self.scene:
                 self.scene.removeItem(proxy)
             return
         node_id = getattr(node, "node_id", None)
+        self._send_node_remove_op(node_id)
 
         if hasattr(node, 'cleanup_temp_files'):
             node.cleanup_temp_files()
@@ -1045,11 +1413,8 @@ class WhiteBoardPlugin(BoardPlugin):
     # ── 통합 씬 아이템 삭제 ─────────────────────────────────
 
     def _delete_scene_item(self, item, registry: dict):
-        """공통 씬 아이템 삭제 (ImageCard, Dimension, GroupFrame, Text).
-
-        포트/엣지 정리 → 레지스트리 제거 → 씬 제거 → 수정 알림.
-        """
         node_id = getattr(item, "node_id", None)
+        self._send_node_remove_op(node_id)
         self._remove_ports_and_edges(self._collect_ports(item))
         registry.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
@@ -1431,6 +1796,11 @@ class WhiteBoardPlugin(BoardPlugin):
         node = self.app.nodes.get(node_id)
         if node is None:
             return
+
+        if self.server_mode:
+            self._handle_chat_send_server(node_id, node, model, message, files, prompt_entries)
+            return
+
         provider = self._ensure_provider()
         if not model:
             node.set_response("No model selected", done=True)

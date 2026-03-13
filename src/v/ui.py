@@ -265,6 +265,16 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        self.action_connect = file_menu.addAction(t("menu.connect_server"))
+        self.action_connect.setShortcut("Ctrl+Shift+C")
+        self.action_connect.triggered.connect(self._connect_to_server)
+
+        self.action_disconnect = file_menu.addAction(t("menu.disconnect_server"))
+        self.action_disconnect.triggered.connect(self._disconnect_from_server)
+        self.action_disconnect.setVisible(False)
+
+        file_menu.addSeparator()
+
         action_exit = file_menu.addAction(t("menu.exit"))
         action_exit.setShortcut("Alt+F4")
         action_exit.triggered.connect(self.close)
@@ -674,12 +684,108 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _open_boards_folder(self):
-        """보드 저장 폴더를 OS 파일 탐색기에서 열기"""
         from PyQt6.QtGui import QDesktopServices
         from PyQt6.QtCore import QUrl
         from v.board import BoardManager
         boards_dir = BoardManager.get_boards_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(boards_dir)))
+
+    def _connect_to_server(self):
+        from v.boards.whiteboard.connect_dialog import ConnectDialog, BoardSelectDialog
+        from v.boards.whiteboard.server_client import ServerClient
+
+        dlg = ConnectDialog(self)
+        if dlg.exec() != ConnectDialog.DialogCode.Accepted:
+            return
+        info = dlg.get_connection_info()
+        if not info:
+            return
+
+        if not hasattr(self, '_server_client') or self._server_client is None:
+            self._server_client = ServerClient(self)
+
+        client = self._server_client
+
+        def on_auth_ok(level, boards):
+            client.auth_ok.disconnect(on_auth_ok)
+            client.auth_fail.disconnect(on_auth_fail)
+
+            board_dlg = BoardSelectDialog(boards, self)
+            if board_dlg.exec() == BoardSelectDialog.DialogCode.Accepted:
+                board_id = board_dlg.get_board_id()
+                if board_id:
+                    self._new_board()
+                    if self.plugin:
+                        self.plugin.set_server_client(client)
+                    client.join_board(board_id)
+                    self._enter_server_mode(info["username"], board_id)
+
+        def on_auth_fail(reason):
+            client.auth_ok.disconnect(on_auth_ok)
+            client.auth_fail.disconnect(on_auth_fail)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Auth Failed", reason)
+
+        client.auth_ok.connect(on_auth_ok)
+        client.auth_fail.connect(on_auth_fail)
+
+        client.connect_to_server(
+            info["host"], info["port"],
+            info["username"], info["password"],
+        )
+
+    def _enter_server_mode(self, username: str, board_id: str):
+        self.setWindowTitle(f"Qonvo - {board_id} ({username}@Server)")
+        self.action_connect.setVisible(False)
+        self.action_disconnect.setVisible(True)
+
+        client = self._server_client
+        client.user_joined.connect(self._on_server_user_joined)
+        client.user_left.connect(self._on_server_user_left)
+        client.disconnected.connect(self._on_server_disconnected)
+        client.server_message.connect(self._on_server_message)
+        client.error_received.connect(self._on_server_error)
+
+    def _exit_server_mode(self):
+        self.setWindowTitle("Qonvo")
+        self.action_connect.setVisible(True)
+        self.action_disconnect.setVisible(False)
+
+        if self._server_client:
+            try:
+                self._server_client.user_joined.disconnect(self._on_server_user_joined)
+                self._server_client.user_left.disconnect(self._on_server_user_left)
+                self._server_client.disconnected.disconnect(self._on_server_disconnected)
+                self._server_client.server_message.disconnect(self._on_server_message)
+                self._server_client.error_received.disconnect(self._on_server_error)
+            except Exception:
+                pass
+
+    def _disconnect_from_server(self):
+        if hasattr(self, '_server_client') and self._server_client:
+            if self.plugin and hasattr(self.plugin, 'detach_server_client'):
+                self.plugin.detach_server_client()
+            self._server_client.disconnect_from_server()
+        self._exit_server_mode()
+
+    def _on_server_user_joined(self, user: str, level: int):
+        self.statusBar().showMessage(f"{user} joined", 5000)
+
+    def _on_server_user_left(self, user: str):
+        self.statusBar().showMessage(f"{user} left", 5000)
+
+    def _on_server_disconnected(self, reason: str):
+        from PyQt6.QtWidgets import QMessageBox
+        if self.plugin and hasattr(self.plugin, 'detach_server_client'):
+            self.plugin.detach_server_client()
+        self._exit_server_mode()
+        QMessageBox.warning(self, "Disconnected", f"Server connection lost: {reason}")
+
+    def _on_server_message(self, text: str):
+        self.statusBar().showMessage(f"[Server] {text}", 8000)
+
+    def _on_server_error(self, code: str, message: str):
+        self.statusBar().showMessage(f"Error: {code} - {message}", 8000)
 
     def _load_board(self):
         from v.board import BoardManager
