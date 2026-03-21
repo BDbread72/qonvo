@@ -80,6 +80,9 @@ class SerializationMixin:
                 if isinstance(node, GroupFrameItem):
                     nd['width'] = node.rect().width()
                     nd['height'] = node.rect().height()
+                    nd['locked'] = getattr(node, '_locked', False)
+                    nd['label'] = node._label.toPlainText() if hasattr(node, '_label') else ""
+                    nd['color'] = getattr(node, 'color_name', 'blue')
             elif hasattr(node, 'proxy') and node.proxy:
                 nd['x'] = node.proxy.pos().x()
                 nd['y'] = node.proxy.pos().y()
