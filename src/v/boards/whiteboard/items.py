@@ -178,6 +178,7 @@ class PortItem(QGraphicsEllipseItem):
 
         self.multi_connect = False
         self.port_value = None
+        self.powered = False
 
         # 색상: 지정값 → 타입별 색상 → 인덱스 기반 자동 할당
         if color:
@@ -263,6 +264,13 @@ class PortItem(QGraphicsEllipseItem):
         super().setPos(*args)
         self._invalidate_cache()
         self._notify_edges()
+
+    def set_powered(self, on: bool):
+        if self.powered == on:
+            return
+        self.powered = on
+        if self.port_data_type == self.TYPE_BOOLEAN:
+            self.setOpacity(0.9 if on else 0.15)
 
     def reposition(self):
         """포트를 노드 좌/우에 배치 (다중 포트는 수직 분배)"""
@@ -441,6 +449,12 @@ class EdgeItem(QGraphicsPathItem):
             self._hover_pen = QPen(QColor("#c0392b"), 2.5)
             self._selected_pen = QPen(QColor(Theme.ACCENT_DANGER), 3.5)
 
+        self._powered = False
+        if self.is_type_valid:
+            port_color = source_port._color
+            self._powered_pen = QPen(port_color.lighter(160), 3)
+        else:
+            self._powered_pen = self._normal_pen
         self.setPen(self._normal_pen)
         self.setZValue(-1)
         self.setOpacity(0.15)
@@ -468,6 +482,17 @@ class EdgeItem(QGraphicsPathItem):
     def target(self):
         """하위호환: target proxy 반환"""
         return self.target_port.parent_proxy
+
+    def set_powered(self, on: bool):
+        if self._powered == on:
+            return
+        self._powered = on
+        if on:
+            self.setPen(self._powered_pen)
+            self.setOpacity(0.8)
+        else:
+            self.setPen(self._normal_pen)
+            self.setOpacity(0.15)
 
     def schedule_update(self):
         """업데이트를 다음 이벤트 루프에서 수행하도록 예약 (이벤트 기반)"""
@@ -733,10 +758,17 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        pre = getattr(self, '_pre_move_pos', None)
+        moved = pre is not None and self.pos() != pre
+        resized = getattr(self, '_resizing', False)
         self._end_resize()
         self._rotating = False
         self._rotate_start = None
         super().mouseReleaseEvent(event)
+        if moved or resized:
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
 
     def get_data(self) -> Dict[str, Any]:
         d = self._base_data()
@@ -761,7 +793,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self.on_image_changed = None  # callback: fn(card)
         self.setZValue(55)
 
-        self._hidden = False  # 개별 이미지 가리기
+        self._hidden = False
         self._pixmap = QPixmap(image_path) if image_path and os.path.exists(image_path) else QPixmap()
 
         # 기본 크기 결정
@@ -849,10 +881,18 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
 
     def set_image(self, path: str):
         """이미지 설정 — 원본을 관리 폴더에 복사하여 원본 삭제 시에도 유지"""
+        _logger.info(f"[SET_IMAGE] id={getattr(self, 'node_id', '?')} input_path={path} exists={os.path.exists(path) if path else False} temp_dir={ImageCardItem._board_temp_dir}")
+        if path and not os.path.exists(path) and ImageCardItem._board_temp_dir:
+            for sub in ['attachments', '']:
+                candidate = os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path)) if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path))
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
         if path and os.path.exists(path):
             path = self._copy_to_managed(path)
         self.image_path = path
         self._pixmap = QPixmap(path) if path and os.path.exists(path) else QPixmap()
+        _logger.info(f"[SET_IMAGE] id={getattr(self, 'node_id', '?')} final_path={path} pixmap_null={self._pixmap.isNull()}")
         if not self._pixmap.isNull():
             pw, ph = self._pixmap.width(), self._pixmap.height()
             self._aspect = pw / ph if ph > 0 else 1.0
@@ -866,6 +906,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             self.prepareGeometryChange()
             self._width = new_w
             self._height = new_h
+        self.setToolTip(f"Image #{getattr(self, 'node_id', '?')}")
         self.update()
         if self.output_port:
             self.output_port.reposition()
@@ -972,9 +1013,16 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        pre = getattr(self, '_pre_move_pos', None)
+        moved = pre is not None and self.pos() != pre
+        resized = self._resizing
         self._end_resize()
         self._initial_size = None
         super().mouseReleaseEvent(event)
+        if moved or resized:
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
 
     def _nanobanana_ratios(self) -> list[str]:
         """provider.py에서 비율을 가져오고 실패 시 fallback을 쓰며 클래스 캐시를 사용한다."""
@@ -1233,6 +1281,9 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
                 _group_moving = False
 
     def mouseReleaseEvent(self, event):
+        pre = getattr(self, '_pre_move_pos', None)
+        moved = pre is not None and self.pos() != pre
+        resized = getattr(self, '_resizing', False)
         self._grouped_items = []
         self._group_offsets = []
         self._end_resize()
@@ -1241,6 +1292,10 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
         if not self._label.hasFocus():
             self._label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         super().mouseReleaseEvent(event)
+        if moved or resized:
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
 
     def _get_resize_corner(self, pos: QPointF) -> str:
         """리사이즈 코너 감지"""

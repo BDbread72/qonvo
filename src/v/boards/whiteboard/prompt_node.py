@@ -5,7 +5,7 @@
 """
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLineEdit, QLabel,
-    QComboBox, QPushButton, QSpinBox,
+    QComboBox, QPushButton, QSpinBox, QApplication,
 )
 from PyQt6.QtCore import Qt
 
@@ -144,16 +144,46 @@ class PromptNodeWidget(QWidget, BaseNode):
         self.body_edit.textChanged.connect(self._update_token_count)  # 실시간 토큰 근사치
         layout.addWidget(self.body_edit)
 
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setContentsMargins(4, 0, 4, 2)
+        bottom_bar.setSpacing(2)
+
+        _small_btn_style = """
+            QPushButton {
+                background: transparent; color: #8070a0;
+                font-size: 10px; border: none; padding: 2px 5px;
+            }
+            QPushButton:hover { color: #c0b0e0; }
+        """
+
+        self.btn_copy = QPushButton("Copy")
+        self.btn_copy.setFixedHeight(18)
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setStyleSheet(_small_btn_style)
+        self.btn_copy.clicked.connect(self._copy_all)
+        bottom_bar.addWidget(self.btn_copy)
+
+        self.btn_paste = QPushButton("Paste")
+        self.btn_paste.setFixedHeight(18)
+        self.btn_paste.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_paste.setStyleSheet(_small_btn_style)
+        self.btn_paste.clicked.connect(self._paste_all)
+        bottom_bar.addWidget(self.btn_paste)
+
+        bottom_bar.addStretch()
+
         self.tokens_label = QLabel("0자")
         self.tokens_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.tokens_label.setFixedHeight(18)
         self.tokens_label.setStyleSheet("""
             QLabel {
                 color: #8070a0; font-size: 10px;
-                padding-right: 8px; border: none; background: transparent;
+                padding-right: 4px; border: none; background: transparent;
             }
         """)
-        layout.addWidget(self.tokens_label)
+        bottom_bar.addWidget(self.tokens_label)
+
+        layout.addLayout(bottom_bar)
 
         self.resize_handle = ResizeHandle(self)
         self.resize_handle.move(self.width() - 16, self.height() - 16)
@@ -205,6 +235,16 @@ class PromptNodeWidget(QWidget, BaseNode):
                     color: #666666; font-size: 13px; padding: 6px 8px;
                 }
             """)  # 비활성 시 색상 dim
+
+    def _copy_all(self):
+        text = self.body_edit.toPlainText()
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _paste_all(self):
+        text = QApplication.clipboard().text()
+        if text:
+            self.body_edit.setPlainText(text)
 
     def _update_token_count(self):
         text = self.body_edit.toPlainText()

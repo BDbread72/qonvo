@@ -31,8 +31,10 @@ class WhiteboardView(QGraphicsView):
         self._menu_center = None  # 메뉴 중심 (뷰포트 좌표)
         self._menu_scene_pos = None  # 메뉴 중심 (씬 좌표)
         self._original_cursor_pos = None  # 원래 마우스 위치 (복원용)
-        self._tab_held = False  # TAB 키 홀드 상태
-        self._space_held = False  # Space 키 홀드 상태 (와이어링 모드)
+        self._tab_held = False
+        self._space_held = False
+        from v.settings import get_setting
+        self._toggle_mode = get_setting("toggle_mode", False)
         self._wire_opacity = 0.0  # 포트/엣지 페이드 현재 값
         self._wire_fade_target = 0.0
         self._current_category = None  # 현재 선택된 카테고리 (계층형 메뉴용)
@@ -167,19 +169,33 @@ class WhiteboardView(QGraphicsView):
             self.plugin._lazy_mgr.schedule_check()
 
     def wheelEvent(self, event: QWheelEvent):
-        # 방사형 메뉴 열려있으면 줌 차단
         if self.radial_menu:
             event.accept()
             return
 
-        from v.constants import ZOOM_FACTOR, ZOOM_MIN, ZOOM_MAX
-        factor = ZOOM_FACTOR if event.angleDelta().y() > 0 else 1 / ZOOM_FACTOR
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            from v.constants import ZOOM_FACTOR, ZOOM_MIN, ZOOM_MAX
+            factor = ZOOM_FACTOR if event.angleDelta().y() > 0 else 1 / ZOOM_FACTOR
 
-        new_zoom = self._zoom * factor
-        if ZOOM_MIN <= new_zoom <= ZOOM_MAX:
-            self._zoom = new_zoom
-            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-            self.scale(factor, factor)
+            new_zoom = self._zoom * factor
+            if ZOOM_MIN <= new_zoom <= ZOOM_MAX:
+                self._zoom = new_zoom
+                self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+                self.scale(factor, factor)
+                self._notify_viewport_changed()
+        else:
+            pd = event.pixelDelta()
+            if not pd.isNull():
+                dx, dy = pd.x(), pd.y()
+            else:
+                dx, dy = event.angleDelta().x(), event.angleDelta().y()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                dx, dy = dy, 0
+            hs = self.horizontalScrollBar()
+            vs = self.verticalScrollBar()
+            hs.setValue(hs.value() - dx)
+            vs.setValue(vs.value() - dy)
             self._notify_viewport_changed()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent):
@@ -782,44 +798,48 @@ class WhiteboardView(QGraphicsView):
                 self.plugin.delete_proxy_item(item)
 
     def event(self, event):
-        """모든 이벤트 처리 (TAB/Space 키 가로채기)"""
         if event.type() == event.Type.KeyPress:
             key_event = event
             if key_event.key() == Qt.Key.Key_Tab:
                 if self._has_focused_input():
                     return False
-
-                if not key_event.isAutoRepeat() and not self._tab_held:
-                    self._tab_held = True
-                    self._open_radial_menu()
+                if not key_event.isAutoRepeat():
+                    if self._toggle_mode:
+                        if self.radial_menu:
+                            self._close_radial_menu(execute=True)
+                        else:
+                            self._open_radial_menu()
+                    elif not self._tab_held:
+                        self._tab_held = True
+                        self._open_radial_menu()
                 return True
             elif key_event.key() == Qt.Key.Key_Escape and self.radial_menu:
-                # 서브메뉴면 1단계로 돌아가기
                 if self._current_category:
                     self._current_category = None
                     self._open_radial_menu()
                 else:
-                    # 1단계면 메뉴 닫기
                     self._close_radial_menu(execute=False)
                 return True
             elif key_event.key() == Qt.Key.Key_Space:
                 if not self._has_focused_input():
                     if not key_event.isAutoRepeat():
-                        self._space_held = True
-                        self._start_wire_fade(True)
+                        if self._toggle_mode:
+                            self._space_held = not self._space_held
+                            self._start_wire_fade(self._space_held)
+                        else:
+                            self._space_held = True
+                            self._start_wire_fade(True)
                     return True
 
         elif event.type() == event.Type.KeyRelease:
             key_event = event
-            if key_event.key() == Qt.Key.Key_Tab and not key_event.isAutoRepeat():
-                if self._tab_held:
+            if not self._toggle_mode and not key_event.isAutoRepeat():
+                if key_event.key() == Qt.Key.Key_Tab and self._tab_held:
                     self._tab_held = False
-                    # TAB 떼면 메뉴 닫기 (취소)
                     if self.radial_menu:
                         self._close_radial_menu(execute=False)
                     return True
-            elif key_event.key() == Qt.Key.Key_Space and not key_event.isAutoRepeat():
-                if self._space_held:
+                elif key_event.key() == Qt.Key.Key_Space and self._space_held:
                     self._space_held = False
                     if not self._port_dragging:
                         self._start_wire_fade(False)

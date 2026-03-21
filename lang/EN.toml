@@ -28,6 +28,12 @@ no_recent = "(None)"
 [welcome]
 instructions = "Press Ctrl+N to Create New Board\nPress Ctrl+O to Open Board"
 recent_boards = "Recent Boards"
+new_board = "New Board"
+open_board = "Open Board"
+start = "Start"
+today = "Today"
+yesterday = "Yesterday"
+days_ago = "{} days ago"
 
 [dialog]
 new_board_title = "Create New Board"

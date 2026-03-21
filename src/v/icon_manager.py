@@ -24,6 +24,7 @@ _DEFAULT_ICONS = {
     "cat_notes": "tabler:notes",
     "cat_media": "tabler:photo-circle",
     "cat_ui": "tabler:layout-grid",
+    "cat_signal": "tabler:bolt",
     "node": "tabler:message-dots",
     "function": "tabler:math-function",
     "round_table": "tabler:users-group",
@@ -37,6 +38,17 @@ _DEFAULT_ICONS = {
     "button": "tabler:click",
     "group": "tabler:layout-board-split",
     "pin": "tabler:map-pin",
+    "markdown": "tabler:markdown",
+    "nixi": "tabler:sparkles",
+    "prompt": "tabler:terminal-2",
+    "ups": "tabler:arrow-big-up-lines",
+    "rmv": "tabler:eraser",
+    "switch": "tabler:toggle-right",
+    "latch": "tabler:lock",
+    "not": "tabler:logic-not",
+    "and": "tabler:logic-and",
+    "or": "tabler:logic-or",
+    "xor": "tabler:logic-xor",
 }
 
 

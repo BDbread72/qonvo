@@ -106,9 +106,14 @@ class BranchGraphWidget(QWidget):
         visited = {}   # nid → row
         positions = {}  # nid → (lx, ly)
 
+        _dfs_stack = set()
+
         def dfs(nid, depth):
             if nid in visited:
                 return visited[nid]
+            if nid in _dfs_stack or depth > 200:
+                return row[0]
+            _dfs_stack.add(nid)
 
             kids = sorted(children.get(nid, []))
             if not kids:
@@ -120,6 +125,8 @@ class BranchGraphWidget(QWidget):
                     cr = dfs(cid, depth + 1)
                     child_rows.append(cr)
                 my_row = child_rows[0]
+
+            _dfs_stack.discard(nid)
 
             lx = pad + depth * self.STEP_X + r
             ly = pad + my_row * self.STEP_Y + r

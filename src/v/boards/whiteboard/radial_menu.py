@@ -52,9 +52,7 @@ class RadialMenuItem(QGraphicsEllipseItem):
         self._update_style()
         self.setZValue(1000)
 
-        # 클릭 이벤트 활성화
         self.setAcceptHoverEvents(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_selected(self, selected: bool):
         self._selected = selected

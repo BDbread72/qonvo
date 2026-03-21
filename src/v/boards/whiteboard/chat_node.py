@@ -341,8 +341,16 @@ class ChatLogWindow(QWidget):
         images = entry.get("images", [])
         if images:
             for img_path in images:
-                if os.path.exists(img_path):
-                    pixmap = QPixmap(img_path)
+                resolved = img_path
+                if not os.path.exists(img_path) and ChatNodeWidget._board_temp_dir:
+                    _td = ChatNodeWidget._board_temp_dir
+                    for _sub in ['attachments', '']:
+                        _c = os.path.join(_td, _sub, os.path.basename(img_path)) if _sub else os.path.join(_td, os.path.basename(img_path))
+                        if os.path.exists(_c):
+                            resolved = _c
+                            break
+                if os.path.exists(resolved):
+                    pixmap = QPixmap(resolved)
                     if not pixmap.isNull():
                         display = pixmap.scaled(
                             200, 200,
@@ -398,8 +406,16 @@ class ChatLogWindow(QWidget):
                     cp_btn.clicked.connect(lambda checked, txt=ptext, btn=cp_btn: self._copy_text(txt, btn))
                     fl.addWidget(cp_btn, alignment=Qt.AlignmentFlag.AlignRight)
                 for img_path in cand_images:
-                    if img_path and os.path.exists(img_path):
-                        pix = QPixmap(img_path)
+                    resolved = img_path
+                    if img_path and not os.path.exists(img_path) and ChatNodeWidget._board_temp_dir:
+                        _td = ChatNodeWidget._board_temp_dir
+                        for _sub in ['attachments', '']:
+                            _c = os.path.join(_td, _sub, os.path.basename(img_path)) if _sub else os.path.join(_td, os.path.basename(img_path))
+                            if os.path.exists(_c):
+                                resolved = _c
+                                break
+                    if resolved and os.path.exists(resolved):
+                        pix = QPixmap(resolved)
                         if not pix.isNull():
                             scaled = pix.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                             img_label = QLabel()
@@ -1044,6 +1060,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._history[-1]["preferred_candidates"] = preferred_candidates
             self._history[-1]["preferred_texts"] = [c["text"] for c in preferred_candidates]
             self._history[-1]["response"] = summary
+        if self.on_modified:
+            self.on_modified()
 
     def _open_preferred_window(self):
         """Open preferred results selection window."""

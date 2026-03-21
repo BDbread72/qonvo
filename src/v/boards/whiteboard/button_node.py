@@ -1,18 +1,11 @@
-"""
-Button node widget.
-- Emits boolean-style signal on click
-- Behaves like a simple trigger node
-"""
-from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QLabel
+from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout, QLabel, QInputDialog
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
-from v.theme import Theme
 from .base_node import BaseNode
 
 
 class ButtonNodeWidget(QWidget, BaseNode):
-    """Button node that emits a signal when clicked."""
 
     signal_triggered = pyqtSignal()
 
@@ -20,94 +13,75 @@ class ButtonNodeWidget(QWidget, BaseNode):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-
-        # Initialize BaseNode
         self.init_base_node(node_id=node_id, on_modified=on_modified)
 
-        # Button node specific attributes
         self.on_signal = on_signal
         self.click_count = 0
         self._drag_start_pos = None
-        self.input_data = None  # 입력 포트로부터 수집된 데이터
+        self.input_data = None
 
-        self.setMinimumSize(120, 80)
-        self.resize(120, 80)
-        self.setStyleSheet(
-            """
+        self.setMinimumSize(100, 60)
+        self.resize(100, 60)
+        self.setStyleSheet("""
             ButtonNodeWidget {
                 background-color: #2c2c2c;
-                border: 2px solid #555555;
+                border: 2px solid #f1c40f;
                 border-radius: 8px;
             }
-            """
-        )
-
+        """)
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
 
-        title = QLabel("Signal Button")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        font = QFont("Segoe UI", 9, QFont.Weight.Bold)
-        title.setFont(font)
-        title.setStyleSheet("color: #f1c40f;")
-        layout.addWidget(title)
+        self._label = "Button"
+        self.title_label = QLabel(self._label)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self.title_label.setStyleSheet("color: #f1c40f; border: none; background: transparent;")
+        layout.addWidget(self.title_label)
 
-        self.button = QPushButton("click")
-        self.button.setStyleSheet(
-            """
+        self.button = QPushButton("Push")
+        self.button.setFixedHeight(24)
+        self.button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.button.setStyleSheet("""
             QPushButton {
-                background-color: #f1c40f;
-                color: #000000;
-                border: none;
-                border-radius: 4px;
-                padding: 8px;
-                font-weight: bold;
+                background-color: #f1c40f; color: #000;
+                border: none; border-radius: 4px;
+                font-weight: bold; font-size: 11px;
             }
-            QPushButton:hover {
-                background-color: #f39c12;
-            }
-            QPushButton:pressed {
-                background-color: #d68910;
-            }
-            """
-        )
+            QPushButton:hover { background-color: #f39c12; }
+            QPushButton:pressed { background-color: #d68910; }
+        """)
         self.button.clicked.connect(self._on_click)
         layout.addWidget(self.button)
-
-        self.counter_label = QLabel("click: 0")
-        self.counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.counter_label.setStyleSheet("color: #aaaaaa; font-size: 8pt;")
-        layout.addWidget(self.counter_label)
 
         self.setLayout(layout)
 
     def on_signal_input(self, input_data=None):
-        """입력 포트로 신호를 받았을 때 - 데이터를 수집하여 저장만 함"""
         self.input_data = self._collect_input_data()
 
     def _on_click(self):
         self.click_count += 1
-        self.counter_label.setText(f"click: {self.click_count}")
-
-        self.button.setText("signal")
-
-        # 클릭 시 입력 포트로부터 데이터 수집
         self.input_data = self._collect_input_data()
 
         self.signal_triggered.emit()
         if self.on_signal:
             self.on_signal(self.node_id)
 
-        from PyQt6.QtCore import QTimer
-
-        QTimer.singleShot(200, lambda: self.button.setText("click"))
-
         if self.on_modified:
             self.on_modified()
+
+    def mouseDoubleClickEvent(self, event):
+        parent_window = self.window() if self.window() != self else None
+        text, ok = QInputDialog.getText(parent_window, "Label", "", text=self._label)
+        if ok and text:
+            self._label = text
+            self.title_label.setText(text)
+            if self.on_modified:
+                self.on_modified()
 
     def mousePressEvent(self, event):
         if self.button.geometry().contains(event.pos()):
@@ -138,6 +112,7 @@ class ButtonNodeWidget(QWidget, BaseNode):
             "height": self.height(),
             "click_count": self.click_count,
             "input_data": self.input_data,
+            "label": self._label,
         }
 
     @staticmethod
@@ -149,5 +124,7 @@ class ButtonNodeWidget(QWidget, BaseNode):
         )
         widget.click_count = data.get("click_count", 0)
         widget.input_data = data.get("input_data")
-        widget.counter_label.setText(f"click: {widget.click_count}")
+        label = data.get("label", "Button")
+        widget._label = label
+        widget.title_label.setText(label)
         return widget

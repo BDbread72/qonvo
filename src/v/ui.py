@@ -409,54 +409,123 @@ class MainWindow(QMainWindow):
         self.round_table_view.showMaximized()
 
     def _show_welcome(self):
-        """초기 환영 화면"""
         from v.board import BoardManager
+        import time, datetime
 
         welcome = QWidget()
         welcome.setStyleSheet(f"background-color: {Theme.BG_PRIMARY};")
-        layout = QVBoxLayout(welcome)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        root = QHBoxLayout(welcome)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        left = QWidget()
+        left.setFixedWidth(340)
+        left.setStyleSheet(f"background-color: {Theme.BG_SECONDARY};")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(40, 60, 40, 40)
 
         title = QLabel(t("app.title"))
-        title.setStyleSheet(f"font-size: 48px; font-weight: bold; color: {Theme.TEXT_DISABLED};")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        title.setStyleSheet("font-size: 32px; font-weight: bold; color: #eee;")
+        left_layout.addWidget(title)
 
-        subtitle = QLabel(t("welcome.instructions"))
-        subtitle.setStyleSheet(f"font-size: 14px; color: {Theme.TEXT_TERTIARY}; margin-top: 20px;")
-        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(subtitle)
+        ver = _get_version()
+        if ver:
+            ver_label = QLabel(ver)
+            ver_label.setStyleSheet(f"font-size: 12px; color: {Theme.TEXT_TERTIARY}; margin-bottom: 20px;")
+            left_layout.addWidget(ver_label)
 
-        # 최근 보드 목록
-        boards = BoardManager.list_boards()
+        left_layout.addSpacing(20)
+
+        start_label = QLabel(t("welcome.start"))
+        start_label.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {Theme.TEXT_TERTIARY}; margin-bottom: 8px;")
+        left_layout.addWidget(start_label)
+
+        action_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {Theme.ACCENT_PRIMARY};
+                border: none;
+                padding: 10px 0px;
+                font-size: 14px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                color: #5a9cff;
+            }}
+        """
+
+        btn_new = QPushButton(f"  +   {t('welcome.new_board')}")
+        btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_new.setStyleSheet(action_style)
+        btn_new.clicked.connect(self._new_board)
+        left_layout.addWidget(btn_new)
+
+        btn_open = QPushButton(f"      {t('welcome.open_board')}")
+        btn_open.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_open.setStyleSheet(action_style)
+        btn_open.clicked.connect(self._load_board)
+        left_layout.addWidget(btn_open)
+
+        left_layout.addStretch()
+        root.addWidget(left)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(40, 60, 40, 40)
+
+        recent_label = QLabel(t("welcome.recent_boards"))
+        recent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #eee; margin-bottom: 16px;")
+        right_layout.addWidget(recent_label)
+
+        boards = BoardManager.list_boards_with_mtime()
+        now = time.time()
+        today = datetime.date.today()
+
         if boards:
-            recent_label = QLabel(t("welcome.recent_boards"))
-            recent_label.setStyleSheet(f"font-size: 13px; color: #777; margin-top: 30px;")
-            recent_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(recent_label)
+            for name, mtime in boards[:get_recent_boards_count()]:
+                dt = datetime.datetime.fromtimestamp(mtime)
+                d = dt.date()
+                if d == today:
+                    when = t("welcome.today")
+                elif d == today - datetime.timedelta(days=1):
+                    when = t("welcome.yesterday")
+                else:
+                    days = (today - d).days
+                    when = t("welcome.days_ago").format(days)
+                time_str = dt.strftime("%H:%M")
 
-            for name in boards[:get_recent_boards_count()]:
-                btn = QPushButton(name)
-                btn.setFixedWidth(300)
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {Theme.BG_SECONDARY};
-                        color: #ccc;
-                        border: 1px solid {Theme.BG_HOVER};
-                        border-radius: 8px;
-                        padding: 10px 16px;
-                        font-size: 13px;
-                        text-align: left;
+                row = QWidget()
+                row.setCursor(Qt.CursorShape.PointingHandCursor)
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(12, 10, 12, 10)
+
+                name_label = QLabel(name)
+                name_label.setStyleSheet("font-size: 14px; color: #ddd;")
+                row_layout.addWidget(name_label)
+
+                row_layout.addStretch()
+
+                date_label = QLabel(f"{when}  {time_str}")
+                date_label.setStyleSheet(f"font-size: 12px; color: {Theme.TEXT_TERTIARY};")
+                row_layout.addWidget(date_label)
+
+                row.setStyleSheet(f"""
+                    QWidget {{
+                        border-radius: 6px;
                     }}
-                    QPushButton:hover {{
+                    QWidget:hover {{
                         background-color: {Theme.BG_HOVER};
-                        border-color: {Theme.ACCENT_PRIMARY};
-                        color: #fff;
                     }}
                 """)
-                btn.clicked.connect(lambda checked, n=name: self._load_board_by_name(n))
-                layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
+                row.mousePressEvent = lambda e, n=name: self._load_board_by_name(n)
+                right_layout.addWidget(row)
+        else:
+            empty = QLabel(t("welcome.instructions"))
+            empty.setStyleSheet(f"font-size: 13px; color: {Theme.TEXT_TERTIARY};")
+            right_layout.addWidget(empty)
+
+        right_layout.addStretch()
+        root.addWidget(right, 1)
 
         self.setCentralWidget(welcome)
 

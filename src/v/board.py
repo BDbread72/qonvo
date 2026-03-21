@@ -270,10 +270,13 @@ def _migrate_board_data(data: Dict[str, Any], file_version: str) -> Dict[str, An
     """
     logger.info(f"[MIGRATE] Migrating board from version {file_version} to {_get_app_version()}")
 
-    # 버전 파싱 (간단한 비교를 위해)
+    # 버전 파싱: "beta-1.0.2" → [1, 0, 2]
+    import re
+    ver_str = file_version or ""
+    ver_match = re.search(r'(\d+(?:\.\d+)*)', ver_str)
     try:
-        file_ver_parts = [int(x) for x in file_version.split('.')] if file_version else [0, 0]
-    except ValueError:
+        file_ver_parts = [int(x) for x in ver_match.group(1).split('.')] if ver_match else [0, 0]
+    except (ValueError, AttributeError):
         file_ver_parts = [0, 0]
         logger.warning(f"[MIGRATE] Invalid version format: {file_version}, treating as 0.0")
 
@@ -327,10 +330,16 @@ class BoardManager:
     def list_boards() -> List[str]:
         """저장된 보드 목록 반환"""
         boards_dir = BoardManager.get_boards_dir()
-        boards = []
-        for f in boards_dir.glob("*.qonvo"):
-            boards.append(f.stem)
-        return sorted(boards)
+        files = list(boards_dir.glob("*.qonvo"))
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        return [f.stem for f in files]
+
+    @staticmethod
+    def list_boards_with_mtime() -> list:
+        boards_dir = BoardManager.get_boards_dir()
+        files = list(boards_dir.glob("*.qonvo"))
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        return [(f.stem, f.stat().st_mtime) for f in files]
 
     @staticmethod
     def save(name: str, data: Dict[str, Any]) -> str:
@@ -373,7 +382,7 @@ class BoardManager:
                 backup_enabled = True
             backup_count = get_setting("backup_count")
             if not isinstance(backup_count, int) or backup_count < 1:
-                backup_count = 5
+                backup_count = 20
 
             if filepath.exists() and backup_enabled:
                 try:
@@ -474,6 +483,15 @@ class BoardManager:
                             missing_files.append(fpath)
                     entry['images'] = new_imgs
 
+                    new_extra = []
+                    for fpath in entry.get('extra_files', []):
+                        mapped = _map_file(fpath) if fpath else None
+                        if mapped:
+                            new_extra.append(mapped)
+                        elif fpath:
+                            missing_files.append(fpath)
+                    entry['extra_files'] = new_extra
+
                     for cand in entry.get('preferred_candidates', []):
                         new_cand_imgs = []
                         for fpath in cand.get('images', []):
@@ -504,7 +522,6 @@ class BoardManager:
                 elif fpath:
                     missing_files.append(fpath)
                     logger.warning(f"[SAVE] Missing image card: {fpath}")
-                    card['image_path'] = ''  # 유령 참조 제거
 
             # 차원 내부 보드 데이터의 첨부파일 처리 (재귀)
             def _process_dimension_attachments(dim_board_data):
@@ -520,7 +537,6 @@ class BoardManager:
                     elif fpath:
                         missing_files.append(fpath)
                         logger.warning(f"[SAVE] Missing dimension image card: {fpath}")
-                        card['image_path'] = ''  # 유령 참조 제거
 
                 # 중첩 차원 재귀 처리
                 for nested_dim in dim_board_data.get('dimensions', []):
@@ -608,6 +624,11 @@ class BoardManager:
                     for entry in node.get('history', []):
                         for p in entry.get('images', []):
                             _verify_attachment_ref(p, f"{ctx}history_image")
+                        for p in entry.get('extra_files', []):
+                            _verify_attachment_ref(p, f"{ctx}extra_file")
+                        for cand in entry.get('preferred_candidates', []):
+                            for p in cand.get('images', []):
+                                _verify_attachment_ref(p, f"{ctx}cand_image")
                 for dim in bd.get('dimensions', []):
                     nested_bd = dim.get('board_data')
                     if nested_bd:
@@ -770,10 +791,10 @@ class BoardManager:
             missing_attachments = []
 
             def _resolve_path(fpath):
-                """attachments/ 상대 경로 → temp_dir 실제 경로 변환"""
+                """첨부파일 경로 → temp_dir 실제 경로 변환 (상대/절대 모두)"""
                 if not fpath:
                     return fpath
-                normalized = fpath.replace('\\', '/')  # Windows 경로 구분자 정규화
+                normalized = fpath.replace('\\', '/')
                 if normalized.startswith('attachments/'):
                     real_path = temp_dir / normalized
                     if real_path.exists():
@@ -781,14 +802,23 @@ class BoardManager:
                     else:
                         missing_attachments.append(fpath)
                         return fpath
+                if not os.path.exists(fpath):
+                    basename = os.path.basename(fpath)
+                    for sub in ['attachments', '']:
+                        candidate = temp_dir / sub / basename if sub else temp_dir / basename
+                        if candidate.exists():
+                            return str(candidate)
                 return fpath
 
             def _resolve_node_attachments(node):
-                """노드의 user_files, ai_image_paths, history[].images 경로 변환"""
+                """노드의 모든 첨부파일 경로 변환"""
                 node['user_files'] = [_resolve_path(f) for f in node.get('user_files', [])]
                 node['ai_image_paths'] = [_resolve_path(f) for f in node.get('ai_image_paths', [])]
                 for entry in node.get('history', []):
                     entry['images'] = [_resolve_path(f) for f in entry.get('images', [])]
+                    entry['extra_files'] = [_resolve_path(f) for f in entry.get('extra_files', [])]
+                    for cand in entry.get('preferred_candidates', []):
+                        cand['images'] = [_resolve_path(f) for f in cand.get('images', [])]
 
             def _resolve_board_data_attachments(bd):
                 """보드 데이터 내 모든 첨부파일 경로 변환 (차원 재귀 포함)"""

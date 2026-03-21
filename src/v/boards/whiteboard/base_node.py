@@ -70,6 +70,7 @@ class BaseNode:
         add_port(getattr(self, "input_port", None))
         add_port(getattr(self, "output_port", None))
         add_port(getattr(self, "signal_input_port", None))
+        add_port(getattr(self, "signal_input_port_b", None))
         add_port(getattr(self, "signal_output_port", None))
 
         in_ports = getattr(self, "input_ports", None)
@@ -123,6 +124,8 @@ class BaseNode:
             return source_node.text_content
         if hasattr(source_node, 'body_edit') and hasattr(source_node.body_edit, 'toPlainText'):
             return source_node.body_edit.toPlainText()
+        if hasattr(source_node, 'image_path') and source_node.image_path:
+            return source_node.image_path
         return None
 
     def on_signal_input(self, input_data=None):

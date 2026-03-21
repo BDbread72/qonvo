@@ -271,9 +271,16 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        pre = getattr(self, '_pre_move_pos', None)
+        moved = pre is not None and self.pos() != pre
+        resized = self._resizing
         self._end_resize()
         self._initial_size = None
         super().mouseReleaseEvent(event)
+        if moved or resized:
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
 
     # 데이터 관리
     def set_title(self, title: str):

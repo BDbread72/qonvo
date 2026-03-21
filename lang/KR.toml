@@ -29,6 +29,12 @@ no_recent = "(없음)"
 [welcome]
 instructions = "Ctrl+N 으로 새 보드 만들기\nCtrl+O 로 보드 불러오기"
 recent_boards = "최근 보드"
+new_board = "새 보드"
+open_board = "보드 열기"
+start = "시작"
+today = "오늘"
+yesterday = "어제"
+days_ago = "{}일 전"
 
 [dialog]
 new_board_title = "새 보드 만들기"

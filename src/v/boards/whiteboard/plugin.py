@@ -27,6 +27,7 @@ from .chat_node import ChatNodeWidget
 from .function_node import FunctionNodeWidget
 from .sticky_note import StickyNoteWidget
 from .prompt_node import PromptNodeWidget
+from .markdown_node import MarkdownNodeWidget
 from .button_node import ButtonNodeWidget
 from .round_table import RoundTableWidget
 from .checklist import ChecklistWidget
@@ -35,6 +36,8 @@ from .repository_node import RepositoryNodeWidget
 from .nixi_node import NixiNodeWidget
 from .ups_node import UpsNodeWidget
 from .rmv_node import RmvNodeWidget
+from .switch_node import SwitchNodeWidget
+from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget
 from .function_library import FunctionLibraryDialog
 from .function_editor import FunctionEditorDialog
 from .function_types import FunctionDefinition
@@ -145,17 +148,19 @@ class NodeProxyWidget(QGraphicsProxyWidget):
 
         return result
 
+    def wheelEvent(self, event):
+        event.ignore()
+
     def mouseReleaseEvent(self, event):
-        # 드래그 완료 시 서버에 node_move op 전송
-        # (ItemPositionHasChanged는 매 프레임 발생하므로 release에서만 전송)
         super().mouseReleaseEvent(event)
         pre = getattr(self, '_pre_move_pos', None)
         if pre is not None and self.pos() != pre:
-            widget = self.widget()
-            node_id = getattr(widget, 'node_id', None) if widget else None
-            if node_id is not None:
-                scene = self.scene()
-                if scene and hasattr(scene, '_plugin') and hasattr(scene._plugin, '_send_node_move_op'):
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
+                widget = self.widget()
+                node_id = getattr(widget, 'node_id', None) if widget else None
+                if node_id is not None and hasattr(scene._plugin, '_send_node_move_op'):
                     pos = self.pos()
                     scene._plugin._send_node_move_op(node_id, pos.x(), pos.y())
 
@@ -176,6 +181,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self.round_table_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.sticky_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.prompt_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.markdown_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.button_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.checklist_proxies: Dict[int, QGraphicsProxyWidget] = {}
 
@@ -183,6 +189,12 @@ class WhiteBoardPlugin(BoardPlugin):
         self.nixi_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.ups_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.rmv_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.switch_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.latch_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.and_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.or_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.not_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.xor_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.text_items: Dict[int, TextItem] = {}
         self.group_frame_items: Dict[int, GroupFrameItem] = {}
         self.image_card_items: Dict[int, ImageCardItem] = {}
@@ -491,6 +503,8 @@ class WhiteBoardPlugin(BoardPlugin):
         self._notify_modified()
 
     def _notify_modified(self):
+        if self._batch_loading:
+            return
         if callable(self.on_modified):
             self.on_modified()
         if self.view and hasattr(self.view, '_branch_graph'):
@@ -504,12 +518,19 @@ class WhiteBoardPlugin(BoardPlugin):
         'RoundTableWidget': 'round_tables',
         'StickyNoteWidget': 'sticky_notes',
         'PromptNodeWidget': 'prompt_nodes',
+        'MarkdownNodeWidget': 'markdown_nodes',
         'ButtonNodeWidget': 'buttons',
         'ChecklistWidget': 'checklists',
         'RepositoryNodeWidget': 'repository_nodes',
         'NixiNodeWidget': 'nixi_nodes',
         'UpsNodeWidget': 'ups_nodes',
         'RmvNodeWidget': 'rmv_nodes',
+        'SwitchNodeWidget': 'switch_nodes',
+        'LatchNodeWidget': 'latch_nodes',
+        'AndGateWidget': 'and_gates',
+        'OrGateWidget': 'or_gates',
+        'NotGateWidget': 'not_gates',
+        'XorGateWidget': 'xor_gates',
         'TextItem': 'texts',
         'GroupFrameItem': 'group_frames',
         'ImageCardItem': 'image_cards',
@@ -656,7 +677,14 @@ class WhiteBoardPlugin(BoardPlugin):
             "round_tables": self.add_round_table,
             "sticky_notes": self.add_sticky,
             "prompt_nodes": self.add_prompt_node,
+            "markdown_nodes": self.add_markdown,
             "buttons": self.add_button,
+            "switch_nodes": self.add_switch,
+            "latch_nodes": self.add_latch,
+            "and_gates": self.add_and_gate,
+            "or_gates": self.add_or_gate,
+            "not_gates": self.add_not_gate,
+            "xor_gates": self.add_xor_gate,
             "checklists": self.add_checklist,
             "repository_nodes": self.add_repository,
             "nixi_nodes": self.add_nixi,
@@ -676,7 +704,7 @@ class WhiteBoardPlugin(BoardPlugin):
         if node_id is None:
             return
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             if node_id in d:
@@ -695,7 +723,7 @@ class WhiteBoardPlugin(BoardPlugin):
             return
         x, y = data.get("x", 0), data.get("y", 0)
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             if node_id in d:
@@ -853,7 +881,7 @@ class WhiteBoardPlugin(BoardPlugin):
         for edge in list(self._edges):
             edge.update_path()
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
                   self.checklist_proxies, self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             for proxy in d.values():
                 node = proxy.widget()
@@ -1048,6 +1076,17 @@ class WhiteBoardPlugin(BoardPlugin):
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
+    def add_markdown(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = MarkdownNodeWidget(on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        node.node_id = node_id
+        proxy = self._add_proxy(node, node_id, pos, self.markdown_proxies)
+        node.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="text",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
     def add_button(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
         node = ButtonNodeWidget(node_id, on_signal=self._on_button_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
@@ -1059,6 +1098,118 @@ class WhiteBoardPlugin(BoardPlugin):
         node.signal_output_port = self._add_port(
             PortItem.OUTPUT, proxy, name="⚡ 신호",
             index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_switch(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = SwitchNodeWidget(node_id, on_signal=self._on_switch_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.switch_proxies)
+
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ 입력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def _on_switch_signal(self, node_id):
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+        if not hasattr(node, 'signal_output_port') or node.signal_output_port is None:
+            return
+        data = getattr(node, '_pass_data', None)
+        self.emit_signal(node.signal_output_port, data=data)
+
+    def _on_logic_signal(self, node_id):
+        node = self.app.nodes.get(node_id)
+        if node is None or not hasattr(node, 'signal_output_port') or node.signal_output_port is None:
+            return
+        data = getattr(node, '_pass_data', None)
+        if getattr(node, '_use_pulse', False):
+            self.emit_signal(node.signal_output_port, data)
+        else:
+            powered = getattr(node, '_pass_powered', False)
+            self.set_port_state(node.signal_output_port, powered, data)
+
+    def add_latch(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = LatchNodeWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.latch_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ B",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_and_gate(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = AndGateWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.and_gate_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ B",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_or_gate(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = OrGateWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.or_gate_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ B",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_not_gate(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = NotGateWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.not_gate_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port.set_powered(True)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_xor_gate(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = XorGateWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.xor_gate_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ B",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
@@ -1099,6 +1250,8 @@ class WhiteBoardPlugin(BoardPlugin):
         self.app.nodes[node_id] = item
 
         self._attach_item_ports(item, PortItem.TYPE_FILE, PortItem.TYPE_FILE)
+        item.on_image_changed = self._on_image_card_changed
+        item.setToolTip(f"Image #{node_id}")
         self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
@@ -1266,6 +1419,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 ("cat_nodes", "Nodes", "nodes"),
                 ("cat_notes", "Notes", "notes"),
                 ("cat_media", "Media", "media"),
+                ("cat_signal", "Signal", "signal"),
                 ("cat_ui", "UI", "ui"),
             ]
 
@@ -1283,6 +1437,7 @@ class WhiteBoardPlugin(BoardPlugin):
                 ("sticky", "Sticky", lambda: self.add_sticky(scene_pos)),
                 ("prompt", "Prompt", lambda: self.add_prompt_node(scene_pos)),
                 ("text", "Text", lambda: self.add_text_item(scene_pos)),
+                ("markdown", "Markdown", lambda: self.add_markdown(scene_pos)),
                 ("checklist", "Checklist", lambda: self.add_checklist(scene_pos)),
             ]
         elif category == "media":
@@ -1292,9 +1447,18 @@ class WhiteBoardPlugin(BoardPlugin):
                 ("ups", "Upscale", lambda: self.add_ups(scene_pos)),
                 ("rmv", "Remove BG", lambda: self.add_rmv(scene_pos)),
             ]
-        elif category == "ui":
+        elif category == "signal":
             return [
                 ("button", "Button", lambda: self.add_button(scene_pos)),
+                ("switch", "Switch", lambda: self.add_switch(scene_pos)),
+                ("latch", "Latch", lambda: self.add_latch(scene_pos)),
+                ("not", "NOT", lambda: self.add_not_gate(scene_pos)),
+                ("and", "AND", lambda: self.add_and_gate(scene_pos)),
+                ("or", "OR", lambda: self.add_or_gate(scene_pos)),
+                ("xor", "XOR", lambda: self.add_xor_gate(scene_pos)),
+            ]
+        elif category == "ui":
+            return [
                 ("group", "Group", lambda: self.add_group_frame(scene_pos)),
             ]
 
@@ -1337,6 +1501,19 @@ class WhiteBoardPlugin(BoardPlugin):
         logger.debug(f"[EDGE CREATE] Success: {start_port.port_name} -> {end_port.port_name} (is_type_valid={edge.is_type_valid})")
         self._send_edge_add_op(edge)
         self._notify_modified()
+
+        if start_port.port_data_type == PortItem.TYPE_BOOLEAN and start_port.powered:
+            edge.set_powered(True)
+            end_port.set_powered(True)
+
+        if isinstance(start_port.parent_proxy, ImageCardItem) and start_port.parent_proxy.image_path:
+            card = start_port.parent_proxy
+            target = end_port.parent_proxy
+            if isinstance(target, ImageCardItem):
+                target.set_image(card.image_path)
+            elif isinstance(target, DimensionItem):
+                self._add_to_dimension(target, card.image_path, [card.image_path])
+
         return edge
 
     def remove_edge(self, edge: EdgeItem):
@@ -1399,7 +1576,7 @@ class WhiteBoardPlugin(BoardPlugin):
         self._remove_ports_and_edges(self._collect_ports(proxy))
 
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             d.pop(node_id, None)
@@ -1438,22 +1615,49 @@ class WhiteBoardPlugin(BoardPlugin):
     def delete_text_item(self, item):
         self._delete_scene_item(item, self.text_items)
 
-    def emit_signal(self, source_port, data=None):
-        """신호 포트(⚡)로부터 신호를 발송하여 연결된 모든 노드의 on_signal_input() 호출"""
-        if source_port is None:
+    def set_port_state(self, source_port, powered: bool, data=None):
+        if source_port is None or source_port.port_data_type != PortItem.TYPE_BOOLEAN:
             return
-        if source_port.port_data_type != PortItem.TYPE_BOOLEAN:
+        if source_port.powered == powered:
             return
+        if not hasattr(self, '_prop_depth'):
+            self._prop_depth = 0
+        if self._prop_depth > 32:
+            return
+        self._prop_depth += 1
+        try:
+            self._set_port_state_inner(source_port, powered, data)
+        finally:
+            self._prop_depth -= 1
+
+    def _set_port_state_inner(self, source_port, powered, data):
+        source_port.set_powered(powered)
 
         for edge in list(self._edges):
-            if edge.source_port == source_port:
-                target_proxy = edge.target_port.parent_proxy
-                if target_proxy and hasattr(target_proxy, 'widget'):
-                    target_node = target_proxy.widget()
-                    if target_node is None:
-                        continue
-                    if hasattr(target_node, 'on_signal_input'):
-                        target_node.on_signal_input(input_data=data)
+            if edge.source_port != source_port:
+                continue
+            edge.set_powered(powered)
+            tgt = edge.target_port
+            prev = tgt.powered
+            tgt.set_powered(powered)
+
+            target_proxy = tgt.parent_proxy
+            if not target_proxy:
+                continue
+            target_node = target_proxy.widget() if hasattr(target_proxy, 'widget') else None
+            if target_node is None:
+                continue
+            tp_name = tgt.port_name or ""
+            if tp_name == "⚡ A" and hasattr(target_node, 'on_signal_a'):
+                target_node.on_signal_a(input_data=data, powered=powered)
+            elif tp_name == "⚡ B" and hasattr(target_node, 'on_signal_b'):
+                target_node.on_signal_b(input_data=data, powered=powered)
+            elif powered and not prev and hasattr(target_node, 'on_signal_input'):
+                target_node.on_signal_input(input_data=data)
+
+    def emit_signal(self, source_port, data=None):
+        self.set_port_state(source_port, True, data)
+        QTimer.singleShot(500, lambda: self.set_port_state(source_port, False))
 
     def _emit_complete_signal(self, node, images=None):
         """노드의 완료 신호(⚡ 완료) 발송 및 _default 출력 포트 연결 노드 자동 실행"""
@@ -1571,6 +1775,18 @@ class WhiteBoardPlugin(BoardPlugin):
             card.set_image(img_path)
         except Exception as e:
             logger.error(f"[IMAGE_CARD] Failed to save: {e}")
+
+    def _on_image_card_changed(self, card: ImageCardItem):
+        if not card.output_port or not card.image_path:
+            return
+        for edge in list(self._edges):
+            if edge.source_port != card.output_port:
+                continue
+            target = edge.target_port.parent_proxy
+            if isinstance(target, ImageCardItem):
+                target.set_image(card.image_path)
+            elif isinstance(target, DimensionItem):
+                self._add_to_dimension(target, card.image_path, [card.image_path])
 
     def _save_to_repository(self, repo_node: RepositoryNodeWidget, source_node, images=None):
         """자료함 노드의 폴더에 데이터 저장"""
@@ -2746,13 +2962,23 @@ class WhiteBoardPlugin(BoardPlugin):
 
     @staticmethod
     def _copy_chat_data(nd):
-        """ChatNode 데이터의 저장 안전 복사본을 생성한다 (user_files, ai_image_paths, history[].images만 복사)."""
+        """ChatNode 데이터의 저장 안전 복사본을 생성한다."""
         r = dict(nd)
         r['user_files'] = list(r.get('user_files', []))
         r['ai_image_paths'] = list(r.get('ai_image_paths', []))
         hist = r.get('history')
         if hist:
-            r['history'] = [{**e, 'images': list(e.get('images', []))} for e in hist]
+            new_hist = []
+            for e in hist:
+                entry = {**e, 'images': list(e.get('images', []))}
+                prefs = e.get('preferred_candidates')
+                if prefs:
+                    entry['preferred_candidates'] = [
+                        {**c, 'images': list(c.get('images', []))}
+                        for c in prefs
+                    ]
+                new_hist.append(entry)
+            r['history'] = new_hist
         return r
 
     def _get_cached_or_fresh(self, node):
@@ -2777,7 +3003,7 @@ class WhiteBoardPlugin(BoardPlugin):
                     "color": getattr(node, "color_name", "blue"),
                     "locked": getattr(node, "_locked", False),
                 }
-            elif isinstance(node, ButtonNodeWidget):
+            elif hasattr(node, 'to_dict'):
                 nd = node.to_dict()
             elif hasattr(node, 'get_data'):
                 nd = node.get_data()
@@ -2805,9 +3031,11 @@ class WhiteBoardPlugin(BoardPlugin):
         data = {
             "type": "WhiteBoard",
             "nodes": [], "function_nodes": [], "round_tables": [],
-            "buttons": [], "repository_nodes": [], "functions_library": [],
+            "buttons": [], "switch_nodes": [], "latch_nodes": [],
+            "and_gates": [], "or_gates": [], "not_gates": [], "xor_gates": [],
+            "repository_nodes": [], "functions_library": [],
             "edges": [], "pins": [], "texts": [], "sticky_notes": [],
-            "prompt_nodes": [], "image_cards": [], "checklists": [],
+            "prompt_nodes": [], "markdown_nodes": [], "image_cards": [], "checklists": [],
             "group_frames": [], "dimensions": [], "nixi_nodes": [],
             "ups_nodes": [], "rmv_nodes": [],
             "next_id": self.app._next_id,
@@ -2815,47 +3043,86 @@ class WhiteBoardPlugin(BoardPlugin):
             "system_files": list(self.system_files),
         }
 
+        _save_errors = []
+
         for node in self.app.nodes.values():
-            nd = self._get_cached_or_fresh(node)
-            if nd is None:
-                continue
-            if isinstance(node, ChatNodeWidget):
-                data["nodes"].append(self._copy_chat_data(nd))
-            elif isinstance(node, FunctionNodeWidget):
-                data["function_nodes"].append(dict(nd))
-            elif isinstance(node, RoundTableWidget):
-                data["round_tables"].append(dict(nd))
-            elif isinstance(node, PromptNodeWidget):
-                data["prompt_nodes"].append(dict(nd))
-            elif isinstance(node, StickyNoteWidget):
-                data["sticky_notes"].append(dict(nd))
-            elif isinstance(node, ButtonNodeWidget):
-                data["buttons"].append(dict(nd))
-            elif isinstance(node, ChecklistWidget):
-                data["checklists"].append(dict(nd))
-            elif isinstance(node, RepositoryNodeWidget):
-                data["repository_nodes"].append(dict(nd))
-            elif isinstance(node, NixiNodeWidget):
-                data["nixi_nodes"].append(dict(nd))
-            elif isinstance(node, UpsNodeWidget):
-                data["ups_nodes"].append(dict(nd))
-            elif isinstance(node, RmvNodeWidget):
-                data["rmv_nodes"].append(dict(nd))
-            elif isinstance(node, TextItem):
-                data["texts"].append(dict(nd))
-            elif isinstance(node, GroupFrameItem):
-                data["group_frames"].append(dict(nd))
+            try:
+                nd = self._get_cached_or_fresh(node)
+                if nd is None:
+                    continue
+                if isinstance(node, ChatNodeWidget):
+                    data["nodes"].append(self._copy_chat_data(nd))
+                elif isinstance(node, FunctionNodeWidget):
+                    data["function_nodes"].append(dict(nd))
+                elif isinstance(node, RoundTableWidget):
+                    data["round_tables"].append(dict(nd))
+                elif isinstance(node, PromptNodeWidget):
+                    data["prompt_nodes"].append(dict(nd))
+                elif isinstance(node, MarkdownNodeWidget):
+                    data["markdown_nodes"].append(dict(nd))
+                elif isinstance(node, StickyNoteWidget):
+                    data["sticky_notes"].append(dict(nd))
+                elif isinstance(node, ButtonNodeWidget):
+                    data["buttons"].append(dict(nd))
+                elif isinstance(node, SwitchNodeWidget):
+                    data["switch_nodes"].append(dict(nd))
+                elif isinstance(node, LatchNodeWidget):
+                    data["latch_nodes"].append(dict(nd))
+                elif isinstance(node, AndGateWidget):
+                    data["and_gates"].append(dict(nd))
+                elif isinstance(node, OrGateWidget):
+                    data["or_gates"].append(dict(nd))
+                elif isinstance(node, NotGateWidget):
+                    data["not_gates"].append(dict(nd))
+                elif isinstance(node, XorGateWidget):
+                    data["xor_gates"].append(dict(nd))
+                elif isinstance(node, ChecklistWidget):
+                    data["checklists"].append(dict(nd))
+                elif isinstance(node, RepositoryNodeWidget):
+                    data["repository_nodes"].append(dict(nd))
+                elif isinstance(node, NixiNodeWidget):
+                    data["nixi_nodes"].append(dict(nd))
+                elif isinstance(node, UpsNodeWidget):
+                    data["ups_nodes"].append(dict(nd))
+                elif isinstance(node, RmvNodeWidget):
+                    data["rmv_nodes"].append(dict(nd))
+                elif isinstance(node, TextItem):
+                    data["texts"].append(dict(nd))
+                elif isinstance(node, GroupFrameItem):
+                    data["group_frames"].append(dict(nd))
+            except Exception as e:
+                _save_errors.append(f"node {getattr(node, 'node_id', '?')}: {e}")
+                logger.error(f"[SAVE] Failed to collect node {getattr(node, 'node_id', '?')}: {e}")
 
         for card in self.image_card_items.values():
-            nid = card.node_id
-            if nid in self._dirty_node_ids or nid not in self._node_data_cache:
-                nd = card.get_data()
-                self._node_data_cache[nid] = nd
-            else:
-                nd = self._node_data_cache[nid]
-            data["image_cards"].append(dict(nd))
+            try:
+                nid = card.node_id
+                if nid in self._dirty_node_ids or nid not in self._node_data_cache:
+                    nd = card.get_data()
+                    self._node_data_cache[nid] = nd
+                else:
+                    nd = self._node_data_cache[nid]
+                    nd['x'] = card.pos().x()
+                    nd['y'] = card.pos().y()
+                data["image_cards"].append(dict(nd))
+            except Exception as e:
+                _save_errors.append(f"image_card {getattr(card, 'node_id', '?')}: {e}")
+                logger.error(f"[SAVE] Failed to collect image_card {getattr(card, 'node_id', '?')}: {e}")
         for dim in self.dimension_items.values():
-            data["dimensions"].append(dim.get_data())
+            try:
+                data["dimensions"].append(dim.get_data())
+            except Exception as e:
+                _save_errors.append(f"dimension {getattr(dim, 'node_id', '?')}: {e}")
+                logger.error(f"[SAVE] Failed to collect dimension {getattr(dim, 'node_id', '?')}: {e}")
+
+        if _save_errors:
+            msg = f"저장 중 {len(_save_errors)}개 오류:\n" + "\n".join(_save_errors[:5])
+            try:
+                from .toast_notification import ToastManager
+                main_window = self.view.window() if self.view else None
+                ToastManager.instance().show_toast(msg, main_window)
+            except Exception:
+                pass
 
         self._dirty_node_ids.clear()
         self._save_generation += 1
@@ -2956,8 +3223,11 @@ class WhiteBoardPlugin(BoardPlugin):
     _ID_KEY_MAP = {
         "nodes": "id", "function_nodes": "id", "round_tables": "id",
         "repository_nodes": "id", "texts": "id",
-        "group_frames": "id", "sticky_notes": "node_id", "prompt_nodes": "node_id",
-        "buttons": "node_id", "checklists": "node_id", "image_cards": "node_id",
+        "group_frames": "id", "sticky_notes": "node_id", "prompt_nodes": "node_id", "markdown_nodes": "node_id",
+        "buttons": "node_id", "switch_nodes": "node_id",
+        "latch_nodes": "node_id", "and_gates": "node_id", "or_gates": "node_id",
+        "not_gates": "node_id", "xor_gates": "node_id",
+        "checklists": "node_id", "image_cards": "node_id",
         "dimensions": "node_id", "nixi_nodes": "node_id",
         "ups_nodes": "node_id", "rmv_nodes": "node_id",
     }
@@ -2979,8 +3249,22 @@ class WhiteBoardPlugin(BoardPlugin):
                 return ("prompt_nodes", node_id, widget.get_data())
             elif isinstance(widget, StickyNoteWidget):
                 return ("sticky_notes", node_id, widget.get_data())
+            elif isinstance(widget, MarkdownNodeWidget):
+                return ("markdown_nodes", node_id, widget.get_data())
             elif isinstance(widget, ButtonNodeWidget):
                 return ("buttons", node_id, widget.to_dict())
+            elif isinstance(widget, SwitchNodeWidget):
+                return ("switch_nodes", node_id, widget.to_dict())
+            elif isinstance(widget, LatchNodeWidget):
+                return ("latch_nodes", node_id, widget.to_dict())
+            elif isinstance(widget, AndGateWidget):
+                return ("and_gates", node_id, widget.to_dict())
+            elif isinstance(widget, OrGateWidget):
+                return ("or_gates", node_id, widget.to_dict())
+            elif isinstance(widget, NotGateWidget):
+                return ("not_gates", node_id, widget.to_dict())
+            elif isinstance(widget, XorGateWidget):
+                return ("xor_gates", node_id, widget.to_dict())
             elif isinstance(widget, RoundTableWidget):
                 return ("round_tables", node_id, widget.get_data())
             elif isinstance(widget, ChecklistWidget):
@@ -3253,8 +3537,8 @@ class WhiteBoardPlugin(BoardPlugin):
         # 보드별 temp 경로를 ChatNodeWidget에 전달
         if self._board_name:
             from v.board import BoardManager
-            _temp = BoardManager.get_boards_dir() / '.temp' / self._board_name / 'attachments'
-            _temp.mkdir(parents=True, exist_ok=True)
+            _temp = BoardManager.get_boards_dir() / '.temp' / self._board_name
+            (_temp / 'attachments').mkdir(parents=True, exist_ok=True)
             from .chat_node import ChatNodeWidget
             from .items import ImageCardItem
             ChatNodeWidget._board_temp_dir = str(_temp)
@@ -3267,7 +3551,7 @@ class WhiteBoardPlugin(BoardPlugin):
             self.remove_edge(edge)
         if self.scene:
             for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                      self.sticky_proxies, self.prompt_proxies, self.button_proxies,
+                      self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
                       self.checklist_proxies, self.repository_proxies,
                       self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
                 for proxy in d.values():
@@ -3286,7 +3570,21 @@ class WhiteBoardPlugin(BoardPlugin):
                 self.scene.removeItem(proxy)
             for proxy in list(self.prompt_proxies.values()):
                 self.scene.removeItem(proxy)
+            for proxy in list(self.markdown_proxies.values()):
+                self.scene.removeItem(proxy)
             for proxy in list(self.button_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.switch_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.latch_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.and_gate_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.or_gate_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.not_gate_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.xor_gate_proxies.values()):
                 self.scene.removeItem(proxy)
             for proxy in list(self.checklist_proxies.values()):
                 self.scene.removeItem(proxy)
@@ -3312,7 +3610,14 @@ class WhiteBoardPlugin(BoardPlugin):
         self.round_table_proxies.clear()
         self.sticky_proxies.clear()
         self.prompt_proxies.clear()
+        self.markdown_proxies.clear()
         self.button_proxies.clear()
+        self.switch_proxies.clear()
+        self.latch_proxies.clear()
+        self.and_gate_proxies.clear()
+        self.or_gate_proxies.clear()
+        self.not_gate_proxies.clear()
+        self.xor_gate_proxies.clear()
         self.checklist_proxies.clear()
 
         self.repository_proxies.clear()
@@ -3362,9 +3667,18 @@ class WhiteBoardPlugin(BoardPlugin):
 
         for category, node_id, row in batch:
             if node_id in self._lazy_mgr._materialized_ids:
-                continue  # 이미 생성된 아이템 스킵 (중복 방지)
-            self._materialize_single(category, node_id, row)
-            self._lazy_mgr.mark_materialized(node_id, category)
+                continue
+            try:
+                self._materialize_single(category, node_id, row)
+                self._lazy_mgr.mark_materialized(node_id, category)
+            except Exception as e:
+                logger.error(f"[LAZY] Failed to materialize {category} id={node_id}: {e}")
+                try:
+                    from .toast_notification import ToastManager
+                    main_window = self.view.window() if self.view else None
+                    ToastManager.instance().show_toast(f"로드 오류: {category} #{node_id}", main_window)
+                except Exception:
+                    pass
 
         # 배치마다 엣지 해결 시도
         resolvable = self._lazy_mgr.get_resolvable_edges()
@@ -3382,20 +3696,73 @@ class WhiteBoardPlugin(BoardPlugin):
 
     def _finalize_batch_loading(self):
         """배치 로딩 완료 — 최종 포트/엣지 정리."""
-        self._batch_loading = False
-        self._reposition_all_ports()
-        self._invalidate_all_port_caches()
+        try:
+            self._reposition_all_ports()
+            self._invalidate_all_port_caches()
 
-        resolvable = self._lazy_mgr.get_resolvable_edges()
-        for edge_data in resolvable:
-            self._restore_edge(edge_data)
-        self._manual_update_all_edges()
+            resolvable = self._lazy_mgr.get_resolvable_edges()
+            for edge_data in resolvable:
+                self._restore_edge(edge_data)
 
+            self._manual_update_all_edges()
+        except Exception as e:
+            logger.error(f"[LAZY] _finalize_batch_loading error: {e}")
+        finally:
+            self._batch_loading = False
+
+        pending_count = sum(len(d) for d in self._lazy_mgr._pending.values())
         logger.info(f"[LAZY] Initial load complete: {len(self._lazy_mgr._materialized_ids)} materialized, "
-                     f"{sum(len(d) for d in self._lazy_mgr._pending.values())} pending")
+                     f"{pending_count} pending")
 
-        # Persistent batch queue에서 pending job 폴링 재개
+        self._verify_load()
+
         self._resume_pending_batches()
+
+    def _verify_load(self):
+        missing = []
+        all_dicts = {
+            'proxies': self.proxies,
+            'function': self.function_proxies,
+            'round_table': self.round_table_proxies,
+            'sticky': self.sticky_proxies,
+            'prompt': self.prompt_proxies,
+            'markdown': self.markdown_proxies,
+            'button': self.button_proxies,
+            'switch': self.switch_proxies,
+            'latch': self.latch_proxies,
+            'and': self.and_gate_proxies,
+            'or': self.or_gate_proxies,
+            'not': self.not_gate_proxies,
+            'xor': self.xor_gate_proxies,
+            'checklist': self.checklist_proxies,
+            'repository': self.repository_proxies,
+            'nixi': self.nixi_proxies,
+            'ups': self.ups_proxies,
+            'rmv': self.rmv_proxies,
+            'image_card': self.image_card_items,
+            'dimension': self.dimension_items,
+            'text': self.text_items,
+            'group_frame': self.group_frame_items,
+        }
+        created_ids = set()
+        for d in all_dicts.values():
+            created_ids.update(d.keys())
+
+        for nid in self._lazy_mgr._materialized_ids:
+            if nid not in created_ids:
+                missing.append(nid)
+
+        if missing:
+            msg = f"로드 검증: {len(missing)}개 아이템 누락 (ID: {missing[:10]})"
+            logger.error(f"[VERIFY] {msg}")
+            try:
+                from .toast_notification import ToastManager
+                mw = self.view.window() if self.view else None
+                ToastManager.instance().show_toast(msg, mw)
+            except Exception:
+                pass
+        else:
+            logger.info(f"[VERIFY] 로드 검증 통과: {len(created_ids)}개 아이템 정상")
 
     def _materialize_single(self, category: str, node_id: int, row: dict):
         """단일 아이템 카테고리별 생성."""
@@ -3404,7 +3771,14 @@ class WhiteBoardPlugin(BoardPlugin):
             "function_nodes": self._materialize_function_node,
             "sticky_notes": self._materialize_sticky_note,
             "prompt_nodes": self._materialize_prompt_node,
+            "markdown_nodes": self._materialize_markdown,
             "buttons": self._materialize_button,
+            "switch_nodes": self._materialize_switch,
+            "latch_nodes": self._materialize_latch,
+            "and_gates": self._materialize_and_gate,
+            "or_gates": self._materialize_or_gate,
+            "not_gates": self._materialize_not_gate,
+            "xor_gates": self._materialize_xor_gate,
             "round_tables": self._materialize_round_table,
 
             "checklists": self._materialize_checklist,
@@ -3592,6 +3966,23 @@ class WhiteBoardPlugin(BoardPlugin):
 
         node.priority_spin.setValue(row.get("priority", 0))
 
+    def _materialize_markdown(self, row):
+        proxy = self.add_markdown(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        node._raw_md = row.get("markdown", "")
+        preview = row.get("preview_mode", True)
+        node._preview_mode = preview
+        if preview:
+            node.text_area.setMarkdown(node._raw_md)
+        else:
+            node.text_area.setReadOnly(False)
+            node.text_area.setPlainText(node._raw_md)
+            node.toggle_btn.setText("\U0001f441")
+
     def _materialize_button(self, row):
         proxy = self.add_button(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
         if proxy is None:
@@ -3601,8 +3992,107 @@ class WhiteBoardPlugin(BoardPlugin):
         if row.get("width") and row.get("height"):
             node.setFixedSize(int(row["width"]), int(row["height"]))
         node.click_count = row.get("click_count", 0)
-        node.counter_label.setText(f"click: {node.click_count}")
         node.input_data = row.get("input_data")
+        label = row.get("label", "Button")
+        node._label = label
+        node.title_label.setText(label)
+
+    def _materialize_switch(self, row):
+        proxy = self.add_switch(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node.is_on = row.get("is_on", True)
+        node.toggle_btn.setChecked(node.is_on)
+        node.toggle_btn.setText("ON" if node.is_on else "OFF")
+        node._apply_style()
+        node._apply_toggle_style()
+
+    def _materialize_latch(self, row):
+        proxy = self.add_latch(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._latched = row.get("latched", False)
+        node._data = row.get("data")
+        node._output_on = node._latched
+        node._pass_powered = node._latched
+        node.signal_output_port.set_powered(node._latched)
+        node._update_visual()
+
+    def _materialize_and_gate(self, row):
+        proxy = self.add_and_gate(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._a_on = row.get("a_on", False)
+        node._b_on = row.get("b_on", False)
+        node._a_data = row.get("a_data")
+        node._b_data = row.get("b_data")
+        out = node._a_on and node._b_on
+        node._output_on = out
+        node._pass_powered = out
+        node.signal_output_port.set_powered(out)
+        a = "A" if node._a_on else "-"
+        b = "B" if node._b_on else "-"
+        node.status_label.setText(f"{a} & {b}")
+
+    def _materialize_or_gate(self, row):
+        proxy = self.add_or_gate(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._a_on = row.get("a_on", False)
+        node._b_on = row.get("b_on", False)
+        node._a_data = row.get("a_data")
+        node._b_data = row.get("b_data")
+        out = node._a_on or node._b_on
+        node._output_on = out
+        node._pass_powered = out
+        node.signal_output_port.set_powered(out)
+        a = "A" if node._a_on else "-"
+        b = "B" if node._b_on else "-"
+        node.status_label.setText(f"{a} | {b}")
+
+    def _materialize_not_gate(self, row):
+        proxy = self.add_not_gate(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._in_on = row.get("in_on", False)
+        node._output_on = not node._in_on
+        node._pass_powered = node._output_on
+        node.signal_output_port.set_powered(node._output_on)
+        node.status_label.setText("ON" if node._output_on else "OFF")
+
+    def _materialize_xor_gate(self, row):
+        proxy = self.add_xor_gate(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._a_on = row.get("a_on", False)
+        node._b_on = row.get("b_on", False)
+        node._a_data = row.get("a_data")
+        node._b_data = row.get("b_data")
+        out = node._a_on != node._b_on
+        node._output_on = out
+        node._pass_powered = out
+        node.signal_output_port.set_powered(out)
+        a = "A" if node._a_on else "-"
+        b = "B" if node._b_on else "-"
+        node.status_label.setText(f"{a} ^ {b}")
 
     def _materialize_round_table(self, row):
         proxy = self.add_round_table(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("id"))
@@ -3846,7 +4336,19 @@ class WhiteBoardPlugin(BoardPlugin):
         if port is not None and hasattr(port, "port_name") and port.port_name == name:
             logger.debug(f"[RESOLVE PORT] Found signal_input_port: {port.port_name}")
             return port
-        logger.debug(f"[RESOLVE PORT] INPUT port '{name}' NOT FOUND")
+        port = getattr(owner, "signal_input_port_b", None)
+        if port is not None and hasattr(port, "port_name") and port.port_name == name:
+            logger.debug(f"[RESOLVE PORT] Found signal_input_port_b: {port.port_name}")
+            return port
+        if hasattr(owner, 'iter_ports'):
+            for p in owner.iter_ports():
+                if p.port_type == PortItem.INPUT and getattr(p, 'port_name', None) == name:
+                    logger.debug(f"[RESOLVE PORT] Found via iter_ports fallback: {name}")
+                    return p
+        avail = []
+        if hasattr(owner, 'input_ports') and isinstance(owner.input_ports, dict):
+            avail = list(owner.input_ports.keys())
+        logger.warning(f"[RESOLVE PORT] INPUT port '{name}' NOT FOUND on node {getattr(owner, 'node_id', '?')} (available: {avail})")
         return None
 
     def _owner_by_id(self, node_id: int):
@@ -3860,8 +4362,22 @@ class WhiteBoardPlugin(BoardPlugin):
             return self.sticky_proxies[node_id]
         if node_id in self.prompt_proxies:
             return self.prompt_proxies[node_id]
+        if node_id in self.markdown_proxies:
+            return self.markdown_proxies[node_id]
         if node_id in self.button_proxies:
             return self.button_proxies[node_id]
+        if node_id in self.switch_proxies:
+            return self.switch_proxies[node_id]
+        if node_id in self.latch_proxies:
+            return self.latch_proxies[node_id]
+        if node_id in self.and_gate_proxies:
+            return self.and_gate_proxies[node_id]
+        if node_id in self.or_gate_proxies:
+            return self.or_gate_proxies[node_id]
+        if node_id in self.not_gate_proxies:
+            return self.not_gate_proxies[node_id]
+        if node_id in self.xor_gate_proxies:
+            return self.xor_gate_proxies[node_id]
         if node_id in self.checklist_proxies:
             return self.checklist_proxies[node_id]
         if node_id in self.repository_proxies:
@@ -3949,11 +4465,26 @@ class WhiteBoardPlugin(BoardPlugin):
             if node:
                 invalidated_count += self._invalidate_node_port_caches(node)
 
-        # 버튼 노드
+        for proxy in self.markdown_proxies.values():
+            node = proxy.widget()
+            if node:
+                invalidated_count += self._invalidate_node_port_caches(node)
+
         for proxy in self.button_proxies.values():
             node = proxy.widget()
             if node:
                 invalidated_count += self._invalidate_node_port_caches(node)
+
+        for proxy in self.switch_proxies.values():
+            node = proxy.widget()
+            if node:
+                invalidated_count += self._invalidate_node_port_caches(node)
+
+        for d in (self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies):
+            for proxy in d.values():
+                node = proxy.widget()
+                if node:
+                    invalidated_count += self._invalidate_node_port_caches(node)
 
         # 체크리스트
         for proxy in self.checklist_proxies.values():
@@ -4048,7 +4579,6 @@ class WhiteBoardPlugin(BoardPlugin):
                 except Exception:
                     pass
 
-        # 프롬프트 노드
         for proxy in self.prompt_proxies.values():
             node = proxy.widget()
             if node and hasattr(node, 'reposition_ports'):
@@ -4058,7 +4588,15 @@ class WhiteBoardPlugin(BoardPlugin):
                 except Exception:
                     pass
 
-        # 버튼 노드
+        for proxy in self.markdown_proxies.values():
+            node = proxy.widget()
+            if node and hasattr(node, 'reposition_ports'):
+                try:
+                    node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
         for proxy in self.button_proxies.values():
             node = proxy.widget()
             if node and hasattr(node, 'reposition_ports'):
@@ -4067,6 +4605,25 @@ class WhiteBoardPlugin(BoardPlugin):
                     reposition_count += 1
                 except Exception:
                     pass
+
+        for proxy in self.switch_proxies.values():
+            node = proxy.widget()
+            if node and hasattr(node, 'reposition_ports'):
+                try:
+                    node.reposition_ports()
+                    reposition_count += 1
+                except Exception:
+                    pass
+
+        for d in (self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies):
+            for proxy in d.values():
+                node = proxy.widget()
+                if node and hasattr(node, 'reposition_ports'):
+                    try:
+                        node.reposition_ports()
+                        reposition_count += 1
+                    except Exception:
+                        pass
 
         # 체크리스트
         for proxy in self.checklist_proxies.values():

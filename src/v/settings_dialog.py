@@ -24,6 +24,7 @@ from v.settings import (
     is_experimental_mode, set_experimental_mode,
     set_enabled_plugins,
     get_plugin_api_keys, save_plugin_api_keys,
+    get_setting, set_setting,
 )
 
 
@@ -230,6 +231,33 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._separator())
 
+        # === 입력 ===
+        layout.addWidget(self._section_label("입력"))
+
+        self.toggle_mode_check = QCheckBox("토글 모드 (터치패드용)")
+        self.toggle_mode_check.setChecked(get_setting("toggle_mode", False))
+        self.toggle_mode_check.setStyleSheet("""
+            QCheckBox {
+                color: #ddd; font-size: 13px;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 20px; height: 20px;
+                border: 2px solid #555; border-radius: 4px;
+                background-color: #2d2d2d;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0d6efd; border-color: #4a9eff;
+            }
+        """)
+        layout.addWidget(self.toggle_mode_check)
+        layout.addWidget(self._hint_label(
+            "OFF: TAB/Space 홀드 방식 (마우스용)\n"
+            "ON: TAB/Space 토글 방식 (터치패드용)"
+        ))
+
+        layout.addWidget(self._separator())
+
         # === 플러그인 ===
         layout.addWidget(self._section_label(t("plugin.section_title")))
         layout.addWidget(self._hint_label(t("plugin.hint")))
@@ -364,6 +392,10 @@ class SettingsDialog(QDialog):
         set_experimental_mode(new_exp)
         if new_exp != old_exp:
             self.experimental_mode_changed.emit(new_exp)
+
+        set_setting("toggle_mode", self.toggle_mode_check.isChecked())
+
+
 
         # 플러그인 활성 상태 저장
         enabled = [pid for pid, cb in self._plugin_checks.items() if cb.isChecked()]
