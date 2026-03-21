@@ -388,7 +388,8 @@ class ChatWorkersMixin:
             node.show_preferred_results(self._preferred_results[nid])
 
     def _on_preferred_option_selected(self, node, selections):
-        from .items import ImageCardItem, DimensionItem
+        from .items import ImageCardItem
+        from .dimension_item import DimensionItem
         from .repository_node import RepositoryNodeWidget
 
         nid = node.node_id

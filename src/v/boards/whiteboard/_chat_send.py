@@ -330,7 +330,8 @@ class ChatSendMixin:
             pref_window.update_card(index, text, images)
 
     def _on_chat_preferred_option_selected(self, node, selections):
-        from .items import ImageCardItem, DimensionItem
+        from .items import ImageCardItem
+        from .dimension_item import DimensionItem
         from .repository_node import RepositoryNodeWidget
 
         nid = node.node_id
