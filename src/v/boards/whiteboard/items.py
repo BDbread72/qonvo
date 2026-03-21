@@ -794,9 +794,16 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self.setZValue(55)
 
         self._hidden = False
-        self._pixmap = QPixmap(image_path) if image_path and os.path.exists(image_path) else QPixmap()
+        self._preview_b64: str | None = None
+        self._preview_pixmap: QPixmap | None = None
+        self._full_loaded = False
+        self._loading = False
 
-        # 기본 크기 결정
+        if image_path and os.path.exists(image_path) and width <= 0:
+            self._pixmap = QPixmap(image_path)
+        else:
+            self._pixmap = QPixmap()
+
         if width > 0 and height > 0:
             self._width = width
             self._height = height
@@ -815,9 +822,12 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
 
         self._aspect = self._pixmap.width() / self._pixmap.height() if not self._pixmap.isNull() and self._pixmap.height() > 0 else 1.0
 
-        # 스케일드 픽스맵 캐시
+        if not self._pixmap.isNull():
+            self._preview_b64 = self._generate_preview(self._pixmap)
+            self._full_loaded = True
+
         self._scaled_pixmap = None
-        self._scaled_key = None  # (width, height, pixmap_cacheKey)
+        self._scaled_key = None
 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -829,6 +839,71 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._resizing = False
         self._resize_start = None
         self._initial_size = None
+
+    @staticmethod
+    def _generate_preview(pixmap: QPixmap, size: int = 64) -> str:
+        import base64
+        from PyQt6.QtCore import QBuffer, QIODevice
+        tiny = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        tiny.save(buf, "JPEG", 50)
+        return base64.b64encode(buf.data().data()).decode('ascii')
+
+    def _decode_preview(self) -> QPixmap:
+        if not self._preview_b64:
+            return QPixmap()
+        import base64
+        raw = base64.b64decode(self._preview_b64)
+        pm = QPixmap()
+        pm.loadFromData(raw, "JPEG")
+        return pm
+
+    def _request_full_load(self):
+        if self._full_loaded or self._loading or not self.image_path:
+            return
+        path = self.image_path
+        if not os.path.exists(path) and ImageCardItem._board_temp_dir:
+            for sub in ['attachments', '']:
+                candidate = os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path)) if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path))
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+        if not os.path.exists(path):
+            return
+        self._loading = True
+        from PyQt6.QtCore import QRunnable, QThreadPool
+
+        card_ref = self
+
+        class _Loader(QRunnable):
+            def __init__(self, img_path):
+                super().__init__()
+                self._path = img_path
+                self.setAutoDelete(True)
+
+            def run(self):
+                from PyQt6.QtGui import QImageReader
+                reader = QImageReader(self._path)
+                reader.setAutoTransform(True)
+                img = reader.read()
+                if not img.isNull():
+                    QTimer.singleShot(0, lambda: card_ref._on_full_loaded(img))
+                else:
+                    card_ref._loading = False
+
+        QThreadPool.globalInstance().start(_Loader(path))
+
+    def _on_full_loaded(self, image):
+        self._pixmap = QPixmap.fromImage(image)
+        if not self._pixmap.isNull():
+            self._aspect = self._pixmap.width() / self._pixmap.height() if self._pixmap.height() > 0 else 1.0
+        self._full_loaded = True
+        self._loading = False
+        self._scaled_pixmap = None
+        self._scaled_key = None
+        self.update()
 
     def boundingRect(self) -> QRectF:
         hs = self.HANDLE_SIZE
@@ -860,6 +935,17 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 )
                 self._scaled_key = key
             painter.drawPixmap(QPointF(0, 0), self._scaled_pixmap)
+        elif self._preview_b64:
+            if self._preview_pixmap is None:
+                self._preview_pixmap = self._decode_preview()
+            if not self._preview_pixmap.isNull():
+                blurry = self._preview_pixmap.scaled(
+                    int(self._width), int(self._height),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                painter.drawPixmap(QPointF(0, 0), blurry)
+            self._request_full_load()
         else:
             # 빈 이미지 카드 플레이스홀더
             painter.setBrush(QBrush(QColor(Theme.BG_INPUT)))
@@ -894,6 +980,9 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._pixmap = QPixmap(path) if path and os.path.exists(path) else QPixmap()
         _logger.info(f"[SET_IMAGE] id={getattr(self, 'node_id', '?')} final_path={path} pixmap_null={self._pixmap.isNull()}")
         if not self._pixmap.isNull():
+            self._preview_b64 = self._generate_preview(self._pixmap)
+            self._preview_pixmap = None
+            self._full_loaded = True
             pw, ph = self._pixmap.width(), self._pixmap.height()
             self._aspect = pw / ph if ph > 0 else 1.0
             max_side = 300
@@ -906,6 +995,8 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             self.prepareGeometryChange()
             self._width = new_w
             self._height = new_h
+        self._scaled_pixmap = None
+        self._scaled_key = None
         self.setToolTip(f"Image #{getattr(self, 'node_id', '?')}")
         self.update()
         if self.output_port:
@@ -1086,6 +1177,8 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                  width=self._width, height=self._height,
                  image_path=self.image_path,
                  hidden=self._hidden)
+        if self._preview_b64:
+            d["preview_b64"] = self._preview_b64
         if hasattr(self, '_vision_results') and self._vision_results:
             d["vision_results"] = self._vision_results
         return d

@@ -537,13 +537,28 @@ class MaterializationMixin:
             item.set_locked(True)
 
     def _materialize_image_card(self, row):
-        item = self.add_image_card(
-            row.get("image_path", ""),
-            QPointF(row.get("x", 0), row.get("y", 0)),
-            node_id=row.get("node_id"),
-            width=row.get("width"),
-            height=row.get("height"),
-        )
+        preview_b64 = row.get("preview_b64")
+        if preview_b64 and row.get("width") and row.get("height"):
+            item = self.add_image_card(
+                "",
+                QPointF(row.get("x", 0), row.get("y", 0)),
+                node_id=row.get("node_id"),
+                width=row.get("width"),
+                height=row.get("height"),
+            )
+            if item:
+                item.image_path = row.get("image_path", "")
+                item._preview_b64 = preview_b64
+                item._preview_pixmap = None
+                item._full_loaded = False
+        else:
+            item = self.add_image_card(
+                row.get("image_path", ""),
+                QPointF(row.get("x", 0), row.get("y", 0)),
+                node_id=row.get("node_id"),
+                width=row.get("width"),
+                height=row.get("height"),
+            )
         if item and row.get("hidden", False):
             item._hidden = True
             logger.info(f"[IMAGE_CARD] Restored hidden state: node_id={item.node_id} path={row.get('image_path', '')}")
