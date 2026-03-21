@@ -14,6 +14,12 @@ logger = get_logger("qonvo.plugin")
 
 
 class MaterializationMixin:
+    """plugin.py에서 분리된 노드 실체화/배치 로딩 mixin.
+
+    self._lazy_mgr, self._batch_queue, self._batch_loading으로 뷰포트 기반
+    점진적 로딩을 수행한다. 각 _materialize_*()는 add_*()를 호출해 노드를 생성하고
+    저장 데이터에서 상태를 복원한다.
+    """
 
     def _process_batch(self):
         from v.constants import LAZY_LOAD_BATCH_SIZE

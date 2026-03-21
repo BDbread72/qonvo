@@ -25,6 +25,11 @@ from .function_types import FunctionDefinition
 
 
 class NodeFactoryMixin:
+    """plugin.py에서 분리된 노드 생성 팩토리 mixin.
+
+    self.scene, self._add_proxy(), self._add_port()를 사용해 노드/포트를 생성하고,
+    self.proxies 등 카테고리별 딕셔너리에 등록한다.
+    """
 
     def add_node(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)

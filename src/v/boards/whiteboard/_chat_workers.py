@@ -73,6 +73,12 @@ class _BatchResumeWorker(QThread):
 
 
 class ChatWorkersMixin:
+    """plugin.py에서 분리된 워커 생명주기 mixin.
+
+    self._workers, self._active_workers, self._pending_workers로 동시 실행을 관리하고,
+    self._preferred_results/self._preferred_expected로 배치 결과를 추적한다.
+    self.functions_library에서 함수 정의를 조회한다.
+    """
 
     def _handle_round_table_send(self, node_id, model, message, files):
         from .round_table import RoundTableWorker

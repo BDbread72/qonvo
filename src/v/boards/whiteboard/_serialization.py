@@ -15,6 +15,12 @@ _global_paste_offset = 0
 
 
 class SerializationMixin:
+    """plugin.py에서 분리된 직렬화/역직렬화 mixin.
+
+    self._node_data_cache, self._dirty_node_ids로 더티 캐시를 관리하고,
+    self._lazy_mgr로 미생성 아이템을 병합한다.
+    collect_data()는 저장, restore_data()는 로드를 담당한다.
+    """
 
     @staticmethod
     def _copy_chat_data(nd):

@@ -14,6 +14,11 @@ logger = get_logger("qonvo.plugin")
 
 
 class ChatSendMixin:
+    """plugin.py에서 분리된 채팅 전송 mixin.
+
+    self._provider로 AI 모델에 접근하고, self._preferred_results/self._rework_params로
+    preferred options 상태를 추적한다. 워커 관리는 self._start_worker()에 위임한다.
+    """
 
     def _ensure_provider(self):
         if self._provider is not None:

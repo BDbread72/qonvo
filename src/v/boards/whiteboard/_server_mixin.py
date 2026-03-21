@@ -9,6 +9,11 @@ if TYPE_CHECKING:
 
 
 class ServerMixin:
+    """plugin.py에서 분리된 서버 동기화 mixin.
+
+    self._server_client로 서버와 통신하고, self._applying_remote_op으로 원격 적용 중 전송을 차단한다.
+    노드 조회/갱신은 self.app.nodes를 통해 수행한다.
+    """
 
     _NODE_CATEGORY_MAP = {
         'ChatNodeWidget': 'nodes',
