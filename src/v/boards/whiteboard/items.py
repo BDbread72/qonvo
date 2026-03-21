@@ -840,15 +840,19 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._resize_start = None
         self._initial_size = None
 
+    _load_queue: list['ImageCardItem'] = []
+    _load_active: int = 0
+    _MAX_CONCURRENT_LOADS: int = 2
+
     @staticmethod
-    def _generate_preview(pixmap: QPixmap, size: int = 64) -> str:
+    def _generate_preview(pixmap: QPixmap, size: int = 16) -> str:
         import base64
         from PyQt6.QtCore import QBuffer, QIODevice
         tiny = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
         buf = QBuffer()
         buf.open(QIODevice.OpenModeFlag.WriteOnly)
-        tiny.save(buf, "JPEG", 50)
+        tiny.save(buf, "JPEG", 30)
         return base64.b64encode(buf.data().data()).decode('ascii')
 
     def _decode_preview(self) -> QPixmap:
@@ -863,6 +867,19 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
     def _request_full_load(self):
         if self._full_loaded or self._loading or not self.image_path:
             return
+        if self not in ImageCardItem._load_queue:
+            ImageCardItem._load_queue.append(self)
+        ImageCardItem._process_load_queue()
+
+    @classmethod
+    def _process_load_queue(cls):
+        while cls._load_queue and cls._load_active < cls._MAX_CONCURRENT_LOADS:
+            card = cls._load_queue.pop(0)
+            if card._full_loaded or card._loading:
+                continue
+            card._start_load()
+
+    def _start_load(self):
         path = self.image_path
         if not os.path.exists(path) and ImageCardItem._board_temp_dir:
             for sub in ['attachments', '']:
@@ -873,6 +890,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         if not os.path.exists(path):
             return
         self._loading = True
+        ImageCardItem._load_active += 1
         from PyQt6.QtCore import QRunnable, QThreadPool
 
         card_ref = self
@@ -888,22 +906,22 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 reader = QImageReader(self._path)
                 reader.setAutoTransform(True)
                 img = reader.read()
-                if not img.isNull():
-                    QTimer.singleShot(0, lambda: card_ref._on_full_loaded(img))
-                else:
-                    card_ref._loading = False
+                QTimer.singleShot(0, lambda: card_ref._on_full_loaded(img))
 
         QThreadPool.globalInstance().start(_Loader(path))
 
     def _on_full_loaded(self, image):
-        self._pixmap = QPixmap.fromImage(image)
-        if not self._pixmap.isNull():
-            self._aspect = self._pixmap.width() / self._pixmap.height() if self._pixmap.height() > 0 else 1.0
+        ImageCardItem._load_active = max(0, ImageCardItem._load_active - 1)
+        if not image.isNull():
+            self._pixmap = QPixmap.fromImage(image)
+            if not self._pixmap.isNull():
+                self._aspect = self._pixmap.width() / self._pixmap.height() if self._pixmap.height() > 0 else 1.0
         self._full_loaded = True
         self._loading = False
         self._scaled_pixmap = None
         self._scaled_key = None
         self.update()
+        ImageCardItem._process_load_queue()
 
     def boundingRect(self) -> QRectF:
         hs = self.HANDLE_SIZE
