@@ -507,6 +507,8 @@ class EdgeItem(QGraphicsPathItem):
         self.update_path()
 
     def update_path(self):
+        if not self.source_port or not self.target_port:
+            return
         s = self.source_port.scenePos()
         t = self.target_port.scenePos()
         key = (s.x(), s.y(), t.x(), t.y())

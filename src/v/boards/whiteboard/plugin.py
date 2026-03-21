@@ -206,6 +206,8 @@ class WhiteBoardPlugin(
         size = get_board_size()
         half = size / 2
         self.scene = QGraphicsScene()
+        self.scene.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.BspTreeIndex)
+        self.scene.setBspTreeDepth(14)
         self.scene.setSceneRect(-half, -half, size, size)
         self.scene._plugin = self
         self.app.bind(self.scene)

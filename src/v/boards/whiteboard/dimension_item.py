@@ -109,7 +109,13 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         return path
 
     def _wave_tick(self):
-        """애니메이션 틱"""
+        if not self.isVisible() or self.scene() is None:
+            return
+        views = self.scene().views()
+        if views:
+            vp = views[0].mapToScene(views[0].viewport().rect())
+            if not vp.boundingRect().intersects(self.sceneBoundingRect()):
+                return
         self._wave_phase += 0.03
         if self._wave_phase > 2 * math.pi * 100:
             self._wave_phase = 0
