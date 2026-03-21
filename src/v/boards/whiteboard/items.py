@@ -798,6 +798,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._preview_pixmap: QPixmap | None = None
         self._full_loaded = False
         self._loading = False
+        self._load_failed = False
 
         if image_path and os.path.exists(image_path) and width <= 0:
             self._pixmap = QPixmap(image_path)
@@ -865,7 +866,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         return pm
 
     def _request_full_load(self):
-        if self._full_loaded or self._loading or not self.image_path:
+        if self._full_loaded or self._loading or self._load_failed or not self.image_path:
             return
         if self not in ImageCardItem._load_queue:
             ImageCardItem._load_queue.append(self)
@@ -881,14 +882,19 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
 
     def _start_load(self):
         path = self.image_path
-        if not os.path.exists(path) and ImageCardItem._board_temp_dir:
-            for sub in ['attachments', '']:
-                candidate = os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path)) if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path))
-                if os.path.exists(candidate):
-                    path = candidate
-                    break
-        if not os.path.exists(path):
-            return
+        if not os.path.isabs(path) or not os.path.exists(path):
+            resolved = False
+            if ImageCardItem._board_temp_dir:
+                for sub in ['attachments', '']:
+                    candidate = os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path)) if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path))
+                    if os.path.exists(candidate):
+                        path = candidate
+                        resolved = True
+                        break
+            if not resolved and not os.path.exists(path):
+                _logger.warning(f"[IMG_LOAD] Failed to resolve: {self.image_path} (temp_dir={ImageCardItem._board_temp_dir})")
+                self._load_failed = True
+                return
         self._loading = True
         ImageCardItem._load_active += 1
         from PyQt6.QtCore import QRunnable, QThreadPool
@@ -916,6 +922,10 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             self._pixmap = QPixmap.fromImage(image)
             if not self._pixmap.isNull():
                 self._aspect = self._pixmap.width() / self._pixmap.height() if self._pixmap.height() > 0 else 1.0
+                self._preview_b64 = self._generate_preview(self._pixmap)
+                self._preview_pixmap = None
+        else:
+            self._load_failed = True
         self._full_loaded = True
         self._loading = False
         self._scaled_pixmap = None
@@ -996,6 +1006,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             path = self._copy_to_managed(path)
         self.image_path = path
         self._pixmap = QPixmap(path) if path and os.path.exists(path) else QPixmap()
+        self._load_failed = False
         _logger.info(f"[SET_IMAGE] id={getattr(self, 'node_id', '?')} final_path={path} pixmap_null={self._pixmap.isNull()}")
         if not self._pixmap.isNull():
             self._preview_b64 = self._generate_preview(self._pixmap)
