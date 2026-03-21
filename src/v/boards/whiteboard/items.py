@@ -897,14 +897,21 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 return
         self._loading = True
         ImageCardItem._load_active += 1
-        from PyQt6.QtCore import QRunnable, QThreadPool
+        from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal
 
         card_ref = self
 
+        class _Signal(QObject):
+            done = pyqtSignal(object, object)
+
+        sig = _Signal()
+        sig.done.connect(lambda card, img: card._on_full_loaded(img))
+
         class _Loader(QRunnable):
-            def __init__(self, img_path):
+            def __init__(self, img_path, signal):
                 super().__init__()
                 self._path = img_path
+                self._signal = signal
                 self.setAutoDelete(True)
 
             def run(self):
@@ -912,9 +919,10 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 reader = QImageReader(self._path)
                 reader.setAutoTransform(True)
                 img = reader.read()
-                QTimer.singleShot(0, lambda: card_ref._on_full_loaded(img))
+                self._signal.done.emit(card_ref, img)
 
-        QThreadPool.globalInstance().start(_Loader(path))
+        self._load_signal = sig
+        QThreadPool.globalInstance().start(_Loader(path, sig))
 
     def _on_full_loaded(self, image):
         ImageCardItem._load_active = max(0, ImageCardItem._load_active - 1)
