@@ -181,6 +181,8 @@ class SerializationMixin:
                     nd = self._node_data_cache[nid]
                     nd['x'] = card.pos().x()
                     nd['y'] = card.pos().y()
+                    nd['width'] = card._width
+                    nd['height'] = card._height
                 data["image_cards"].append(dict(nd))
             except Exception as e:
                 _save_errors.append(f"image_card {getattr(card, 'node_id', '?')}: {e}")

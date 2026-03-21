@@ -1220,6 +1220,9 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.max_tokens_spin.show()
         else:
             self.max_tokens_spin.hide()
+        self._collect_node_options()
+        if callable(self.on_modified):
+            self.on_modified(self.node_id)
 
     def _open_input(self):
         if self._running:
