@@ -100,7 +100,7 @@ class SerializationMixin:
         from .markdown_node import MarkdownNodeWidget
         from .button_node import ButtonNodeWidget
         from .switch_node import SwitchNodeWidget
-        from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget
+        from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget, BulbNodeWidget
         from .checklist import ChecklistWidget
         from .repository_node import RepositoryNodeWidget
         from .nixi_node import NixiNodeWidget
@@ -112,7 +112,7 @@ class SerializationMixin:
             "type": "WhiteBoard",
             "nodes": [], "function_nodes": [], "round_tables": [],
             "buttons": [], "switch_nodes": [], "latch_nodes": [],
-            "and_gates": [], "or_gates": [], "not_gates": [], "xor_gates": [],
+            "and_gates": [], "or_gates": [], "not_gates": [], "xor_gates": [], "bulb_nodes": [],
             "repository_nodes": [], "functions_library": [],
             "edges": [], "pins": [], "texts": [], "sticky_notes": [],
             "prompt_nodes": [], "markdown_nodes": [], "image_cards": [], "checklists": [],
@@ -156,6 +156,8 @@ class SerializationMixin:
                     data["not_gates"].append(dict(nd))
                 elif isinstance(node, XorGateWidget):
                     data["xor_gates"].append(dict(nd))
+                elif isinstance(node, BulbNodeWidget):
+                    data["bulb_nodes"].append(dict(nd))
                 elif isinstance(node, ChecklistWidget):
                     data["checklists"].append(dict(nd))
                 elif isinstance(node, RepositoryNodeWidget):
@@ -298,7 +300,7 @@ class SerializationMixin:
         "group_frames": "id", "sticky_notes": "node_id", "prompt_nodes": "node_id", "markdown_nodes": "node_id",
         "buttons": "node_id", "switch_nodes": "node_id",
         "latch_nodes": "node_id", "and_gates": "node_id", "or_gates": "node_id",
-        "not_gates": "node_id", "xor_gates": "node_id",
+        "not_gates": "node_id", "xor_gates": "node_id", "bulb_nodes": "node_id",
         "checklists": "node_id", "image_cards": "node_id",
         "dimensions": "node_id", "nixi_nodes": "node_id",
         "ups_nodes": "node_id", "rmv_nodes": "node_id",
@@ -313,7 +315,7 @@ class SerializationMixin:
         from .markdown_node import MarkdownNodeWidget
         from .button_node import ButtonNodeWidget
         from .switch_node import SwitchNodeWidget
-        from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget
+        from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget, BulbNodeWidget
         from .checklist import ChecklistWidget
         from .repository_node import RepositoryNodeWidget
         from .nixi_node import NixiNodeWidget
@@ -353,6 +355,8 @@ class SerializationMixin:
                 return ("not_gates", node_id, widget.to_dict())
             elif isinstance(widget, XorGateWidget):
                 return ("xor_gates", node_id, widget.to_dict())
+            elif isinstance(widget, BulbNodeWidget):
+                return ("bulb_nodes", node_id, widget.to_dict())
             elif isinstance(widget, RoundTableWidget):
                 return ("round_tables", node_id, widget.get_data())
             elif isinstance(widget, ChecklistWidget):
@@ -629,7 +633,7 @@ class SerializationMixin:
             self.remove_edge(edge)
         if self.scene:
             for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                      self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
+                      self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                       self.checklist_proxies, self.repository_proxies,
                       self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
                 for proxy in d.values():
@@ -664,6 +668,8 @@ class SerializationMixin:
                 self.scene.removeItem(proxy)
             for proxy in list(self.xor_gate_proxies.values()):
                 self.scene.removeItem(proxy)
+            for proxy in list(self.bulb_proxies.values()):
+                self.scene.removeItem(proxy)
             for proxy in list(self.checklist_proxies.values()):
                 self.scene.removeItem(proxy)
             for proxy in list(self.repository_proxies.values()):
@@ -696,6 +702,7 @@ class SerializationMixin:
         self.or_gate_proxies.clear()
         self.not_gate_proxies.clear()
         self.xor_gate_proxies.clear()
+        self.bulb_proxies.clear()
         self.checklist_proxies.clear()
 
         self.repository_proxies.clear()

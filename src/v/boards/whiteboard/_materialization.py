@@ -98,6 +98,7 @@ class MaterializationMixin:
             'or': self.or_gate_proxies,
             'not': self.not_gate_proxies,
             'xor': self.xor_gate_proxies,
+            'bulb': self.bulb_proxies,
             'checklist': self.checklist_proxies,
             'repository': self.repository_proxies,
             'nixi': self.nixi_proxies,
@@ -142,6 +143,7 @@ class MaterializationMixin:
             "or_gates": self._materialize_or_gate,
             "not_gates": self._materialize_not_gate,
             "xor_gates": self._materialize_xor_gate,
+            "bulb_nodes": self._materialize_bulb,
             "round_tables": self._materialize_round_table,
             "checklists": self._materialize_checklist,
             "repository_nodes": self._materialize_repository_node,
@@ -450,6 +452,20 @@ class MaterializationMixin:
         b = "B" if node._b_on else "-"
         node.status_label.setText(f"{a} ^ {b}")
 
+    def _materialize_bulb(self, row):
+        proxy = self.add_bulb(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.setFixedSize(int(row["width"]), int(row["height"]))
+        node._lit = row.get("lit", False)
+        node._output_on = node._lit
+        node._pass_powered = node._lit
+        if node._lit:
+            node.signal_output_port.set_powered(True)
+        node._update_visual()
+
     def _materialize_round_table(self, row):
         proxy = self.add_round_table(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("id"))
         if proxy is None:
@@ -676,7 +692,7 @@ class MaterializationMixin:
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies,
                   self.button_proxies, self.switch_proxies, self.latch_proxies,
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
-                  self.xor_gate_proxies, self.checklist_proxies, self.repository_proxies,
+                  self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
                   self.image_card_items, self.dimension_items, self.text_items,
                   self.group_frame_items, self.nixi_proxies, self.ups_proxies,
                   self.rmv_proxies):
@@ -714,7 +730,7 @@ class MaterializationMixin:
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies,
                   self.button_proxies, self.switch_proxies, self.latch_proxies,
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
-                  self.xor_gate_proxies, self.checklist_proxies, self.repository_proxies,
+                  self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             for proxy in d.values():
                 node = proxy.widget()
@@ -742,7 +758,7 @@ class MaterializationMixin:
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies,
                   self.button_proxies, self.switch_proxies, self.latch_proxies,
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
-                  self.xor_gate_proxies, self.checklist_proxies, self.repository_proxies,
+                  self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             for proxy in d.values():
                 node = proxy.widget()

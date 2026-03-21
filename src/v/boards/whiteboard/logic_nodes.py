@@ -397,3 +397,59 @@ class XorGateWidget(_LogicNodeBase):
         b = "B" if w._b_on else "-"
         w.status_label.setText(f"{a} ^ {b}")
         return w
+
+
+class BulbNodeWidget(_LogicNodeBase):
+
+    _title = "BULB"
+    _color = "#f1c40f"
+
+    def __init__(self, node_id, on_signal=None, on_modified=None):
+        super().__init__(node_id, on_signal, on_modified)
+        self._lit = False
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(2)
+        layout.addWidget(self._make_title_label())
+        self.bulb_label = QLabel("●")
+        self.bulb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.bulb_label.setFont(QFont("Segoe UI", 18))
+        self.bulb_label.setStyleSheet("color: #555; border: none; background: transparent;")
+        layout.addWidget(self.bulb_label)
+        self.setLayout(layout)
+
+    def on_signal_a(self, input_data=None, powered=True):
+        self._lit = powered
+        self._update_visual()
+        self._set_output(powered, input_data)
+
+    def _update_visual(self):
+        if self._lit:
+            self.setStyleSheet("""
+                BulbNodeWidget {
+                    background-color: #4a3800;
+                    border: 3px solid #f1c40f;
+                    border-radius: 8px;
+                }
+            """)
+            self.bulb_label.setStyleSheet("color: #f1c40f; border: none; background: transparent;")
+        else:
+            self._apply_style()
+            self.bulb_label.setStyleSheet("color: #555; border: none; background: transparent;")
+
+    def to_dict(self):
+        d = self._base_dict("bulb")
+        d["lit"] = self._lit
+        return d
+
+    @staticmethod
+    def from_dict(data, on_signal=None, on_modified=None):
+        w = BulbNodeWidget(data["node_id"], on_signal, on_modified)
+        w._lit = data.get("lit", False)
+        w._output_on = w._lit
+        w._pass_powered = w._lit
+        w._update_visual()
+        return w

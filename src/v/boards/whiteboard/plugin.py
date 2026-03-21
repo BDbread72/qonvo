@@ -121,6 +121,7 @@ class WhiteBoardPlugin(
         self.or_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.not_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.xor_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.bulb_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.text_items: Dict[int, TextItem] = {}
         self.group_frame_items: Dict[int, GroupFrameItem] = {}
         self.image_card_items: Dict[int, ImageCardItem] = {}
@@ -413,7 +414,7 @@ class WhiteBoardPlugin(
         for edge in list(self._edges):
             edge.update_path()
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             for proxy in d.values():
                 node = proxy.widget()
@@ -518,7 +519,7 @@ class WhiteBoardPlugin(
         self._remove_ports_and_edges(self._collect_ports(proxy))
 
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             d.pop(node_id, None)

@@ -34,6 +34,7 @@ class ServerMixin:
         'OrGateWidget': 'or_gates',
         'NotGateWidget': 'not_gates',
         'XorGateWidget': 'xor_gates',
+        'BulbNodeWidget': 'bulb_nodes',
         'TextItem': 'texts',
         'GroupFrameItem': 'group_frames',
         'ImageCardItem': 'image_cards',
@@ -181,6 +182,7 @@ class ServerMixin:
             "or_gates": self.add_or_gate,
             "not_gates": self.add_not_gate,
             "xor_gates": self.add_xor_gate,
+            "bulb_nodes": self.add_bulb,
             "checklists": self.add_checklist,
             "repository_nodes": self.add_repository,
             "nixi_nodes": self.add_nixi,
@@ -199,7 +201,7 @@ class ServerMixin:
         if node_id is None:
             return
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             if node_id in d:
@@ -217,7 +219,7 @@ class ServerMixin:
             return
         x, y = data.get("x", 0), data.get("y", 0)
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
-                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies,
+                  self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
                   self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
             if node_id in d:

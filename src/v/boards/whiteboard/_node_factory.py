@@ -18,7 +18,7 @@ from .nixi_node import NixiNodeWidget
 from .ups_node import UpsNodeWidget
 from .rmv_node import RmvNodeWidget
 from .switch_node import SwitchNodeWidget
-from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget
+from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget, BulbNodeWidget
 from .items import ImageCardItem, TextItem, GroupFrameItem
 from .dimension_item import DimensionItem
 from .function_types import FunctionDefinition
@@ -347,6 +347,19 @@ class NodeFactoryMixin:
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
+    def add_bulb(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = BulbNodeWidget(node_id, on_signal=self._on_logic_signal, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.bulb_proxies)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ A",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 출력",
+            index=0, total=1, data_type=PortItem.TYPE_BOOLEAN)
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
     def _attach_item_ports(self, item, in_type: str, out_type: str):
         item.input_port = self._add_port(
             PortItem.INPUT, item, name="_default",
@@ -585,6 +598,7 @@ class NodeFactoryMixin:
                 ("and", "AND", lambda: self.add_and_gate(scene_pos)),
                 ("or", "OR", lambda: self.add_or_gate(scene_pos)),
                 ("xor", "XOR", lambda: self.add_xor_gate(scene_pos)),
+                ("bulb", "Bulb", lambda: self.add_bulb(scene_pos)),
             ]
         elif category == "ui":
             return [

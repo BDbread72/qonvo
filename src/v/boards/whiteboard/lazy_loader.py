@@ -27,6 +27,7 @@ ID_KEY_MAP = {
     "or_gates": "node_id",
     "not_gates": "node_id",
     "xor_gates": "node_id",
+    "bulb_nodes": "node_id",
     "round_tables": "id",
 
     "checklists": "node_id",
