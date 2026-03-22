@@ -532,7 +532,11 @@ class MaterializationMixin:
             item._label.setPlainText(row["label"])
         if row.get("color"):
             item.color_name = row["color"]
-            item._apply_style()
+        if row.get("custom_hex"):
+            item._custom_hex = row["custom_hex"]
+        if row.get("opacity"):
+            item._opacity_override = row["opacity"]
+        item._apply_style()
         if row.get("locked"):
             item.set_locked(True)
 

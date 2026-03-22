@@ -14,6 +14,8 @@ from typing import Dict, Any
 from PyQt6.QtWidgets import (
     QGraphicsPathItem, QGraphicsEllipseItem, QGraphicsTextItem,
     QGraphicsItem, QGraphicsRectItem, QGraphicsProxyWidget, QToolTip,
+    QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, QSlider,
+    QPushButton, QWidget, QGridLayout, QColorDialog,
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtGui import (
@@ -1064,6 +1066,9 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                     self._scaled_pixmap = None
                     self._scaled_key = None
         self.update()
+        scene = self.scene()
+        if scene and hasattr(scene, '_plugin'):
+            scene._plugin._notify_modified()
 
     def _copy_to_managed(self, src_path: str) -> str:
         """이미지를 보드별 temp 폴더에 복사 — 이미 관리 폴더 안이면 스킵"""
@@ -1253,23 +1258,200 @@ class _LockButtonItem(QGraphicsTextItem):
 
 
 GROUP_COLORS = {
-    "blue":  ("#3a7bd5", 40),
-    "green": ("#2d8659", 40),
-    "gray":  ("#666666", 30),
-    "red":   ("#c0392b", 35),
+    "blue":    ("#3a7bd5", 40),
+    "green":   ("#2d8659", 40),
+    "red":     ("#c0392b", 35),
+    "purple":  ("#8e44ad", 40),
+    "orange":  ("#d35400", 35),
+    "teal":    ("#16a085", 40),
+    "pink":    ("#e91e63", 35),
+    "gray":    ("#666666", 30),
 }
 
 
+class GroupEditDialog(QDialog):
+    """그룹 이름/색상/투명도를 편집하는 다이얼로그."""
+
+    # 미리 정의된 색상 키와 표시 이름 매핑
+    _COLOR_DISPLAY = {
+        "blue": "Blue", "green": "Green", "red": "Red",
+        "purple": "Purple", "orange": "Orange", "teal": "Teal",
+        "pink": "Pink", "gray": "Gray",
+    }
+
+    def __init__(self, parent=None, label="", color_name="blue", opacity=40):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Group")
+        self.setFixedWidth(340)
+        self.setStyleSheet(f"""
+            QDialog {{ background: {Theme.BG_PRIMARY}; color: {Theme.TEXT_PRIMARY}; }}
+            QLineEdit {{ background: {Theme.BG_TERTIARY}; color: {Theme.TEXT_PRIMARY};
+                         border: 1px solid {Theme.NODE_BORDER}; border-radius: 4px; padding: 6px; font-size: 13px; }}
+            QLabel {{ color: {Theme.TEXT_SECONDARY}; font-size: 12px; }}
+            QPushButton {{ background: {Theme.BG_TERTIARY}; color: {Theme.TEXT_PRIMARY};
+                           border: 1px solid {Theme.NODE_BORDER}; border-radius: 4px; padding: 6px 16px; }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        layout.addWidget(QLabel("Name"))
+        self._name_edit = QLineEdit(label)
+        self._name_edit.selectAll()
+        layout.addWidget(self._name_edit)
+
+        layout.addWidget(QLabel("Color"))
+        self._selected_color = color_name if color_name in GROUP_COLORS else "blue"
+        self._custom_hex = None
+        self._color_btns: dict[str, QPushButton] = {}
+
+        color_grid = QGridLayout()
+        color_grid.setSpacing(6)
+        col = 0
+        for name, (hex_val, _alpha) in GROUP_COLORS.items():
+            btn = QPushButton()
+            btn.setFixedSize(36, 36)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(self._COLOR_DISPLAY.get(name, name))
+            btn.clicked.connect(lambda checked, n=name: self._pick_color(n))
+            self._color_btns[name] = btn
+            color_grid.addWidget(btn, 0, col)
+            col += 1
+
+        self._custom_btn = QPushButton("+")
+        self._custom_btn.setFixedSize(36, 36)
+        self._custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._custom_btn.setToolTip("Custom color")
+        self._custom_btn.setStyleSheet(f"""
+            QPushButton {{ background: {Theme.BG_TERTIARY}; color: {Theme.TEXT_SECONDARY};
+                           border: 1px solid {Theme.NODE_BORDER}; border-radius: 6px; font-size: 16px; font-weight: bold; }}
+            QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+        """)
+        self._custom_btn.clicked.connect(self._pick_custom_color)
+        color_grid.addWidget(self._custom_btn, 0, col)
+        layout.addLayout(color_grid)
+
+        self._update_color_btn_styles()
+
+        layout.addWidget(QLabel("Opacity"))
+        slider_row = QHBoxLayout()
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self._opacity_slider.setRange(10, 80)
+        self._opacity_slider.setValue(opacity)
+        self._opacity_slider.setStyleSheet(f"""
+            QSlider::groove:horizontal {{ background: {Theme.BG_TERTIARY}; height: 6px; border-radius: 3px; }}
+            QSlider::handle:horizontal {{ background: {Theme.ACCENT_PRIMARY}; width: 14px; margin: -4px 0; border-radius: 7px; }}
+        """)
+        self._opacity_label = QLabel(f"{opacity}")
+        self._opacity_label.setFixedWidth(28)
+        self._opacity_slider.valueChanged.connect(lambda v: self._opacity_label.setText(str(v)))
+        slider_row.addWidget(self._opacity_slider)
+        slider_row.addWidget(self._opacity_label)
+        layout.addLayout(slider_row)
+
+        self._preview = QWidget()
+        self._preview.setFixedHeight(40)
+        self._opacity_slider.valueChanged.connect(self._update_preview)
+        layout.addWidget(self._preview)
+        self._update_preview()
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet(f"""
+            QPushButton {{ background: {Theme.ACCENT_PRIMARY}; color: white;
+                           border: none; border-radius: 4px; padding: 6px 24px; font-weight: bold; }}
+            QPushButton:hover {{ background: {Theme.ACCENT_HOVER}; }}
+        """)
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+        layout.addLayout(btn_row)
+
+        self._name_edit.setFocus()
+
+    def _pick_color(self, name: str):
+        """기본 색상 중 하나를 선택한다."""
+        self._selected_color = name
+        self._custom_hex = None
+        self._update_color_btn_styles()
+        self._update_preview()
+
+    def _pick_custom_color(self):
+        """사용자 지정 색상을 선택한다."""
+        cur_hex, _ = GROUP_COLORS.get(self._selected_color, ("#3a7bd5", 40))
+        if self._custom_hex:
+            cur_hex = self._custom_hex
+        c = QColorDialog.getColor(QColor(cur_hex), self, "Choose Color")
+        if c.isValid():
+            self._custom_hex = c.name()
+            self._selected_color = "custom"
+            self._update_color_btn_styles()
+            self._update_preview()
+
+    def _update_color_btn_styles(self):
+        """색상 버튼들의 스타일을 갱신한다."""
+        for name, btn in self._color_btns.items():
+            hex_val, _ = GROUP_COLORS[name]
+            selected = (name == self._selected_color)
+            border = "2px solid white" if selected else f"1px solid {Theme.NODE_BORDER}"
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: {hex_val}; border: {border}; border-radius: 6px; }}
+                QPushButton:hover {{ border: 2px solid #aaa; }}
+            """)
+        custom_selected = (self._selected_color == "custom")
+        if custom_selected and self._custom_hex:
+            self._custom_btn.setStyleSheet(f"""
+                QPushButton {{ background: {self._custom_hex}; border: 2px solid white; border-radius: 6px; color: white; font-size: 16px; font-weight: bold; }}
+            """)
+        else:
+            self._custom_btn.setStyleSheet(f"""
+                QPushButton {{ background: {Theme.BG_TERTIARY}; color: {Theme.TEXT_SECONDARY};
+                               border: 1px solid {Theme.NODE_BORDER}; border-radius: 6px; font-size: 16px; font-weight: bold; }}
+                QPushButton:hover {{ background: {Theme.BG_HOVER}; }}
+            """)
+
+    def _update_preview(self):
+        """선택된 색상/투명도 미리보기를 갱신한다."""
+        if self._selected_color == "custom" and self._custom_hex:
+            hex_val = self._custom_hex
+        else:
+            hex_val, _ = GROUP_COLORS.get(self._selected_color, ("#3a7bd5", 40))
+        alpha = self._opacity_slider.value()
+        c = QColor(hex_val)
+        c.setAlpha(alpha)
+        bc = QColor(hex_val)
+        bc.setAlpha(120)
+        self._preview.setStyleSheet(
+            f"background: rgba({c.red()},{c.green()},{c.blue()},{alpha});"
+            f"border: 2px dashed rgba({bc.red()},{bc.green()},{bc.blue()},120);"
+            f"border-radius: 4px;"
+        )
+
+    def get_result(self):
+        """사용자가 선택한 결과를 딕셔너리로 반환한다."""
+        return {
+            "label": self._name_edit.text().strip() or "Group",
+            "color": self._selected_color,
+            "custom_hex": self._custom_hex,
+            "opacity": self._opacity_slider.value(),
+        }
+
+
 class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
-    """그룹 프레임 - 아이템을 묶어서 함께 이동"""
 
     LABEL_HEIGHT = 24
 
     def __init__(self, x: float, y: float, width: float = 400, height: float = 300,
-                 label: str = "", color: str = "blue"):
+                 label: str = "", color: str = "blue", opacity: int = 0):
         super().__init__(0, 0, width, height)
         self.setPos(x, y)
         self.color_name = color if color in GROUP_COLORS else "blue"
+        self._custom_hex = None
+        self._opacity_override = opacity
         self._locked = False
         self.setZValue(-50)
 
@@ -1327,7 +1509,12 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
         self._lock_btn.update_text()
 
     def _apply_style(self):
-        accent, alpha = GROUP_COLORS[self.color_name]
+        if self.color_name == "custom" and self._custom_hex:
+            accent = self._custom_hex
+            default_alpha = 40
+        else:
+            accent, default_alpha = GROUP_COLORS.get(self.color_name, ("#3a7bd5", 40))
+        alpha = self._opacity_override if self._opacity_override > 0 else default_alpha
         bg = QColor(accent)
         bg.setAlpha(alpha)
         self.setBrush(QBrush(bg))
@@ -1337,10 +1524,36 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
         self.setPen(QPen(border, 2, style))
 
     def mouseDoubleClickEvent(self, event):
-        """더블클릭: 라벨 편집"""
-        self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextEditorInteraction)
-        self._label.setFocus()
         event.accept()
+        view = self.scene().views()[0] if self.scene() and self.scene().views() else None
+        cur_alpha = self._opacity_override
+        if cur_alpha <= 0:
+            if self.color_name == "custom":
+                cur_alpha = 40
+            else:
+                _, cur_alpha = GROUP_COLORS.get(self.color_name, ("#3a7bd5", 40))
+        dlg = GroupEditDialog(
+            parent=view,
+            label=self._label.toPlainText(),
+            color_name=self.color_name,
+            opacity=cur_alpha,
+        )
+        if self._custom_hex:
+            dlg._custom_hex = self._custom_hex
+            if self.color_name == "custom":
+                dlg._selected_color = "custom"
+                dlg._update_color_btn_styles()
+                dlg._update_preview()
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            self._label.setPlainText(result["label"])
+            self.color_name = result["color"]
+            self._custom_hex = result["custom_hex"]
+            self._opacity_override = result["opacity"]
+            self._apply_style()
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
 
     def _collect_grouped_items(self):
         """프레임 안의 아이템 수집 (공간 인덱스 활용)"""
@@ -1440,6 +1653,11 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
             result += "bottom"
         return result or None
 
+    def boundingRect(self) -> QRectF:
+        hs = self.HANDLE_SIZE
+        r = self.rect()
+        return r.adjusted(-hs, -hs, hs, hs)
+
     def paint(self, painter, option, widget):
         option.state &= ~option.state.State_Selected
         super().paint(painter, option, widget)
@@ -1452,5 +1670,6 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
         d.update(type="group_frame", width=self.rect().width(),
                  height=self.rect().height(),
                  label=self._label.toPlainText(), color=self.color_name,
-                 locked=self._locked)
+                 locked=self._locked, opacity=self._opacity_override,
+                 custom_hex=self._custom_hex)
         return d

@@ -27,6 +27,7 @@ class StickyNoteWidget(QWidget, BaseNode):
 
     def __init__(self, title="", body="", color="yellow", on_modified=None):
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         # Initialize BaseNode
         self.init_base_node(node_id=None, on_modified=on_modified)

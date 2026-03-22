@@ -46,49 +46,33 @@ class SerializationMixin:
         from .items import TextItem, GroupFrameItem
 
         nid = node.node_id
-        cache = self._node_data_cache
-        dirty = self._dirty_node_ids
 
-        if nid in dirty or nid not in cache:
-            if isinstance(node, TextItem):
-                nd = {
-                    "id": nid, "x": node.pos().x(), "y": node.pos().y(),
-                    "text": node.toPlainText(),
-                    "font_size": getattr(node, "_font_size", 16),
-                    "rotation": node.rotation(),
-                }
-            elif isinstance(node, GroupFrameItem):
-                nd = {
-                    "id": nid, "x": node.pos().x(), "y": node.pos().y(),
-                    "width": node.rect().width(), "height": node.rect().height(),
-                    "label": node._label.toPlainText() if hasattr(node, "_label") else "",
-                    "color": getattr(node, "color_name", "blue"),
-                    "locked": getattr(node, "_locked", False),
-                }
-            elif hasattr(node, 'to_dict'):
-                nd = node.to_dict()
-            elif hasattr(node, 'get_data'):
-                nd = node.get_data()
-            else:
-                return None
-            cache[nid] = nd
+        if isinstance(node, TextItem):
+            return {
+                "id": nid, "x": node.pos().x(), "y": node.pos().y(),
+                "text": node.toPlainText(),
+                "font_size": getattr(node, "_font_size", 16),
+                "rotation": node.rotation(),
+            }
+        if isinstance(node, GroupFrameItem):
+            return {
+                "id": nid, "x": node.pos().x(), "y": node.pos().y(),
+                "width": node.rect().width(), "height": node.rect().height(),
+                "label": node._label.toPlainText() if hasattr(node, "_label") else "",
+                "color": getattr(node, "color_name", "blue"),
+                "locked": getattr(node, "_locked", False),
+                "opacity": getattr(node, "_opacity_override", 0),
+                "custom_hex": getattr(node, "_custom_hex", None),
+            }
+        if hasattr(node, 'to_dict'):
+            nd = node.to_dict()
+        elif hasattr(node, 'get_data'):
+            nd = node.get_data()
         else:
-            nd = cache[nid]
-            if isinstance(node, (TextItem, GroupFrameItem)):
-                nd['x'] = node.pos().x()
-                nd['y'] = node.pos().y()
-                if isinstance(node, GroupFrameItem):
-                    nd['width'] = node.rect().width()
-                    nd['height'] = node.rect().height()
-                    nd['locked'] = getattr(node, '_locked', False)
-                    nd['label'] = node._label.toPlainText() if hasattr(node, '_label') else ""
-                    nd['color'] = getattr(node, 'color_name', 'blue')
-            elif hasattr(node, 'proxy') and node.proxy:
-                nd['x'] = node.proxy.pos().x()
-                nd['y'] = node.proxy.pos().y()
-                if hasattr(node, 'width'):
-                    nd['width'] = node.width()
-                    nd['height'] = node.height()
+            return None
+        if hasattr(node, 'proxy') and node.proxy:
+            nd['x'] = node.proxy.pos().x()
+            nd['y'] = node.proxy.pos().y()
         return nd
 
     def collect_data(self):
@@ -125,79 +109,80 @@ class SerializationMixin:
 
         _save_errors = []
 
+        _type_map = {
+            ChatNodeWidget: "nodes",
+            FunctionNodeWidget: "function_nodes",
+            RoundTableWidget: "round_tables",
+            PromptNodeWidget: "prompt_nodes",
+            MarkdownNodeWidget: "markdown_nodes",
+            StickyNoteWidget: "sticky_notes",
+            ButtonNodeWidget: "buttons",
+            SwitchNodeWidget: "switch_nodes",
+            LatchNodeWidget: "latch_nodes",
+            AndGateWidget: "and_gates",
+            OrGateWidget: "or_gates",
+            NotGateWidget: "not_gates",
+            XorGateWidget: "xor_gates",
+            BulbNodeWidget: "bulb_nodes",
+            ChecklistWidget: "checklists",
+            RepositoryNodeWidget: "repository_nodes",
+            NixiNodeWidget: "nixi_nodes",
+            UpsNodeWidget: "ups_nodes",
+            RmvNodeWidget: "rmv_nodes",
+            TextItem: "texts",
+            GroupFrameItem: "group_frames",
+        }
+
         for node in self.app.nodes.values():
+            nid = getattr(node, 'node_id', None)
             try:
                 nd = self._get_cached_or_fresh(node)
                 if nd is None:
                     continue
-                if isinstance(node, ChatNodeWidget):
-                    data["nodes"].append(self._copy_chat_data(nd))
-                elif isinstance(node, FunctionNodeWidget):
-                    data["function_nodes"].append(dict(nd))
-                elif isinstance(node, RoundTableWidget):
-                    data["round_tables"].append(dict(nd))
-                elif isinstance(node, PromptNodeWidget):
-                    data["prompt_nodes"].append(dict(nd))
-                elif isinstance(node, MarkdownNodeWidget):
-                    data["markdown_nodes"].append(dict(nd))
-                elif isinstance(node, StickyNoteWidget):
-                    data["sticky_notes"].append(dict(nd))
-                elif isinstance(node, ButtonNodeWidget):
-                    data["buttons"].append(dict(nd))
-                elif isinstance(node, SwitchNodeWidget):
-                    data["switch_nodes"].append(dict(nd))
-                elif isinstance(node, LatchNodeWidget):
-                    data["latch_nodes"].append(dict(nd))
-                elif isinstance(node, AndGateWidget):
-                    data["and_gates"].append(dict(nd))
-                elif isinstance(node, OrGateWidget):
-                    data["or_gates"].append(dict(nd))
-                elif isinstance(node, NotGateWidget):
-                    data["not_gates"].append(dict(nd))
-                elif isinstance(node, XorGateWidget):
-                    data["xor_gates"].append(dict(nd))
-                elif isinstance(node, BulbNodeWidget):
-                    data["bulb_nodes"].append(dict(nd))
-                elif isinstance(node, ChecklistWidget):
-                    data["checklists"].append(dict(nd))
-                elif isinstance(node, RepositoryNodeWidget):
-                    data["repository_nodes"].append(dict(nd))
-                elif isinstance(node, NixiNodeWidget):
-                    data["nixi_nodes"].append(dict(nd))
-                elif isinstance(node, UpsNodeWidget):
-                    data["ups_nodes"].append(dict(nd))
-                elif isinstance(node, RmvNodeWidget):
-                    data["rmv_nodes"].append(dict(nd))
-                elif isinstance(node, TextItem):
-                    data["texts"].append(dict(nd))
-                elif isinstance(node, GroupFrameItem):
-                    data["group_frames"].append(dict(nd))
+                category = None
+                for cls, cat in _type_map.items():
+                    if isinstance(node, cls):
+                        category = cat
+                        break
+                if category is None:
+                    continue
+                if nid is not None:
+                    self._node_data_cache[nid] = nd
+                if category == "nodes":
+                    data[category].append(self._copy_chat_data(nd))
+                else:
+                    data[category].append(dict(nd))
             except Exception as e:
-                _save_errors.append(f"node {getattr(node, 'node_id', '?')}: {e}")
-                logger.error(f"[SAVE] Failed to collect node {getattr(node, 'node_id', '?')}: {e}")
+                _save_errors.append(f"node {nid}: {e}")
+                logger.error(f"[SAVE] Failed to collect node {nid}: {e}", exc_info=True)
+                if nid is not None and nid in self._node_data_cache:
+                    fallback = self._node_data_cache[nid]
+                    category = None
+                    for cls, cat in _type_map.items():
+                        if isinstance(node, cls):
+                            category = cat
+                            break
+                    if category:
+                        data[category].append(dict(fallback))
+                        logger.warning(f"[SAVE] Used cached fallback for node {nid}")
 
         for card in self.image_card_items.values():
             try:
-                nid = card.node_id
-                if nid in self._dirty_node_ids or nid not in self._node_data_cache:
-                    nd = card.get_data()
-                    self._node_data_cache[nid] = nd
-                else:
-                    nd = self._node_data_cache[nid]
-                    nd['x'] = card.pos().x()
-                    nd['y'] = card.pos().y()
-                    nd['width'] = card._width
-                    nd['height'] = card._height
-                data["image_cards"].append(dict(nd))
+                nd = card.get_data()
+                nd['x'] = card.pos().x()
+                nd['y'] = card.pos().y()
+                data["image_cards"].append(nd)
             except Exception as e:
-                _save_errors.append(f"image_card {getattr(card, 'node_id', '?')}: {e}")
-                logger.error(f"[SAVE] Failed to collect image_card {getattr(card, 'node_id', '?')}: {e}")
+                nid = getattr(card, 'node_id', None)
+                _save_errors.append(f"image_card {nid}: {e}")
+                logger.error(f"[SAVE] Failed to collect image_card {nid}: {e}", exc_info=True)
         for dim in self.dimension_items.values():
             try:
                 data["dimensions"].append(dim.get_data())
             except Exception as e:
-                _save_errors.append(f"dimension {getattr(dim, 'node_id', '?')}: {e}")
-                logger.error(f"[SAVE] Failed to collect dimension {getattr(dim, 'node_id', '?')}: {e}")
+                nid = getattr(dim, 'node_id', None)
+                _save_errors.append(f"dimension {nid}: {e}")
+                logger.error(f"[SAVE] Failed to collect dimension {nid}: {e}", exc_info=True)
 
         if _save_errors:
             msg = f"저장 중 {len(_save_errors)}개 오류:\n" + "\n".join(_save_errors[:5])
@@ -208,7 +193,6 @@ class SerializationMixin:
             except Exception:
                 pass
 
-        self._dirty_node_ids.clear()
         self._save_generation += 1
 
         logger.debug(f"[EDGE SAVE] Starting to save {len(self._edges)} edges")
@@ -391,6 +375,8 @@ class SerializationMixin:
                 "label": item._label.toPlainText() if hasattr(item, '_label') else "",
                 "color": getattr(item, "color_name", "blue"),
                 "locked": getattr(item, "_locked", False),
+                "opacity": getattr(item, "_opacity_override", 0),
+                "custom_hex": getattr(item, "_custom_hex", None),
             })
         elif isinstance(item, ImageCardItem):
             node_id = getattr(item, 'node_id', None)

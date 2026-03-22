@@ -666,6 +666,7 @@ class WhiteBoardPlugin(
             elif isinstance(raw, str):
                 if os.path.isfile(raw):
                     card.set_image(raw)
+                    self._mark_node_dirty(card.node_id)
                     return
                 elif raw.startswith("data:image"):
                     _, encoded = raw.split(",", 1)
@@ -680,6 +681,7 @@ class WhiteBoardPlugin(
             src_path = getattr(source_node, 'image_path', None)
             if src_path and os.path.exists(src_path):
                 card.set_image(src_path)
+                self._mark_node_dirty(card.node_id)
                 return
 
         if not img_bytes:
@@ -696,6 +698,7 @@ class WhiteBoardPlugin(
                 f.write(img_bytes)
             logger.info(f"[IMAGE_CARD] Saved: {img_path} ({len(img_bytes)} bytes)")
             card.set_image(img_path)
+            self._mark_node_dirty(card.node_id)
         except Exception as e:
             logger.error(f"[IMAGE_CARD] Failed to save: {e}")
 
