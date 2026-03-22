@@ -711,20 +711,10 @@ class WhiteboardView(QGraphicsView):
                     self.plugin.paste_clipboard()
                 event.accept()
                 return
-        elif event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            if not self._has_focused_input():
-                self._show_all_ports(True)
-                event.accept()
-                return
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent):
         """키 릴리즈 이벤트"""
-        if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
-            if not self._has_focused_input():
-                self._show_all_ports(False)
-                event.accept()
-                return
         super().keyReleaseEvent(event)
 
     def _init_port_visibility(self):
@@ -732,11 +722,6 @@ class WhiteboardView(QGraphicsView):
         self._wire_opacity = 0.0
         self._wire_fade_target = 0.0
         self._apply_wire_opacity()
-
-    def _show_all_ports(self, show: bool):
-        """모든 단자와 라벨 표시/숨김 (캐싱된 컬렉션 사용)"""
-        for port in self._all_port_items:
-            port.show_port(show)
 
     def _toggle_search(self):
         """Ctrl+F 검색 바 토글"""
@@ -908,6 +893,7 @@ class WhiteboardView(QGraphicsView):
                     edge.setOpacity(1.0)
                 else:
                     edge.setOpacity(0.15 + op * 0.85)
+        self.viewport().update()
 
     def _open_radial_menu(self, category: str = None):
         """방사형 메뉴 열기 (화면 중앙)"""

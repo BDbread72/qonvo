@@ -83,7 +83,7 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
-        self.setCacheMode(QGraphicsItem.CacheMode.DeviceCoordinateCache)
+        self.setCacheMode(QGraphicsItem.CacheMode.NoCache)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setZValue(55)
 
