@@ -394,8 +394,6 @@ class RepositoryNodeWidget(QWidget, BaseNode):
     # ── Data sink: receive and save ──
 
     def _on_refresh(self):
-        """새로고침 버튼 — 연결된 입력에서 수집 + 폴더 스캔"""
-        self._collect_from_inputs()
         self._scan_folder()
 
     def _collect_input_data(self):
@@ -416,7 +414,6 @@ class RepositoryNodeWidget(QWidget, BaseNode):
         return None
 
     def _collect_from_inputs(self):
-        """입력 포트에 연결된 모든 소스에서 데이터 수집하여 폴더에 저장"""
         if not self.folder_path:
             return
         port = getattr(self, 'input_port', None)
@@ -427,38 +424,51 @@ class RepositoryNodeWidget(QWidget, BaseNode):
         if not folder.exists():
             folder.mkdir(parents=True, exist_ok=True)
 
+        existing_texts: set[str] = set()
+        for f in folder.iterdir():
+            if f.is_file() and f.suffix.lower() == '.txt':
+                try:
+                    existing_texts.add(f.read_text(encoding='utf-8'))
+                except Exception:
+                    pass
+
         for edge in port.edges:
             source_proxy = edge.source_port.parent_proxy
             if not source_proxy:
                 continue
             source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
 
-            # ImageCardItem: 이미지 파일 복사
             if hasattr(source_node, 'image_path') and source_node.image_path:
                 src_path = Path(source_node.image_path)
                 if src_path.exists() and src_path.is_file():
+                    existing = folder / src_path.name
+                    if existing.exists() and existing.stat().st_size == src_path.stat().st_size:
+                        continue
                     dst_path = _unique_path(folder, src_path.name)
                     shutil.copy2(str(src_path), str(dst_path))
                 continue
 
-            # 텍스트 기반 노드
             text = None
-            if hasattr(source_node, 'ai_response') and source_node.ai_response:
+            source_port = edge.source_port
+            if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+                text = str(source_port.port_value)
+            elif hasattr(source_node, 'ai_response') and source_node.ai_response:
                 text = source_node.ai_response
             elif hasattr(source_node, 'text_content') and source_node.text_content:
                 text = source_node.text_content
             elif hasattr(source_node, 'body_edit') and hasattr(source_node.body_edit, 'toPlainText'):
                 text = source_node.body_edit.toPlainText()
-            if text:
+            if text and text not in existing_texts:
                 self._save_incoming_data(text)
+                existing_texts.add(text)
 
     def on_signal_input(self, input_data=None):
-        """Signal port receives trigger — save incoming data to folder."""
         self.sent = False
-        data = input_data or self._collect_input_data()
-        if data and self.folder_path:
-            self._save_incoming_data(data)
-            self._scan_folder()
+        if input_data and self.folder_path:
+            self._save_incoming_data(input_data)
+        else:
+            self._collect_from_inputs()
+        self._scan_folder()
 
     def _save_incoming_data(self, data):
         if not self.folder_path:

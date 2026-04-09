@@ -83,7 +83,7 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
-        self.setCacheMode(QGraphicsItem.CacheMode.NoCache)
+        self.setCacheMode(QGraphicsItem.CacheMode.ItemCoordinateCache)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setZValue(55)
 
@@ -94,6 +94,7 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
 
         # 콜백
         self.on_double_click = None  # fn(item)
+        self.on_board_data_changed = None  # fn(data)
 
     def boundingRect(self) -> QRectF:
         hs = self.HANDLE_SIZE
@@ -169,15 +170,18 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         self._cached_wave_path = path
         return path
 
+    _COUNT_CATEGORIES = (
+        "nodes", "function_nodes", "round_tables", "sticky_notes",
+        "image_cards", "dimensions", "buttons", "switch_nodes",
+        "latch_nodes", "and_gates", "or_gates", "not_gates",
+        "xor_gates", "bulb_nodes", "prompt_nodes", "markdown_nodes",
+        "checklists", "repository_nodes", "nixi_nodes",
+        "ups_nodes", "rmv_nodes", "texts", "group_frames",
+    )
+
     def _get_node_count(self) -> int:
-        """내부 보드의 노드 개수 (캐싱)"""
         if self._node_count_dirty:
-            count = 0
-            count += len(self._board_data.get("nodes", []))
-            count += len(self._board_data.get("function_nodes", []))
-            count += len(self._board_data.get("sticky_notes", []))
-            count += len(self._board_data.get("image_cards", []))
-            count += len(self._board_data.get("dimensions", []))
+            count = sum(len(self._board_data.get(c, [])) for c in self._COUNT_CATEGORIES)
             self._cached_node_count = count
             self._node_count_dirty = False
         return self._cached_node_count
@@ -299,10 +303,11 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         return self._board_data
 
     def set_board_data(self, data: Dict[str, Any]):
-        """내부 보드 데이터 설정"""
         self._board_data = data
         self._node_count_dirty = True
         self.update()
+        if self.on_board_data_changed:
+            self.on_board_data_changed(data)
 
     # 직렬화
     def get_data(self) -> Dict[str, Any]:

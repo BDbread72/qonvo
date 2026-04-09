@@ -790,24 +790,34 @@ class BoardManager:
             # ── 공통: 첨부파일 경로를 실제 경로로 변환 ──
             missing_attachments = []
 
+            _file_cache: set = set()
+            _basename_cache: dict = {}
+            for dirpath, _dirnames, filenames in os.walk(temp_dir):
+                rel_dir = os.path.relpath(dirpath, temp_dir).replace('\\', '/')
+                for fn in filenames:
+                    if rel_dir == '.':
+                        rel_key = fn
+                    else:
+                        rel_key = f"{rel_dir}/{fn}"
+                    full = os.path.join(dirpath, fn)
+                    _file_cache.add(rel_key)
+                    _basename_cache.setdefault(fn, full)
+            logger.info(f"[LOAD] Built file cache: {len(_file_cache)} entries")
+
             def _resolve_path(fpath):
-                """첨부파일 경로 → temp_dir 실제 경로 변환 (상대/절대 모두)"""
                 if not fpath:
                     return fpath
                 normalized = fpath.replace('\\', '/')
                 if normalized.startswith('attachments/'):
-                    real_path = temp_dir / normalized
-                    if real_path.exists():
-                        return str(real_path)
+                    if normalized in _file_cache:
+                        return str(temp_dir / normalized)
                     else:
                         missing_attachments.append(fpath)
                         return fpath
-                if not os.path.exists(fpath):
-                    basename = os.path.basename(fpath)
-                    for sub in ['attachments', '']:
-                        candidate = temp_dir / sub / basename if sub else temp_dir / basename
-                        if candidate.exists():
-                            return str(candidate)
+                basename = os.path.basename(normalized)
+                cached = _basename_cache.get(basename)
+                if cached:
+                    return cached
                 return fpath
 
             def _resolve_node_attachments(node):

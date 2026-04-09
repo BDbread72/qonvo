@@ -268,9 +268,14 @@ class WhiteboardView(QGraphicsView):
         else:
             super().mouseReleaseEvent(event)
 
-        # 드래그 완료 후 차원 겹침 감지
         if event.button() == Qt.MouseButton.LeftButton and self.plugin:
-            self._check_dimension_drop()
+            release_pos = event.position()
+            press_pos = getattr(self, '_left_press_pos', None)
+            self._left_press_pos = None
+            if press_pos is not None:
+                delta = release_pos - press_pos
+                if delta.x() ** 2 + delta.y() ** 2 > 100:
+                    self._check_dimension_drop(self.mapToScene(event.pos()))
 
         # 스냅 가이드 라인 제거 (모든 마우스 릴리즈 시)
         scene = self.scene()
@@ -382,8 +387,7 @@ class WhiteboardView(QGraphicsView):
     def _on_vision_results(self, img_card, raw: dict):
         img_card._vision_results = raw
 
-    def _check_dimension_drop(self):
-        """드래그 완료 후 차원 아이템과 겹침 감지 → 차원 이동."""
+    def _check_dimension_drop(self, cursor_scene_pos):
         if not self.plugin:
             return
         if getattr(self, '_in_dimension_drop', False):
@@ -399,11 +403,10 @@ class WhiteboardView(QGraphicsView):
                 if dim in selected:
                     continue
                 dim_rect = dim.mapToScene(dim.shape()).boundingRect()
-                hits = [s for s in selected
-                        if isinstance(s, ImageCardItem)
-                        and dim_rect.contains(s.sceneBoundingRect().center())]
-                if hits:
-                    self.plugin.move_items_to_dimension(hits, dim)
+                if dim_rect.contains(cursor_scene_pos):
+                    targets = [s for s in selected if not isinstance(s, DimensionItem)]
+                    if targets:
+                        self.plugin.move_items_to_dimension(targets, dim)
                     return
         finally:
             self._in_dimension_drop = False
@@ -506,7 +509,7 @@ class WhiteboardView(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self._right_click_origin = event.position() if event.button() == Qt.MouseButton.RightButton else None
         elif event.button() == Qt.MouseButton.LeftButton:
-            # 클릭한 위치의 아이템 확인
+            self._left_press_pos = event.position()
             item = self.itemAt(event.pos())
             scene_pos = self.mapToScene(event.pos())
 

@@ -80,6 +80,9 @@ class MaterializationMixin:
 
         self._verify_load()
 
+        if self.view:
+            self.view.viewport().update()
+
         self._resume_pending_batches()
 
     def _verify_load(self):
@@ -191,6 +194,10 @@ class MaterializationMixin:
                 node.top_p_spin.setValue(saved_opts["top_p"])
             if "max_output_tokens" in saved_opts:
                 node.max_tokens_spin.setValue(saved_opts["max_output_tokens"])
+            if "google_search" in saved_opts:
+                node.chk_google_search.setChecked(saved_opts["google_search"])
+            if "image_search" in saved_opts:
+                node.chk_image_search.setChecked(saved_opts["image_search"])
         node.pinned = row.get("pinned", False)
         node.btn_pin.setChecked(node.pinned)
         node.ai_image_paths = row.get("ai_image_paths", [])
@@ -279,6 +286,10 @@ class MaterializationMixin:
                 node.top_p_spin.setValue(saved_opts["top_p"])
             if "max_output_tokens" in saved_opts:
                 node.max_tokens_spin.setValue(saved_opts["max_output_tokens"])
+            if "google_search" in saved_opts:
+                node.chk_google_search.setChecked(saved_opts["google_search"])
+            if "image_search" in saved_opts:
+                node.chk_image_search.setChecked(saved_opts["image_search"])
         node.notify_on_complete = row.get("notify_on_complete", False)
         node.btn_notify.setChecked(node.notify_on_complete)
         node.preferred_options_enabled = row.get("preferred_options_enabled", False)

@@ -167,6 +167,16 @@ MODEL_OPTIONS = {
         **_NANOBANANA_ASPECT_RATIO_OPTION,
         **_NANOBANANA_31_SIZE_OPTION,
         **_IMAGE_GEN_OPTIONS,
+        "google_search": {
+            "type": "bool",
+            "label": "Google Search",
+            "default": False,
+        },
+        "image_search": {
+            "type": "bool",
+            "label": "Image Search",
+            "default": False,
+        },
     },
     "gemini-3-pro-image-preview": {
         **_NANOBANANA_ASPECT_RATIO_OPTION,
@@ -779,6 +789,26 @@ class GeminiProvider:
 
         image_size = options.get("image_size", "1K")
 
+        tools = None
+        use_google_search = options.get("google_search", False)
+        use_image_search = options.get("image_search", False)
+        if use_google_search or use_image_search:
+            search_types = None
+            if use_google_search and use_image_search:
+                search_types = types.SearchTypes(
+                    web_search=types.WebSearch(),
+                    image_search=types.ImageSearch(),
+                )
+            elif use_image_search:
+                search_types = types.SearchTypes(
+                    image_search=types.ImageSearch(),
+                )
+            tools = [types.Tool(
+                googleSearch=types.GoogleSearch(
+                    search_types=search_types,
+                ),
+            )]
+
         config = types.GenerateContentConfig(
             system_instruction=options.get("_sys_instr"),
             response_modalities=["IMAGE", "TEXT"],
@@ -792,6 +822,7 @@ class GeminiProvider:
             temperature=options.get("temperature"),
             top_p=options.get("top_p"),
             safety_settings=self._get_safety_settings(),
+            tools=tools,
         )
 
         result = {"text": "", "images": [], "thought_signatures": []}

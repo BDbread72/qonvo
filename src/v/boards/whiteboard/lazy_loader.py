@@ -170,8 +170,7 @@ class LazyLoadManager:
             else:
                 remaining.append(entry)
 
-        # 매칭된 엔트리는 spatial_entries에서 제거하지 않음
-        # (mark_materialized에서 처리)
+        self._spatial_entries = remaining
         return result
 
     def mark_materialized(self, node_id: int, category: str):

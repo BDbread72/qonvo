@@ -911,12 +911,15 @@ class MainWindow(QMainWindow):
 
 
 def run_app(app: App):
-    """앱 실행"""
     import sys
     from pathlib import Path
     import q
     from v.settings import get_language
     q.load(get_language())
+
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("mokabun.qonvo")
 
     qapp = QApplication(sys.argv)
     qapp.setStyle("Fusion")

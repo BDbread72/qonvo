@@ -423,6 +423,11 @@ class NodeFactoryMixin:
         from .dimension_board import DimensionBoardWindow
 
         self._dimension_windows = [w for w in self._dimension_windows if w.isVisible()]
+        for w in self._dimension_windows:
+            if w.dimension_item is dimension_item:
+                w.raise_()
+                w.activateWindow()
+                return
         window = DimensionBoardWindow(dimension_item, self, parent=self.view)
         self._dimension_windows.append(window)
         window.show()

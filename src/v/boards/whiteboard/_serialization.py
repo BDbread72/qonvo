@@ -75,7 +75,27 @@ class SerializationMixin:
             nd['y'] = node.proxy.pos().y()
         return nd
 
+    def _sync_dimension_windows(self):
+        for w in list(self._dimension_windows):
+            if w.isVisible():
+                self._sync_single_dimension_window(w.dimension_item)
+
+    def _sync_single_dimension_window(self, dimension_item):
+        for w in list(self._dimension_windows):
+            if w.isVisible() and w.dimension_item is dimension_item:
+                try:
+                    board_data = w.plugin.collect_data()
+                    w._suppressing = True
+                    dimension_item.set_board_data(board_data)
+                    w._suppressing = False
+                    dimension_item.set_title(w.title_edit.text())
+                except Exception:
+                    w._suppressing = False
+                break
+
+
     def collect_data(self):
+        self._sync_dimension_windows()
         from .chat_node import ChatNodeWidget
         from .function_node import FunctionNodeWidget
         from .round_table import RoundTableWidget
@@ -501,7 +521,20 @@ class SerializationMixin:
         from .items import ImageCardItem, TextItem, GroupFrameItem
         from .dimension_item import DimensionItem
 
+        self._sync_single_dimension_window(target_dimension)
         board_data = target_dimension.get_board_data()
+
+        max_existing_bottom = 0
+        for cat in board_data:
+            if not isinstance(board_data[cat], list):
+                continue
+            for entry in board_data[cat]:
+                if isinstance(entry, dict) and "y" in entry:
+                    bottom = entry["y"] + entry.get("height", 200)
+                    if bottom > max_existing_bottom:
+                        max_existing_bottom = bottom
+        start_y = max_existing_bottom + 30 if max_existing_bottom > 0 else 30
+
         seen_items = []
         seen_ids = set()
         for item in list(scene_items):
@@ -521,13 +554,26 @@ class SerializationMixin:
             col = (len(seen_items) - 1) % 3
             row = (len(seen_items) - 1) // 3
             data["x"] = 30 + col * 320
-            data["y"] = 30 + row * 280
+            data["y"] = start_y + row * 280
             board_data.setdefault(category, []).append(data)
         target_dimension.set_board_data(board_data)
         for item in seen_items:
-            nid = getattr(item, 'node_id', None)
+            if isinstance(item, QGraphicsProxyWidget):
+                w = item.widget()
+                nid = getattr(w, 'node_id', None) if w else None
+            else:
+                nid = getattr(item, 'node_id', None)
             self._remove_ports_and_edges(self._collect_ports(item))
-            if isinstance(item, ImageCardItem):
+            if isinstance(item, QGraphicsProxyWidget):
+                for d in (self.proxies, self.function_proxies, self.round_table_proxies,
+                          self.sticky_proxies, self.prompt_proxies, self.markdown_proxies,
+                          self.button_proxies, self.switch_proxies, self.latch_proxies,
+                          self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
+                          self.xor_gate_proxies, self.bulb_proxies,
+                          self.checklist_proxies, self.repository_proxies,
+                          self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                    d.pop(nid, None)
+            elif isinstance(item, ImageCardItem):
                 self.image_card_items.pop(nid, None)
             elif isinstance(item, DimensionItem):
                 self.dimension_items.pop(nid, None)

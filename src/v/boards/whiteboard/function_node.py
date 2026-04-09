@@ -10,6 +10,7 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QApplication, QComboBox, QSpinBox, QDoubleSpinBox, QFrame,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -254,6 +255,31 @@ class FunctionNodeWidget(QWidget, BaseNode):
             }}
         """)
         opts_layout.addWidget(self.max_tokens_spin)
+
+        _chk_style = f"""
+            QCheckBox {{
+                color: {Theme.TEXT_SECONDARY}; font-size: 10px; spacing: 3px;
+            }}
+            QCheckBox::indicator {{
+                width: 13px; height: 13px; border-radius: 3px;
+                border: 1px solid #555; background-color: #333;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {Theme.ACCENT_PRIMARY}; border-color: {Theme.ACCENT_PRIMARY};
+            }}
+        """
+        self.chk_google_search = QCheckBox("Search")
+        self.chk_google_search.setToolTip("Grounding with Google Search")
+        self.chk_google_search.setStyleSheet(_chk_style)
+        self.chk_google_search.hide()
+        opts_layout.addWidget(self.chk_google_search)
+
+        self.chk_image_search = QCheckBox("ImgSearch")
+        self.chk_image_search.setToolTip("Image Search")
+        self.chk_image_search.setStyleSheet(_chk_style)
+        self.chk_image_search.hide()
+        opts_layout.addWidget(self.chk_image_search)
+
         opts_layout.addStretch()
 
         self.opts_panel.hide()
@@ -551,6 +577,8 @@ class FunctionNodeWidget(QWidget, BaseNode):
             "temperature": self.temp_spin.value(),
             "top_p": self.top_p_spin.value(),
             "max_output_tokens": self.max_tokens_spin.value(),
+            "google_search": self.chk_google_search.isChecked(),
+            "image_search": self.chk_image_search.isChecked(),
         }
 
         if self.on_send:
@@ -672,6 +700,8 @@ class FunctionNodeWidget(QWidget, BaseNode):
                 "temperature": self.temp_spin.value(),
                 "top_p": self.top_p_spin.value(),
                 "max_output_tokens": self.max_tokens_spin.value(),
+                "google_search": self.chk_google_search.isChecked(),
+                "image_search": self.chk_image_search.isChecked(),
             },
             "sent": self.sent,
             "pinned": self.pinned,

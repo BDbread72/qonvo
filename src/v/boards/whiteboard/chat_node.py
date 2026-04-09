@@ -19,6 +19,7 @@ import uuid
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QComboBox, QScrollArea, QFrame, QApplication, QDoubleSpinBox, QSpinBox,
+    QCheckBox,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPainterPath
@@ -756,6 +757,31 @@ class ChatNodeWidget(QWidget, BaseNode):
             }}
         """)
         opts_layout.addWidget(self.max_tokens_spin)
+
+        _chk_style = f"""
+            QCheckBox {{
+                color: {Theme.TEXT_SECONDARY}; font-size: 10px; spacing: 3px;
+            }}
+            QCheckBox::indicator {{
+                width: 13px; height: 13px; border-radius: 3px;
+                border: 1px solid #555; background-color: #333;
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {Theme.ACCENT_PRIMARY}; border-color: {Theme.ACCENT_PRIMARY};
+            }}
+        """
+        self.chk_google_search = QCheckBox("Search")
+        self.chk_google_search.setToolTip("Grounding with Google Search")
+        self.chk_google_search.setStyleSheet(_chk_style)
+        self.chk_google_search.hide()
+        opts_layout.addWidget(self.chk_google_search)
+
+        self.chk_image_search = QCheckBox("ImgSearch")
+        self.chk_image_search.setToolTip("Image Search")
+        self.chk_image_search.setStyleSheet(_chk_style)
+        self.chk_image_search.hide()
+        opts_layout.addWidget(self.chk_image_search)
+
         opts_layout.addStretch()
 
         self.opts_panel.hide()
@@ -1220,6 +1246,16 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.max_tokens_spin.show()
         else:
             self.max_tokens_spin.hide()
+        if "google_search" in opts:
+            self.chk_google_search.show()
+        else:
+            self.chk_google_search.setChecked(False)
+            self.chk_google_search.hide()
+        if "image_search" in opts:
+            self.chk_image_search.show()
+        else:
+            self.chk_image_search.setChecked(False)
+            self.chk_image_search.hide()
         self._collect_node_options()
         if callable(self.on_modified):
             self.on_modified(self.node_id)
@@ -1261,6 +1297,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             node_options["top_p"] = self.top_p_spin.value()
         if "max_output_tokens" in opts:
             node_options["max_output_tokens"] = self.max_tokens_spin.value()
+        if "google_search" in opts:
+            node_options["google_search"] = self.chk_google_search.isChecked()
+        if "image_search" in opts:
+            node_options["image_search"] = self.chk_image_search.isChecked()
         return node_options
 
     def _send(self, msg, files):

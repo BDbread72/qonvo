@@ -5,7 +5,7 @@ DimensionBoardWindow - Dimension 내부 보드를 보여주는 창
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel, QPushButton,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 from v.theme import Theme
@@ -50,7 +50,16 @@ class DimensionBoardWindow(QDialog):
         # UI 구성
         self._setup_ui()
 
-        # 저장된 데이터 복원
+        self._dirty = False
+        self._suppressing = False
+        dimension_item.on_board_data_changed = self._on_external_update
+
+        self._sync_timer = QTimer()
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.setInterval(500)
+        self._sync_timer.timeout.connect(self._save_to_dimension)
+        self.plugin.on_modified = self._schedule_sync
+
         board_data = dimension_item.get_board_data()
         if board_data and board_data.get("nodes") is not None:
             self.plugin.restore_data(board_data)
@@ -130,8 +139,8 @@ class DimensionBoardWindow(QDialog):
         self.save_shortcut.activated.connect(self._save_to_dimension)
 
     def _on_title_changed(self, text: str):
-        """제목 변경"""
-        self.setWindowTitle(f"Dimension: {text}")
+        self._mark_dirty()
+        self._update_window_title()
 
     def _update_info(self):
         """정보 업데이트"""
@@ -140,28 +149,49 @@ class DimensionBoardWindow(QDialog):
         edge_count = len(board_data.get("edges", []))
         self.info_label.setText(f"Nodes: {node_count} | Edges: {edge_count}")
 
+    def _update_window_title(self):
+        title = self.title_edit.text()
+        dirty = " *" if self._dirty else ""
+        self.setWindowTitle(f"Dimension: {title}{dirty}")
+
+    def _mark_dirty(self):
+        if not self._dirty:
+            self._dirty = True
+            self._update_window_title()
+
+    def _schedule_sync(self):
+        if not self._suppressing:
+            self._mark_dirty()
+            self._sync_timer.start()
+
+    def _on_external_update(self, data):
+        if self._suppressing:
+            return
+        self.plugin.restore_data(data)
+        self._update_info()
+
     def _save_to_dimension(self):
-        """현재 보드 데이터를 Dimension에 저장 (Ctrl+S)"""
-        # 현재 보드 데이터 수집
         board_data = self.plugin.collect_data()
 
-        # DimensionItem에 저장
+        self._suppressing = True
         self.dimension_item.set_board_data(board_data)
+        self._suppressing = False
         self.dimension_item.set_title(self.title_edit.text())
 
-        # 부모 플러그인에 수정 알림 (메인 보드 저장 트리거)
+        self._dirty = False
+        self._update_window_title()
+
         if self.parent_plugin:
             self.parent_plugin._notify_modified()
 
-        # 정보 업데이트
         self._update_info()
 
     def closeEvent(self, event):
-        """창 닫을 때 데이터 저장"""
-        # 저장 (Ctrl+S와 동일한 로직)
+        self._sync_timer.stop()
         self._save_to_dimension()
 
-        # 창 참조 정리
+        self.dimension_item.on_board_data_changed = None
+
         if self.parent_plugin:
             if hasattr(self.parent_plugin, '_dimension_windows'):
                 if self in self.parent_plugin._dimension_windows:

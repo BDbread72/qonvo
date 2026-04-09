@@ -207,7 +207,7 @@ class WhiteBoardPlugin(
         half = size / 2
         self.scene = QGraphicsScene()
         self.scene.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.BspTreeIndex)
-        self.scene.setBspTreeDepth(14)
+        self.scene.setBspTreeDepth(0)
         self.scene.setSceneRect(-half, -half, size, size)
         self.scene._plugin = self
         self.app.bind(self.scene)
@@ -615,8 +615,21 @@ class WhiteBoardPlugin(
             ToastManager.instance().show_toast(f"{node_name} - 완료", main_window)
 
         _node_ai_response = getattr(node, 'ai_response', None)
-        if hasattr(node, 'signal_output_port') and node.signal_output_port is not None:
-            self.emit_signal(node.signal_output_port, data=_node_ai_response)
+        _triggered_ids = set()
+        sig_port = getattr(node, 'signal_output_port', None)
+        if sig_port is not None:
+            for _se in sig_port.edges:
+                if _se.source_port is not sig_port:
+                    continue
+                _tp = _se.target_port
+                if _tp and _tp.parent_proxy:
+                    if hasattr(_tp.parent_proxy, 'widget'):
+                        _tw = _tp.parent_proxy.widget()
+                        if _tw is not None:
+                            _triggered_ids.add(id(_tw))
+                    else:
+                        _triggered_ids.add(id(_tp.parent_proxy))
+            self.emit_signal(sig_port, data=_node_ai_response)
 
         output_port_to_check = None
 
@@ -626,33 +639,48 @@ class WhiteBoardPlugin(
         elif hasattr(node, 'output_port') and node.output_port is not None:
             output_port_to_check = node.output_port
 
+        if output_port_to_check and not output_port_to_check.edges:
+            from .chat_node import ChatNodeWidget
+            if isinstance(node, ChatNodeWidget) and node.proxy:
+                self._auto_create_next_node(node, images)
+
         if output_port_to_check and hasattr(output_port_to_check, 'edges'):
             for edge in list(output_port_to_check.edges):
+                if edge.source_port is not output_port_to_check:
+                    continue
                 target_port = edge.target_port
                 if target_port is None or target_port.parent_proxy is None:
                     continue
 
                 if isinstance(target_port.parent_proxy, DimensionItem):
+                    dim_id = id(target_port.parent_proxy)
+                    if dim_id in _triggered_ids:
+                        continue
+                    _triggered_ids.add(dim_id)
                     result_text = getattr(node, 'ai_response', None) or getattr(node, 'text_content', '') or ''
                     self._add_to_dimension(target_port.parent_proxy, result_text, images)
                     continue
 
                 if isinstance(target_port.parent_proxy, ImageCardItem):
+                    card_id = id(target_port.parent_proxy)
+                    if card_id in _triggered_ids:
+                        continue
+                    _triggered_ids.add(card_id)
                     self._update_image_card(target_port.parent_proxy, node, images)
                     continue
 
                 if hasattr(target_port.parent_proxy, 'widget'):
                     _tw = target_port.parent_proxy.widget()
+                    if _tw is None:
+                        continue
+                    tw_id = id(_tw)
+                    if tw_id in _triggered_ids:
+                        continue
+                    _triggered_ids.add(tw_id)
                     if isinstance(_tw, RepositoryNodeWidget):
                         self._save_to_repository(_tw, node, images)
-                        continue
-
-                if hasattr(target_port.parent_proxy, 'widget'):
-                    target_node = target_port.parent_proxy.widget()
-                    if target_node is None:
-                        continue
-                    if hasattr(target_node, 'on_signal_input'):
-                        target_node.on_signal_input(input_data=_node_ai_response)
+                    elif hasattr(_tw, 'on_signal_input'):
+                        _tw.on_signal_input(input_data=_node_ai_response)
 
     def _update_image_card(self, card: ImageCardItem, source_node, images=None):
         from v.settings import get_app_data_path
@@ -727,30 +755,93 @@ class WhiteBoardPlugin(
         repo_node._scan_folder()
         self._emit_complete_signal(repo_node)
 
+    def _auto_create_next_node(self, source_node, images=None):
+        proxy = source_node.proxy
+        if not proxy:
+            return
+        src_pos = proxy.pos()
+        new_x = src_pos.x() + proxy.size().width() + 80
+        new_y = src_pos.y()
+
+        if images:
+            img_path = images[0] if isinstance(images[0], str) else None
+            if not img_path:
+                import base64, uuid, os
+                from v.board import BoardManager
+                raw = images[0] if isinstance(images[0], bytes) else None
+                if raw is None and isinstance(images[0], str):
+                    try:
+                        s = images[0]
+                        if s.startswith("data:image"):
+                            s = s.split(",", 1)[1]
+                        raw = base64.b64decode(s)
+                    except Exception:
+                        return
+                if not raw:
+                    return
+                board_name = self._board_name or "untitled"
+                img_dir = BoardManager.get_boards_dir() / '.temp' / board_name / 'attachments'
+                img_dir.mkdir(parents=True, exist_ok=True)
+                img_path = str(img_dir / f"{uuid.uuid4().hex}.png")
+                with open(img_path, "wb") as f:
+                    f.write(raw)
+            card = self.add_image_card(image_path=img_path, pos=QPointF(new_x, new_y))
+            if card:
+                self.create_edge(source_node.output_port, card.input_port)
+        else:
+            new_proxy = self.add_node(pos=QPointF(new_x, new_y))
+            if not new_proxy:
+                return
+            new_node = new_proxy.widget()
+            if new_node and hasattr(new_node, 'model_combo'):
+                model = source_node.model_combo.currentData()
+                idx = new_node.model_combo.findData(model)
+                if idx >= 0:
+                    new_node.model_combo.setCurrentIndex(idx)
+            self.create_edge(source_node.output_port, new_node.input_port)
+
     def _add_to_dimension(self, dimension_item: DimensionItem, content: str, images=None):
         from PyQt6.QtGui import QPixmap
         from v.constants import DIMENSION_RESULTS_PER_ROW, DIMENSION_ROW_HEIGHT
 
+        self._sync_single_dimension_window(dimension_item)
         board_data = dimension_item.get_board_data()
         next_id = board_data.get("next_id", 1)
 
-        group_count = len(board_data.get("group_frames", [])) + 1
+        all_groups = board_data.get("group_frames", [])
+        group_count = len(all_groups) + 1
         group_label = f"Result #{group_count}"
 
         results_per_row = DIMENSION_RESULTS_PER_ROW
-        row = (group_count - 1) // results_per_row
-        group_y = 100 + row * DIMENSION_ROW_HEIGHT
 
-        existing_groups_in_row = [
-            g for g in board_data.get("group_frames", [])
-            if abs(g.get("y", 0) - group_y) < 50
-        ]
-
-        if existing_groups_in_row:
-            rightmost = max(existing_groups_in_row, key=lambda g: g.get("x", 0) + g.get("width", 0))
-            group_x = rightmost.get("x", 0) + rightmost.get("width", 0) + 50
-        else:
+        if not all_groups:
             group_x = 100
+            group_y = 100
+        else:
+            sorted_groups = sorted(all_groups, key=lambda g: (g.get("y", 0), g.get("x", 0)))
+
+            rows = []
+            for g in sorted_groups:
+                gy = g.get("y", 0)
+                placed = False
+                for r in rows:
+                    if abs(r["y"] - gy) < 100:
+                        r["groups"].append(g)
+                        r["y"] = min(r["y"], gy)
+                        placed = True
+                        break
+                if not placed:
+                    rows.append({"y": gy, "groups": [g]})
+
+            last_row = rows[-1]
+            if len(last_row["groups"]) < results_per_row:
+                rightmost = max(last_row["groups"], key=lambda g: g.get("x", 0) + g.get("width", 0))
+                group_x = rightmost.get("x", 0) + rightmost.get("width", 0) + 50
+                group_y = last_row["y"]
+            else:
+                max_bottom = max(g.get("y", 0) + g.get("height", DIMENSION_ROW_HEIGHT) for g in last_row["groups"])
+                group_x = 100
+                group_y = max_bottom + 50
 
         items_in_group = []
         max_item_width = 400

@@ -684,6 +684,11 @@ class ResizeHandle(QFrame):
             new_h = max(min_size.height(), int(self._size_start.height() + scene_delta.y()))
             self.parent_widget.resize(new_w, new_h)
             self._update_position()
+            proxy = getattr(self.parent_widget, 'proxy', None)
+            if proxy:
+                proxy.prepareGeometryChange()
+            if hasattr(self.parent_widget, 'reposition_ports'):
+                self.parent_widget.reposition_ports()
             event.accept()
 
     def mouseReleaseEvent(self, event):

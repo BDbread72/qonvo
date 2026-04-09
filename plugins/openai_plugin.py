@@ -1,8 +1,8 @@
-"""Qonvo OpenAI Plugin -- GPT-4o, o3-mini, DALL-E 3"""
+"""Qonvo OpenAI Plugin -- GPT-4o, o3-mini, DALL-E 3, GPT Image"""
 from v.model_plugin import ModelPlugin
 
-# DALL-E 이미지 모델 ID
 _DALLE_MODELS = {"dall-e-3"}
+_GPT_IMAGE_MODELS = {"gpt-image-1", "gpt-image-1-mini"}
 
 
 class OpenAIPlugin(ModelPlugin):
@@ -14,6 +14,8 @@ class OpenAIPlugin(ModelPlugin):
         "gpt-4o-mini": "GPT-4o mini",
         "o3-mini": "o3-mini",
         "dall-e-3": "DALL-E 3",
+        "gpt-image-1": "🎨 GPT Image",
+        "gpt-image-1-mini": "🎨 GPT Image Mini",
     }
     MODEL_OPTIONS = {
         "gpt-4o": {
@@ -56,6 +58,46 @@ class OpenAIPlugin(ModelPlugin):
                 "default": "standard",
             },
         },
+        "gpt-image-1": {
+            "aspect_ratio": {
+                "type": "choice",
+                "label": "Size",
+                "values": ["1024x1024", "1536x1024", "1024x1536"],
+                "default": "1024x1024",
+            },
+            "image_quality": {
+                "type": "choice",
+                "label": "Quality",
+                "values": ["low", "medium", "high"],
+                "default": "high",
+            },
+            "background": {
+                "type": "choice",
+                "label": "Background",
+                "values": ["auto", "transparent", "opaque"],
+                "default": "auto",
+            },
+        },
+        "gpt-image-1-mini": {
+            "aspect_ratio": {
+                "type": "choice",
+                "label": "Size",
+                "values": ["1024x1024", "1536x1024", "1024x1536"],
+                "default": "1024x1024",
+            },
+            "image_quality": {
+                "type": "choice",
+                "label": "Quality",
+                "values": ["low", "medium", "high"],
+                "default": "medium",
+            },
+            "background": {
+                "type": "choice",
+                "label": "Background",
+                "values": ["auto", "transparent", "opaque"],
+                "default": "auto",
+            },
+        },
     }
 
     def chat(self, model, messages, stream=True, **options):
@@ -64,6 +106,9 @@ class OpenAIPlugin(ModelPlugin):
 
         if model in _DALLE_MODELS:
             return self._generate_image(model, messages, **options)
+
+        if model in _GPT_IMAGE_MODELS:
+            return self._generate_gpt_image(model, messages, **options)
 
         return self._chat_text(model, messages, stream, **options)
 
@@ -142,6 +187,43 @@ class OpenAIPlugin(ModelPlugin):
             size=size,
             quality=quality,
             response_format="b64_json",
+        )
+
+        import base64
+        images = []
+        for item in resp.data:
+            images.append(base64.b64decode(item.b64_json))
+
+        return {
+            "text": "",
+            "images": images,
+            "thought_signatures": [],
+        }
+
+
+    def _generate_gpt_image(self, model, messages, **options):
+        from openai import OpenAI
+        client = OpenAI(api_key=self._api_keys[0])
+
+        prompt = ""
+        for msg in reversed(messages):
+            if msg.role == "user" and msg.content:
+                prompt = msg.content
+                break
+        if not prompt:
+            return {"text": "", "images": [], "thought_signatures": []}
+
+        size = options.get("aspect_ratio", "1024x1024")
+        quality = options.get("image_quality", "high")
+        background = options.get("background", "auto")
+
+        resp = client.images.generate(
+            model=model,
+            prompt=prompt,
+            n=1,
+            size=size,
+            quality=quality,
+            background=background,
         )
 
         import base64

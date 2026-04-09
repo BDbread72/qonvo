@@ -93,4 +93,4 @@ SNAP_THRESHOLD = 8  # 스냅 임계값 (씬 좌표 px)
 # ============================================================
 LAZY_LOAD_DEBOUNCE_MS = 150  # 뷰포트 변경 후 로딩 대기 시간
 LAZY_LOAD_VIEWPORT_MARGIN = 1.0  # 뷰포트 확장 배율 (1.0 = 3x3 영역)
-LAZY_LOAD_BATCH_SIZE = 5  # 배치당 생성할 아이템 수
+LAZY_LOAD_BATCH_SIZE = 30  # 배치당 생성할 아이템 수

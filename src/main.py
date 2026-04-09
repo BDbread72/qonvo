@@ -3,6 +3,7 @@
 import faulthandler
 import sys
 import os
+os.environ["QT_LOGGING_RULES"] = "qt.qpa.screen=false"
 import threading
 import traceback
 from datetime import datetime
