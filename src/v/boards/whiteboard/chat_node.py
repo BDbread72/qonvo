@@ -782,6 +782,49 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.chk_image_search.hide()
         opts_layout.addWidget(self.chk_image_search)
 
+        _img_combo_style = f"""
+            QComboBox {{
+                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
+                border-radius: 4px; padding: 3px 6px; font-size: 10px;
+            }}
+            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+            QComboBox::down-arrow {{
+                image: none; border-left: 4px solid transparent;
+                border-right: 4px solid transparent; border-top: 5px solid {Theme.TEXT_SECONDARY};
+                margin-right: 4px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
+                border: 1px solid #444; selection-background-color: {Theme.ACCENT_PRIMARY};
+            }}
+        """
+        _img_lbl_style = f"color: {Theme.TEXT_SECONDARY}; font-size: 10px;"
+
+        self.quality_label = QLabel("Q")
+        self.quality_label.setStyleSheet(_img_lbl_style)
+        self.quality_label.setToolTip("Image Quality (low/medium/high — cost varies up to ~35×)")
+        self.quality_label.hide()
+        opts_layout.addWidget(self.quality_label)
+        self.quality_combo = QComboBox()
+        self.quality_combo.setFixedWidth(78)
+        self.quality_combo.setToolTip("Image Quality (low/medium/high — cost varies up to ~35×)")
+        self.quality_combo.setStyleSheet(_img_combo_style)
+        self.quality_combo.hide()
+        opts_layout.addWidget(self.quality_combo)
+
+        self.bg_label = QLabel("BG")
+        self.bg_label.setStyleSheet(_img_lbl_style)
+        self.bg_label.setToolTip("Background (auto / transparent / opaque)")
+        self.bg_label.hide()
+        opts_layout.addWidget(self.bg_label)
+        self.bg_combo = QComboBox()
+        self.bg_combo.setFixedWidth(92)
+        self.bg_combo.setToolTip("Background (auto / transparent / opaque)")
+        self.bg_combo.setStyleSheet(_img_combo_style)
+        self.bg_combo.hide()
+        opts_layout.addWidget(self.bg_combo)
+
         opts_layout.addStretch()
 
         self.opts_panel.hide()
@@ -1164,44 +1207,45 @@ class ChatNodeWidget(QWidget, BaseNode):
         for port_name, port in self.input_ports.items():
             if not port.edges:
                 continue
-            source_port = port.edges[0].source_port
-            source_proxy = source_port.parent_proxy
-            if not source_proxy:
-                continue
-            source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
-
             is_image = port.port_data_type == port.TYPE_FILE
-            if is_image:
-                path = None
-                if hasattr(source_port, 'port_value') and source_port.port_value is not None:
-                    path = str(source_port.port_value)
-                elif hasattr(source_node, 'image_path') and source_node.image_path:
-                    path = source_node.image_path
-                elif hasattr(source_node, 'ai_response') and source_node.ai_response:
-                    path = source_node.ai_response
-                if path:
-                    files.append(path)
-            else:
-                text = None
-                if hasattr(source_port, 'port_value') and source_port.port_value is not None:
-                    text = str(source_port.port_value)
-                elif hasattr(source_node, 'ai_response') and source_node.ai_response:
-                    text = source_node.ai_response
-                elif hasattr(source_node, 'text_content') and source_node.text_content:
-                    text = source_node.text_content
-                elif hasattr(source_node, 'body_edit') and hasattr(source_node.body_edit, 'toPlainText'):
-                    text = source_node.body_edit.toPlainText()
-                if text:
-                    if getattr(source_node, 'is_prompt_node', False):
-                        if not getattr(source_node, 'prompt_enabled', True):
-                            continue
-                        prompt_entries.append({
-                            "text": text,
-                            "role": getattr(source_node, 'prompt_role', 'system'),
-                            "priority": getattr(source_node, 'prompt_priority_value', 0),
-                        })
-                    else:
-                        texts.append(text)
+            for edge in port.edges:
+                source_port = edge.source_port
+                source_proxy = source_port.parent_proxy
+                if not source_proxy:
+                    continue
+                source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
+
+                if is_image:
+                    path = None
+                    if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+                        path = str(source_port.port_value)
+                    elif hasattr(source_node, 'image_path') and source_node.image_path:
+                        path = source_node.image_path
+                    elif hasattr(source_node, 'ai_response') and source_node.ai_response:
+                        path = source_node.ai_response
+                    if path:
+                        files.append(path)
+                else:
+                    text = None
+                    if hasattr(source_port, 'port_value') and source_port.port_value is not None:
+                        text = str(source_port.port_value)
+                    elif hasattr(source_node, 'ai_response') and source_node.ai_response:
+                        text = source_node.ai_response
+                    elif hasattr(source_node, 'text_content') and source_node.text_content:
+                        text = source_node.text_content
+                    elif hasattr(source_node, 'body_edit') and hasattr(source_node.body_edit, 'toPlainText'):
+                        text = source_node.body_edit.toPlainText()
+                    if text:
+                        if getattr(source_node, 'is_prompt_node', False):
+                            if not getattr(source_node, 'prompt_enabled', True):
+                                continue
+                            prompt_entries.append({
+                                "text": text,
+                                "role": getattr(source_node, 'prompt_role', 'system'),
+                                "priority": getattr(source_node, 'prompt_priority_value', 0),
+                            })
+                        else:
+                            texts.append(text)
         return texts, files, prompt_entries
 
     def on_signal_input(self, input_data=None):
@@ -1237,6 +1281,36 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.size_combo.show()
         else:
             self.size_combo.hide()
+        quality_spec = opts.get("image_quality")
+        if quality_spec and "values" in quality_spec:
+            self.quality_combo.blockSignals(True)
+            self.quality_combo.clear()
+            self.quality_combo.addItems(quality_spec["values"])
+            default_q = quality_spec.get("default", "")
+            idx = self.quality_combo.findText(default_q)
+            if idx >= 0:
+                self.quality_combo.setCurrentIndex(idx)
+            self.quality_combo.blockSignals(False)
+            self.quality_combo.show()
+            self.quality_label.show()
+        else:
+            self.quality_combo.hide()
+            self.quality_label.hide()
+        bg_spec = opts.get("background")
+        if bg_spec and "values" in bg_spec:
+            self.bg_combo.blockSignals(True)
+            self.bg_combo.clear()
+            self.bg_combo.addItems(bg_spec["values"])
+            default_bg = bg_spec.get("default", "")
+            idx = self.bg_combo.findText(default_bg)
+            if idx >= 0:
+                self.bg_combo.setCurrentIndex(idx)
+            self.bg_combo.blockSignals(False)
+            self.bg_combo.show()
+            self.bg_label.show()
+        else:
+            self.bg_combo.hide()
+            self.bg_label.hide()
         if "temperature" in opts:
             self.temp_spin.setValue(opts["temperature"]["default"])
         if "top_p" in opts:
@@ -1291,6 +1365,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             node_options["aspect_ratio"] = self.ratio_combo.currentText()
         if "image_size" in opts:
             node_options["image_size"] = self.size_combo.currentText()
+        if "image_quality" in opts:
+            node_options["image_quality"] = self.quality_combo.currentText()
+        if "background" in opts:
+            node_options["background"] = self.bg_combo.currentText()
         if "temperature" in opts:
             node_options["temperature"] = self.temp_spin.value()
         if "top_p" in opts:

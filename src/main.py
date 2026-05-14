@@ -4,6 +4,20 @@ import faulthandler
 import sys
 import os
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.screen=false"
+
+# Windows + Python 3.14에서 aiohttp 등이 platform.uname()/win32_ver()를 호출하면
+# 내부적으로 WMI 쿼리(_wmi_query)가 일어나는데, WMI 서비스가 hang 상태이면 앱이 통째로 멈춤.
+# _wmi_query를 OSError로 강제 실패시키면 platform 모듈이 레지스트리/환경변수 fallback을 탐.
+if sys.platform == "win32":
+    import platform as _platform
+    def _no_wmi(*_a, **_k):
+        raise OSError("WMI disabled (qonvo bypass)")
+    _platform._wmi_query = _no_wmi
+    # 일부 캐시도 미리 채워서 fallback 자체도 빠르게
+    _wv = sys.getwindowsversion()
+    _build = f"{_wv.major}.{_wv.minor}.{_wv.build}"
+    _release = "11" if _wv.major == 10 and _wv.build >= 22000 else str(_wv.major)
+    _platform.win32_ver = lambda: (_release, _build, "", "")
 import threading
 import traceback
 from datetime import datetime

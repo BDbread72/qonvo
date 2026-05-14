@@ -343,12 +343,6 @@ class BoardManager:
 
     @staticmethod
     def save(name: str, data: Dict[str, Any]) -> str:
-        """
-        보드 저장 (원자적 쓰기 + 백업)
-        - name: 보드 이름
-        - data: 보드 데이터 (nodes, edges 등)
-        Returns: 저장된 파일 경로
-        """
         boards_dir = BoardManager.get_boards_dir()
         filepath = boards_dir / f"{name}.qonvo"
         temp_filepath = boards_dir / f"{name}.qonvo.tmp"
@@ -359,53 +353,8 @@ class BoardManager:
           return BoardManager._save_impl(name, data, boards_dir, filepath, temp_filepath)
 
     @staticmethod
-    def _get_backup_dir() -> Path:
-        from v.settings import get_setting
-        custom = get_setting("backup_path")
-        if custom and Path(custom).is_absolute():
-            d = Path(custom)
-        else:
-            if os.name == 'nt':
-                base = Path(os.environ.get('APPDATA', Path.home()))
-            else:
-                base = Path.home() / '.config'
-            d = base / 'Qonvo' / 'backups'
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
-    @staticmethod
     def _save_impl(name, data, boards_dir, filepath, temp_filepath):
         try:
-            from v.settings import get_setting
-            backup_enabled = get_setting("backup_enabled")
-            if backup_enabled is None:
-                backup_enabled = True
-            backup_count = get_setting("backup_count")
-            if not isinstance(backup_count, int) or backup_count < 1:
-                backup_count = 20
-
-            if filepath.exists() and backup_enabled:
-                try:
-                    backup_dir = BoardManager._get_backup_dir()
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    backup_path = backup_dir / f"{name}_{ts}.qonvo.bak"
-                    shutil.copy2(filepath, backup_path)
-                    logger.info(f"[SAVE] Backup created: {backup_path} ({filepath.stat().st_size:,} bytes)")
-
-                    existing = sorted(
-                        backup_dir.glob(f"{name}_*.qonvo.bak"),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=True,
-                    )
-                    for old in existing[backup_count:]:
-                        try:
-                            old.unlink()
-                            logger.debug(f"[SAVE] Removed old backup: {old.name}")
-                        except OSError:
-                            pass
-                except OSError as e:
-                    logger.error(f"[SAVE] Backup creation failed: {e}")
-
             # 메타데이터 추가
             data['name'] = name
             data['version'] = _get_app_version() or '1.0'

@@ -5,13 +5,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-# Run the application
+# Install deps
+pip install -r requirements.txt
+
+# Run GUI
 python src/main.py
 
-# Build executable (PyInstaller) — see crack.bat for full flags
-pyinstaller --onefile --noconsole --name qonvo --icon=icon.ico --distpath . \
-  --add-data "lang;lang" --add-data "build.toml;." \
-  --hidden-import "v.boards.whiteboard" ... ./src/main.py
+# Run CLI (headless)
+python src/cli.py run --model gemini-2.0-flash "prompt"
+python src/cli.py repl           # interactive REPL
+python src/cli.py batch file.txt # batch from file
+
+# Build executables — use bundled scripts
+./crack.bat       # or crack.ps1 — builds qonvo.exe (GUI)
+# qonvo-cli.spec → pyinstaller qonvo-cli.spec for CLI binary
 
 # Run tests (standalone scripts, not pytest)
 python tests/test_improvements.py
@@ -22,7 +29,7 @@ python tests/test_phase4_caching.py
 python -m py_compile src/v/boards/whiteboard/plugin.py
 ```
 
-No `requirements.txt` or `pyproject.toml`. Key dependencies: **PyQt6**, **google-genai**, **cryptography**, Python 3.11+.
+Key dependencies (`requirements.txt`): **PyQt6**, **google-genai**, **cryptography**, **prompt-toolkit**, **rich**, **tomli**, **websocket-client**. Python 3.11+ (3.14 호환 — `main.py`의 WMI 우회 참조).
 
 On Windows Korean locale, run `chcp 65001` first for UTF-8 console output.
 
@@ -36,7 +43,18 @@ main.py → App() → ui.run_app(app)
 ```
 
 ### Plugin System
-**Board plugins**: `BoardPlugin` (ABC in `boards/base.py`) defines `create_view()`, `collect_data()`, `restore_data()`. The sole implementation is `WhiteBoardPlugin` in `boards/whiteboard/plugin.py` (~3000 lines). Plugin discovery scans `src/v/boards/` for modules exporting `PLUGIN_CLASS`.
+**Board plugins**: `BoardPlugin` (ABC in `boards/base.py`) defines `create_view()`, `collect_data()`, `restore_data()`. The primary implementation is `WhiteBoardPlugin` in `boards/whiteboard/plugin.py` (~980 lines after split). `dimension_board.py`는 sub-board 변형. Plugin discovery scans `src/v/boards/` for modules exporting `PLUGIN_CLASS`.
+
+Whiteboard 모듈은 다음으로 분리됨:
+```
+plugin.py            ← WhiteBoardPlugin + NodeProxyWidget
+_chat_send.py        ← 채팅 전송 헬퍼
+_chat_workers.py     ← StreamWorker 관리
+_materialization.py  ← lazy → live node 변환
+_node_factory.py     ← 노드 생성 분기
+_serialization.py    ← collect_data / restore_data
+_server_mixin.py     ← 서버 모드 훅 (1.1.x WIP)
+```
 
 **Model plugins** (`model_plugin.py`): `ModelPlugin` ABC → `configure()`, `chat()`. `PluginRegistry` auto-discovers plugins from `plugins/` directory. `ProviderRouter` transparently routes chat calls to the correct plugin.
 - **Gemini** — built-in (`provider.py`), 9 models (text + image generation)
@@ -51,15 +69,17 @@ main.py → App() → ui.run_app(app)
 - Streaming extraction (256KB chunks), seek-based random access
 - Legacy ZIP format auto-detected and migrated
 
-### Node System (12 types)
+### Node System (23 categories)
 All node widgets inherit `QWidget` + `BaseNode` mixin, wrapped in `NodeProxyWidget` (QGraphicsProxyWidget).
 
-| Category | ID Key | Notes |
-|----------|--------|-------|
-| nodes, function_nodes, round_tables, repository_nodes, texts, group_frames | `id` | |
-| sticky_notes, buttons, checklists, image_cards, dimensions | `node_id` | |
+| ID Key | Categories |
+|--------|------------|
+| `id` | nodes, function_nodes, round_tables, repository_nodes, texts, group_frames |
+| `node_id` | sticky_notes, buttons, checklists, image_cards, dimensions, prompt_nodes, markdown_nodes, nixi_nodes, ups_nodes, rmv_nodes, switch_nodes, latch_nodes, and_gates, or_gates, not_gates, xor_gates, bulb_nodes |
 
-ID key mapping is definitive in `lazy_loader.py:ID_KEY_MAP`.
+ID key mapping is definitive in `lazy_loader.py:ID_KEY_MAP` — 직접 나열하지 말고 그 상수를 참조할 것 (자주 추가됨).
+
+`logic_nodes.py`: switch/latch + and/or/not/xor/bulb 게이트 (시그널 회로용).
 
 ### Port & Edge System
 - `PortItem` — typed connection points (TYPE_BOOLEAN, TYPE_STRING, TYPE_FILE)
@@ -112,6 +132,19 @@ _materialize_items(visible)          # Creates only visible nodes
 ### Worker Queue
 Max 4 concurrent API workers. Excess queued in `_pending_workers`, started as slots free.
 
+### CLI (Headless 모드)
+- `cli.py` — argparse 진입점, 서브커맨드 라우팅 (`run`, `repl`, `batch`)
+- `cli_repl.py` — prompt_toolkit Application 기반 split 레이아웃 (상태 테이블 + 입력). rich.Table → StringIO → FormattedTextControl(ANSI)
+- `cli_job_manager.py` — ThreadPoolExecutor + Lock으로 동시 실행 관리
+- `cli_runner.py` — 배치/단건 실행 헬퍼
+- REPL 명령어: `/model`, `/models`, `/workers`, `/show`, `/status`, `/system`, `/attach`, `/repeat N <prompt>`, `/bulk file.txt`, `/clear`, `/help`, `/quit`
+- 이미지 첨부: `@path` 인라인 + `/attach` 세션 모드
+
+### Server Mode (1.1.x WIP)
+- `server_client.py` — WebSocket 클라이언트
+- `_server_mixin.py` — Whiteboard 측 서버 연동 훅
+- 상세 계획: `docs/qonvo-server-plan.md` (CRDT + headless 콘솔 + Visitor/Member/Operator 권한)
+
 ## Key Patterns
 
 ```python
@@ -135,10 +168,10 @@ from v.settings import get_setting, set_setting, get_api_keys
 
 ## Data Storage (Windows)
 - **Settings**: `%APPDATA%/Qonvo/settings.json`
-- **Boards**: `%APPDATA%/Qonvo/boards/*.qonvo`
-- **Backups**: `%APPDATA%/Qonvo/backups/{name}_{timestamp}.qonvo.bak` (settings: `backup_enabled`, `backup_path`, `backup_count`)
+- **Boards**: `%APPDATA%/Qonvo/boards/*.qonvo` (원자적 저장: `.qonvo.tmp` → `replace`)
 - **Logs (Primary)**: `%APPDATA%/Qonvo/logs/qonvo.db` (SQLite, WAL mode)
 - **Logs (Backup)**: `%APPDATA%/Qonvo/logs/qonvo.log` (rotating 5MB x 3)
+- **Crash**: `%APPDATA%/Qonvo/logs/crash.log` (faulthandler + sys.excepthook + threading.excepthook + sys.unraisablehook)
 - **Temp**: `%APPDATA%/Qonvo/boards/.temp/<board>/attachments/` (board-isolated)
 
 ## Critical Rules
@@ -147,6 +180,11 @@ from v.settings import get_setting, set_setting, get_api_keys
 - **Always grep for actual method names** — don't guess (`_set_color` ≠ `_apply_color`)
 - **Check both port patterns** — `output_port` (single) vs `output_ports` (dict)
 - **ID key varies by node type** — some use `id`, others `node_id`
+
+## Gotchas (지뢰)
+- **`main.py`의 WMI 우회**: Windows + Python 3.14에서 `aiohttp` 등이 `platform.win32_ver()` 호출 시 WMI 쿼리로 들어가 hang 발생. `_platform._wmi_query`를 OSError로 강제 실패시키고 `win32_ver`를 lambda로 prewarm함. **이 패치 지우면 일부 환경에서 앱이 통째로 멈춤.**
+- **`--noconsole` 빌드**: GUI는 stderr가 안 보이므로 `sys.excepthook` + `threading.excepthook` + `sys.unraisablehook` 모두 등록되어 있음. crash.log 비어있으면 segfault 아닌 Python 예외 → DB 로그 확인
+- **PyQt6 시그널 핸들러의 unhandled exception = 앱 즉사**. `_on_image_payload` 같은 슬롯은 반드시 try/except 방어
 
 ## Storage & Save Logic Rules (MANDATORY)
 
@@ -157,10 +195,10 @@ from v.settings import get_setting, set_setting, get_api_keys
 - **보드별 temp 디렉토리 격리** — 모든 임시 파일은 `boards/.temp/{board_name}/attachments/`에 저장. 공유 폴더 (`dimension_images/`, `temp/` 등) 절대 사용 금지
 - **상대 경로 해석 필수** — `attachments/xxx.png` 같은 상대 경로는 반드시 `_resolve_attachment()` 헬퍼로 temp 디렉토리에서 실제 파일 찾기. `Path(relative).exists()`는 항상 False 반환
 
-### 백업
-- **타임스탬프 기반 백업** — `%APPDATA%/Qonvo/backups/{name}_{YYYYMMDD_HHMMSS}.qonvo.bak`
-- 최근 N개만 유지 (기본 5, settings.json `backup_count`로 설정)
-- `backup_enabled: false`로 비활성화 가능, `backup_path`로 경로 변경 가능
+### 백업 금지
+- **`.qonvo` 보드 파일은 백업을 만들지 않는다.** 저장은 `.qonvo.tmp` → `os.replace`로 원자적임 → 별도 백업 불필요
+- `shutil.copy2(filepath, ...)`로 보드 파일 복사본을 만드는 코드를 재도입하지 말 것
+- 사용자 실수 복구는 앱 내부 undo로 처리
 
 ### 로깅
 - **저장/로드 모든 단계에 로그 기록** — 파일 매핑, 경로 해석, 무결성 검증 등

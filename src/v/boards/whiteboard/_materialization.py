@@ -188,6 +188,14 @@ class MaterializationMixin:
                 idx = node.size_combo.findText(saved_opts["image_size"])
                 if idx >= 0:
                     node.size_combo.setCurrentIndex(idx)
+            if "image_quality" in saved_opts:
+                idx = node.quality_combo.findText(saved_opts["image_quality"])
+                if idx >= 0:
+                    node.quality_combo.setCurrentIndex(idx)
+            if "background" in saved_opts:
+                idx = node.bg_combo.findText(saved_opts["background"])
+                if idx >= 0:
+                    node.bg_combo.setCurrentIndex(idx)
             if "temperature" in saved_opts:
                 node.temp_spin.setValue(saved_opts["temperature"])
             if "top_p" in saved_opts:
