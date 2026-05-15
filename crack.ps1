@@ -1,9 +1,28 @@
-pyinstaller --onefile --noconsole --name qonvo --icon=icon.ico --distpath . `
+python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon.ico --distpath . `
     --add-data "icon.ico;." `
     --add-data "lang;lang" `
     --add-data "build.toml;." `
     --add-data "plugins;plugins" `
     --add-data "icons;icons" `
+    --exclude-module torch `
+    --exclude-module torchvision `
+    --exclude-module tensorflow `
+    --exclude-module numba `
+    --exclude-module llvmlite `
+    --exclude-module sklearn `
+    --exclude-module skimage `
+    --exclude-module scipy `
+    --exclude-module pygame `
+    --exclude-module pytest `
+    --exclude-module py `
+    --exclude-module lxml `
+    --exclude-module jinja2 `
+    --exclude-module uvicorn `
+    --exclude-module fsspec `
+    --exclude-module pandas `
+    --exclude-module matplotlib `
+    --exclude-module IPython `
+    --exclude-module rembg `
     --hidden-import "v.boards.whiteboard" `
     --hidden-import "v.boards.whiteboard.plugin" `
     --hidden-import "v.boards.whiteboard.view" `
