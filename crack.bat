@@ -5,6 +5,8 @@ python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon
     --add-data "build.toml;." ^
     --add-data "plugins;plugins" ^
     --add-data "icons;icons" ^
+    --collect-all openai ^
+    --collect-all anthropic ^
     --exclude-module torch ^
     --exclude-module torchvision ^
     --exclude-module tensorflow ^
