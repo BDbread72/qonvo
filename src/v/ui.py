@@ -265,6 +265,15 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        self.action_export_folder = file_menu.addAction(t("menu.export_folder"))
+        self.action_export_folder.triggered.connect(self._export_to_folder)
+        self.action_export_folder.setEnabled(False)
+
+        action_import_folder = file_menu.addAction(t("menu.import_folder"))
+        action_import_folder.triggered.connect(self._import_from_folder)
+
+        file_menu.addSeparator()
+
         self.action_connect = file_menu.addAction(t("menu.connect_server"))
         self.action_connect.setShortcut("Ctrl+Shift+C")
         self.action_connect.triggered.connect(self._connect_to_server)
@@ -578,6 +587,7 @@ class MainWindow(QMainWindow):
         self.action_reset_zoom.setEnabled(True)
         self.action_add_node.setEnabled(True)
         self.action_search_history.setEnabled(True)
+        self.action_export_folder.setEnabled(True)
         self._update_title()
 
     def _add_node(self):
@@ -758,6 +768,184 @@ class MainWindow(QMainWindow):
         from v.board import BoardManager
         boards_dir = BoardManager.get_boards_dir()
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(boards_dir)))
+
+    def _run_board_task(self, title, fn, on_done):
+        """fn(progress)를 BoardTaskWorker로 백그라운드 실행하고 QProgressDialog를 띄운다.
+
+        on_done(result_dict)은 정상 완료 시 메인 스레드에서 호출된다.
+        """
+        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtCore import Qt
+        from v.export_worker import BoardTaskWorker
+
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setLabelText("준비 중…")
+        dlg.setRange(0, 0)  # 처음엔 busy(불확정)
+        dlg.setMinimumDuration(0)
+        dlg.setMinimumWidth(420)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+
+        worker = BoardTaskWorker(fn, self)
+        self._board_task_worker = worker  # GC 방지 참조 유지
+
+        def on_prog(done, total, label):
+            if total <= 0:
+                dlg.setRange(0, 0)
+            else:
+                dlg.setRange(0, total)
+                dlg.setValue(done)
+            if label:
+                dlg.setLabelText(label)
+
+        def finish_ok(result):
+            dlg.close()
+            self._board_task_worker = None
+            on_done(result)
+
+        def finish_err(msg):
+            dlg.close()
+            self._board_task_worker = None
+            QMessageBox.critical(self, title, f"실패:\n{msg}")
+
+        def finish_cancel():
+            dlg.close()
+            self._board_task_worker = None
+
+        worker.progress.connect(on_prog)
+        worker.done.connect(finish_ok)
+        worker.failed.connect(finish_err)
+        worker.cancelled.connect(finish_cancel)
+        worker.finished.connect(worker.deleteLater)
+        dlg.canceled.connect(worker.cancel)
+
+        worker.start()
+        dlg.show()
+
+    def _export_to_folder(self):
+        """현재 보드를 디스크에 저장한 뒤, .qonvo를 사람이 읽는 폴더로 내보낸다.
+
+        무거운 저장/추출/렌더는 워커 스레드에서 → 메인 스레드 프리즈 없음.
+        """
+        import os
+        import shutil
+        from pathlib import Path
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from v.board import BoardManager
+        from v import board_export
+
+        if not self.current_plugin:
+            QMessageBox.warning(self, t("error.save_failed"), t("error.save_no_board"))
+            return
+
+        if self._save_worker and self._save_worker.isRunning():
+            self._save_worker.wait()
+
+        if self._current_filepath:
+            name = os.path.splitext(os.path.basename(self._current_filepath))[0]
+        else:
+            name, ok = QInputDialog.getText(
+                self, t("dialog.save_board_title"), t("dialog.save_board_prompt"),
+                text=f"board_{len(BoardManager.list_boards()) + 1}")
+            if not ok or not name.strip():
+                return
+            name = name.strip()
+
+        # collect_data()는 Qt 위젯을 만지므로 반드시 메인 스레드에서.
+        try:
+            data = self.current_plugin.collect_data()
+        except Exception as e:
+            QMessageBox.critical(self, t("error.save_failed"), str(e))
+            return
+
+        parent = QFileDialog.getExistingDirectory(
+            self, t("menu.export_folder"), str(Path.home()))
+        if not parent:
+            return
+        out_dir = Path(parent) / f"{name}_export"
+
+        if out_dir.exists() and any(out_dir.iterdir()):
+            reply = QMessageBox.question(
+                self, t("menu.export_folder"),
+                f"'{out_dir.name}' 폴더가 이미 있고 비어있지 않습니다.\n비우고 진행할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                shutil.rmtree(out_dir)
+            except OSError as e:
+                QMessageBox.critical(self, t("menu.export_folder"), str(e))
+                return
+
+        def task(progress):
+            # 저장(첨부 재기록)도 워커 안에서. BoardManager.save는 io_lock으로 thread-safe.
+            progress(0, 0, "보드 저장 중…")
+            filepath = BoardManager.save(name, data)
+            result = board_export.export_qonvo_to_folder(filepath, out_dir, progress=progress)
+            result["filepath"] = filepath
+            return result
+
+        def on_done(result):
+            if result.get("filepath"):
+                self._on_save_done(result["filepath"])
+            counts = result.get("counts", {})
+            summary = ", ".join(f"{k}: {v}" for k, v in counts.items()) or "(내용 없음)"
+            reply = QMessageBox.question(
+                self, t("menu.export_folder"),
+                f"폴더로 내보냈습니다:\n{result.get('out_dir', out_dir)}\n\n{summary}\n\n폴더를 열까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(out_dir)))
+
+        self._run_board_task(t("menu.export_folder"), task, on_done)
+
+    def _import_from_folder(self):
+        """export로 만든 폴더(board.json + attachments/)를 .qonvo로 재패키징 후 연다."""
+        from pathlib import Path
+        from v.board import BoardManager
+        from v import board_export
+
+        folder = QFileDialog.getExistingDirectory(
+            self, t("menu.import_folder"), str(Path.home()))
+        if not folder:
+            return
+        folder = Path(folder)
+        if not (folder / "board.json").exists():
+            QMessageBox.warning(
+                self, t("menu.import_folder"),
+                "선택한 폴더에 board.json 이 없습니다.\nexport로 만든 폴더를 선택하세요.")
+            return
+
+        default_name = folder.name
+        if default_name.endswith("_export"):
+            default_name = default_name[:-len("_export")]
+        name, ok = QInputDialog.getText(
+            self, t("dialog.save_board_title"), t("dialog.save_board_prompt"),
+            text=default_name)
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+
+        dest = BoardManager.get_boards_dir() / f"{name}.qonvo"
+        if dest.exists():
+            reply = QMessageBox.question(
+                self, t("menu.import_folder"),
+                f"'{name}' 보드가 이미 있습니다. 덮어쓸까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        def task(progress):
+            board_export.import_folder_to_qonvo(folder, dest, progress=progress)
+            return {"dest": str(dest)}
+
+        def on_done(result):
+            self._load_board_file(result["dest"])
+
+        self._run_board_task(t("menu.import_folder"), task, on_done)
 
     def _connect_to_server(self):
         from v.boards.whiteboard.connect_dialog import ConnectDialog, BoardSelectDialog

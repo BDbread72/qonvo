@@ -393,7 +393,7 @@ class BoardManager:
                     fsize = Path(resolved).stat().st_size
                     archive_name = f"attachments/{uuid.uuid4().hex}{ext}"
                     attachments_map[resolved] = archive_name
-                    logger.info(f"[SAVE] Mapped: {fpath} → {archive_name} ({fsize:,} bytes)")
+                    logger.debug(f"[SAVE] Mapped: {fpath} → {archive_name} ({fsize:,} bytes)")
                     return archive_name
                 elif resolved and resolved in attachments_map:
                     return attachments_map[resolved]
@@ -460,7 +460,7 @@ class BoardManager:
                     resolved = _resolve_attachment(archive_rel)
                     if resolved and resolved not in attachments_map:
                         attachments_map[resolved] = archive_rel
-                        logger.info(f"[SAVE] Mapped archive: {archive_rel}")
+                        logger.debug(f"[SAVE] Mapped archive: {archive_rel}")
 
             # 이미지 카드 첨부파일 처리
             for card in data.get('image_cards', []):

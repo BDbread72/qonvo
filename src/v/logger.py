@@ -16,6 +16,26 @@ _logger_initialized = False
 _db_handler = None
 
 
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """Windows에서 다른 프로세스/인스턴스가 로그 파일을 잡고 있어 rename이
+    실패(WinError 32)해도 앱이 죽거나 콘솔에 트레이스백을 쏟지 않도록 방어한다.
+
+    rollover 실패 시: 회전을 건너뛰고 기존 파일에 계속 append (로그 유실보다 안전).
+    """
+
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except (OSError, PermissionError):
+            # rename 잠김 등 — 회전 포기하고 스트림만 다시 연다.
+            try:
+                if self.stream:
+                    self.stream.close()
+            except Exception:
+                pass
+            self.stream = self._open()
+
+
 class SQLiteLogHandler(logging.Handler):
     """SQLite DB에 로그를 저장하는 핸들러."""
 
@@ -125,11 +145,12 @@ def setup_logger():
     # 2. 파일 핸들러 (백업, 로테이션)
     log_file = log_dir / "qonvo.log"
     try:
-        file_handler = RotatingFileHandler(
+        file_handler = SafeRotatingFileHandler(
             log_file,
             maxBytes=5 * 1024 * 1024,
             backupCount=3,
-            encoding='utf-8'
+            encoding='utf-8',
+            delay=True,  # 첫 emit 전까지 파일 안 열어 다중 인스턴스 잠금 충돌 완화
         )
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter(
