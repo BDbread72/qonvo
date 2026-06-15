@@ -51,6 +51,15 @@ class NodeProxyWidget(QGraphicsProxyWidget):
             if widget and hasattr(widget, 'reposition_ports'):
                 widget.reposition_ports()
 
+            # 서버모드: 드래그 중에도 위치를 throttle 전송 → 상대가 점프 없이 부드럽게
+            scene = self.scene()
+            if scene is not None and hasattr(scene, '_plugin'):
+                plg = scene._plugin
+                if getattr(plg, 'server_mode', False) and widget is not None:
+                    nid = getattr(widget, 'node_id', None)
+                    if nid is not None:
+                        plg._send_node_move_throttled(nid, self.pos().x(), self.pos().y())
+
             if not _items_mod._group_moving and self.isSelected():
                 scene = self.scene()
                 pre = getattr(self, '_pre_move_pos', None)

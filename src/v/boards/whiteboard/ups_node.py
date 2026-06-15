@@ -40,7 +40,8 @@ class UpsWorker(QThread):
             ort_available = False
             try:
                 import onnxruntime as ort
-                models_dir = Path(os.environ.get("APPDATA", "")) / "Qonvo" / "models"
+                from v.settings import get_app_data_path
+                models_dir = get_app_data_path() / "models"
                 model_path = models_dir / f"realesrgan_x{self.scale}.onnx"
                 if model_path.exists():
                     session = ort.InferenceSession(str(model_path))

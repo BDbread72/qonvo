@@ -22,8 +22,12 @@ import threading
 import traceback
 from datetime import datetime
 
-# 로그 디렉터리를 사용자 APPDATA 하위에 생성
-log_dir = os.path.join(os.environ.get("APPDATA", ""), "Qonvo", "logs")
+# 로그 디렉터리를 사용자 데이터 폴더 하위에 생성 (Windows: %APPDATA%, Linux/Mac: ~/.config)
+if os.name == "nt":
+    _data_base = os.environ.get("APPDATA", os.path.expanduser("~"))
+else:
+    _data_base = os.path.join(os.path.expanduser("~"), ".config")
+log_dir = os.path.join(_data_base, "Qonvo", "logs")
 os.makedirs(log_dir, exist_ok=True)
 # 크래시 로그 파일 핸들러를 열어 faulthandler에 연결
 _fault_log = open(os.path.join(log_dir, "crash.log"), "a")

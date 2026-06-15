@@ -20,3 +20,9 @@ Desktop.ini
 # Temp
 *.tmp
 *.bak
+
+# build/dist artifacts
+*.log
+build_qonvo.log
+qonvo-server-dist.zip
+*.spec.bak

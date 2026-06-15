@@ -144,9 +144,11 @@ class RmvNodeWidget(QWidget, BaseNode):
             """)
             return
 
-        output_dir = self._board_temp_dir or os.path.join(
-            os.environ.get("APPDATA", ""), "Qonvo", "boards", ".temp", "rmv_output"
-        )
+        if self._board_temp_dir:
+            output_dir = self._board_temp_dir
+        else:
+            from v.settings import get_app_data_path
+            output_dir = str(get_app_data_path() / "boards" / ".temp" / "rmv_output")
 
         self.status_label.setText("Processing...")
         self.status_label.setStyleSheet(f"""

@@ -7,6 +7,7 @@ python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon
     --add-data "icons;icons" ^
     --collect-all openai ^
     --collect-all anthropic ^
+    --collect-all websocket ^
     --exclude-module torch ^
     --exclude-module torchvision ^
     --exclude-module tensorflow ^

@@ -1,0 +1,6 @@
+# Qonvo 헤드리스 서버 전용 의존성 (PyQt6/GUI 불필요)
+# pip install -r requirements-server.txt
+aiohttp            # WebSocket 서버 (코어)
+google-genai       # AI 실행 (Gemini) — AI 기능 쓸 때만 필요
+cryptography       # 저장된 API 키 복호화 (v.crypto_utils)
+# tomli            # Python 3.11+ 는 stdlib tomllib 사용, 불필요

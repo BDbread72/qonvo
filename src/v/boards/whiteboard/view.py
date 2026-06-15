@@ -15,7 +15,7 @@ from PyQt6.QtGui import (
 
 from .items import PinItem, TextItem, PortItem, TempEdgeItem, EdgeItem, ImageCardItem, GroupFrameItem
 from .dimension_item import DimensionItem
-from .minimap import BranchGraphWidget
+# from .minimap import BranchGraphWidget  # 미니맵 제거(미사용)
 from .radial_menu import RadialMenu
 from .search_bar import SearchBarWidget
 from v.theme import Theme
@@ -72,8 +72,8 @@ class WhiteboardView(QGraphicsView):
         self.setMouseTracking(True)  # 마우스 이동 항상 추적
         self.setAcceptDrops(True)  # 외부 파일 드래그 앤 드롭
 
-        # 브랜치 그래프
-        self._branch_graph = BranchGraphWidget(self)
+        # 브랜치 그래프(미니맵) — 제거됨(미사용). 참조부는 hasattr 가드로 안전 무시
+        # self._branch_graph = BranchGraphWidget(self)
 
         # 검색 바
         self._search_bar = SearchBarWidget(self)
@@ -265,6 +265,7 @@ class WhiteboardView(QGraphicsView):
             self._selection_rect = None
             self._selection_add_mode = False
             self.viewport().update()
+            self._report_selection(None)  # 서버모드: 영역 표시 해제
         else:
             super().mouseReleaseEvent(event)
 
@@ -358,8 +359,21 @@ class WhiteboardView(QGraphicsView):
         vision_action.setEnabled(bool(img_card.image_path))
         vision_action.triggered.connect(lambda: self._open_vision_dialog(img_card))
 
+        # 보드 → DM: 이미지를 동료에게 보내기
+        send_action = menu.addAction("동료에게 보내기 (DM)")
+        send_action.setEnabled(bool(img_card.image_path))
+        send_action.triggered.connect(lambda: self._share_image_to_contact(img_card))
+
         global_pos = self.mapToGlobal(view_pos.toPoint())
         menu.exec(global_pos)
+
+    def _share_image_to_contact(self, img_card):
+        from .share import share_pixmap_to_contact
+        pm = getattr(img_card, "_pixmap", None)
+        if (pm is None or pm.isNull()) and img_card.image_path:
+            from PyQt6.QtGui import QPixmap
+            pm = QPixmap(img_card.image_path)
+        share_pixmap_to_contact(pm, self)
 
     def _open_vision_dialog(self, img_card):
         from .vision_dialog import VisionDialog
@@ -592,6 +606,15 @@ class WhiteboardView(QGraphicsView):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent):
+        # 라이브 커서: 서버모드면 보드 좌표를 서버에 보고(전송 throttle 은 클라가 처리)
+        if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
+                and hasattr(self.plugin, 'report_cursor')):
+            try:
+                sp = self.mapToScene(event.pos())
+                self.plugin.report_cursor(sp.x(), sp.y())
+            except Exception:
+                pass
+
         # 메뉴 열려있으면 각도 계산 + 커서 업데이트
         if self.radial_menu and self._menu_center:
             pos = event.position()
@@ -626,6 +649,7 @@ class WhiteboardView(QGraphicsView):
             self._selection_rect = QRectF(self._selection_start, current).normalized()
             self._update_rubber_band_selection(self._selection_add_mode)
             self.viewport().update()
+            self._report_selection(self._selection_rect)  # 서버모드: 상대에게 영역 표시
         else:
             super().mouseMoveEvent(event)
 
@@ -654,8 +678,59 @@ class WhiteboardView(QGraphicsView):
                 else:
                     item.setSelected(True)
 
+    def _report_selection(self, rect):
+        """서버모드: 영역 선택 사각형을 다른 사용자에게 보이도록 보고."""
+        if self.plugin is None or not getattr(self.plugin, 'server_mode', False):
+            return
+        if not hasattr(self.plugin, 'report_selection'):
+            return
+        if rect is None:
+            self.plugin.report_selection(None)
+        else:
+            self.plugin.report_selection(rect.x(), rect.y(), rect.width(), rect.height())
+
+    def _open_chat_input(self):
+        """게임식 채팅 입력창(하단 중앙)을 띄운다."""
+        from PyQt6.QtWidgets import QLineEdit
+        if getattr(self, '_chat_input', None) is None:
+            self._chat_input = QLineEdit(self)
+            self._chat_input.setPlaceholderText("메시지 입력 후 Enter  (Esc 취소)")
+            self._chat_input.setStyleSheet(
+                "QLineEdit { background:#26262b; color:#eee; border:2px solid #0d6efd;"
+                " border-radius:10px; padding:9px 14px; font-size:14px; }")
+            self._chat_input.returnPressed.connect(self._send_chat_input)
+            self._chat_input.installEventFilter(self)
+        w = min(420, max(280, self.width() - 80))
+        self._chat_input.setFixedWidth(w)
+        self._chat_input.move((self.width() - w) // 2, self.height() - 64)
+        self._chat_input.clear()
+        self._chat_input.show()
+        self._chat_input.raise_()
+        self._chat_input.setFocus()
+
+    def _send_chat_input(self):
+        ci = getattr(self, '_chat_input', None)
+        if ci is None:
+            return
+        text = ci.text().strip()
+        ci.hide()
+        self.setFocus()
+        if text and self.plugin is not None and hasattr(self.plugin, 'send_chat_message'):
+            self.plugin.send_chat_message(text)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if obj is getattr(self, '_chat_input', None):
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._chat_input.hide()
+                self.setFocus()
+                return True
+            if event.type() == QEvent.Type.FocusOut:
+                self._chat_input.hide()
+        return super().eventFilter(obj, event)
+
     def drawForeground(self, painter: QPainter, rect: QRectF):
-        """선택 영역 + 프록시 선택 표시 그리기"""
+        """선택 영역 + 프록시 선택 표시 그리기 (라이브 커서는 별도 오버레이 위젯)"""
         super().drawForeground(painter, rect)
         if self._selecting and self._selection_rect:
             painter.setPen(QPen(QColor(Theme.ACCENT_PRIMARY), 1, Qt.PenStyle.DashLine))
@@ -681,6 +756,13 @@ class WhiteboardView(QGraphicsView):
 
     def keyPressEvent(self, event: QKeyEvent):
         """키 이벤트 처리"""
+        # Enter → 서버 채팅 입력창 (게임처럼). 텍스트 입력 중이 아닐 때만.
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
+                    and not self._has_focused_input()):
+                self._open_chat_input()
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_Delete:
             if not self._has_focused_input():
                 self._delete_selected_items()

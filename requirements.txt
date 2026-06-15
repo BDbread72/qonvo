@@ -5,3 +5,4 @@ prompt-toolkit
 rich
 tomli
 websocket-client
+aiohttp

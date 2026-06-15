@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QDialog, QListWidget,
     QListWidgetItem, QInputDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QIcon
 
 import sys
@@ -222,6 +222,27 @@ class MainWindow(QMainWindow):
         if is_developer_mode():
             self._open_dev_window()
 
+        # qonvo presence 하트비트(merri 프로필 있으면)
+        self._start_presence_reporter()
+
+    def _start_presence_reporter(self):
+        """앱 켜진 동안 내 qonvo 상태를 허브에 하트비트한다(merri 프로필 필요)."""
+        try:
+            from v.boards.whiteboard import profile as _profile
+            if not _profile.get_profile():
+                return
+            from v.boards.whiteboard.qonvo_presence import PresenceReporter
+            self._presence = PresenceReporter(self._presence_state, self)
+            self._presence.start()
+        except Exception:
+            pass
+
+    def _presence_state(self):
+        """현재 상태: 협업 보드 안이면 (working, 보드명), 아니면 (online, "")."""
+        if getattr(self, "_server_board", "") and getattr(self, "_server_client", None):
+            return ("working", self._server_board or "")
+        return ("online", "")
+
     def _setup_menubar(self):
         """메뉴바 설정"""
         menubar = self.menuBar()
@@ -241,13 +262,13 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
-        action_save = file_menu.addAction(t("menu.save"))
-        action_save.setShortcut("Ctrl+S")
-        action_save.triggered.connect(self._save_board)
+        self.action_save = file_menu.addAction(t("menu.save"))
+        self.action_save.setShortcut("Ctrl+S")
+        self.action_save.triggered.connect(self._save_board)
 
-        action_save_as = file_menu.addAction(t("menu.save_as"))
-        action_save_as.setShortcut("Ctrl+Shift+S")
-        action_save_as.triggered.connect(self._save_board_as)
+        self.action_save_as = file_menu.addAction(t("menu.save_as"))
+        self.action_save_as.setShortcut("Ctrl+Shift+S")
+        self.action_save_as.triggered.connect(self._save_board_as)
 
         action_load = file_menu.addAction(t("menu.load"))
         action_load.setShortcut("Ctrl+O")
@@ -277,6 +298,12 @@ class MainWindow(QMainWindow):
         self.action_connect = file_menu.addAction(t("menu.connect_server"))
         self.action_connect.setShortcut("Ctrl+Shift+C")
         self.action_connect.triggered.connect(self._connect_to_server)
+
+        # 인앱 호스팅("딸깍 초대") — 지금 보드를 내 PC에서 서빙
+        self.action_host = file_menu.addAction("보드 호스팅 (초대)")
+        self.action_host.triggered.connect(self._host_current_board)
+        self.action_invite_join = file_menu.addAction("초대 링크로 접속…")
+        self.action_invite_join.triggered.connect(self._join_by_invite)
 
         self.action_disconnect = file_menu.addAction(t("menu.disconnect_server"))
         self.action_disconnect.triggered.connect(self._disconnect_from_server)
@@ -333,6 +360,16 @@ class MainWindow(QMainWindow):
         self.action_dev_window.setShortcut("F12")
         self.action_dev_window.triggered.connect(self._toggle_dev_window)
         self.action_dev_window.setVisible(is_developer_mode())
+
+        # People — 상단 우측 코너 버튼(동료 연락처/DM/초대). 메뉴 분류와 별개로 항상 보임
+        from PyQt6.QtWidgets import QPushButton
+        people_btn = QPushButton("👥 People")
+        people_btn.setStyleSheet(
+            "QPushButton{color:#ddd;background:transparent;border:none;padding:4px 12px;font-weight:bold;}"
+            "QPushButton:hover{color:#fff;background:#0d6efd;border-radius:6px;}")
+        people_btn.setShortcut("Ctrl+Shift+P")
+        people_btn.clicked.connect(self._toggle_people_panel)
+        menubar.setCornerWidget(people_btn, Qt.Corner.TopRightCorner)
 
     def _open_settings(self):
         """설정 다이얼로그 열기"""
@@ -723,7 +760,10 @@ class MainWindow(QMainWindow):
             self._update_title()
 
     def closeEvent(self, event):
-        if self._modified and self.current_plugin:
+        # 서버 모드는 서버가 실시간 자동저장 → 로컬 저장 프롬프트 생략
+        _in_server = bool(getattr(self, '_server_client', None)
+                          and self._server_client.is_connected)
+        if self._modified and self.current_plugin and not _in_server:
             reply = QMessageBox.question(
                 self, t("app.title"),
                 t("dialog.unsaved_message"),
@@ -739,6 +779,13 @@ class MainWindow(QMainWindow):
             elif reply == QMessageBox.StandardButton.Cancel:
                 event.ignore()
                 return
+        # presence 하트비트 정지(즉시 오프라인 통보)
+        try:
+            if getattr(self, "_presence", None):
+                self._presence.stop()
+        except Exception:
+            pass
+
         # 임시 파일 정리
         from v.temp_file_manager import TempFileManager
         try:
@@ -948,13 +995,14 @@ class MainWindow(QMainWindow):
         self._run_board_task(t("menu.import_folder"), task, on_done)
 
     def _connect_to_server(self):
-        from v.boards.whiteboard.connect_dialog import ConnectDialog, BoardSelectDialog
+        # 서버 브라우저(마크식): 서버 목록 → 접속 → 보드 목록 → 열기
+        from v.boards.whiteboard.server_browser import ServerListDialog, ServerBoardListDialog
         from v.boards.whiteboard.server_client import ServerClient
 
-        dlg = ConnectDialog(self)
-        if dlg.exec() != ConnectDialog.DialogCode.Accepted:
+        dlg = ServerListDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        info = dlg.get_connection_info()
+        info = dlg.get_selected()
         if not info:
             return
 
@@ -963,38 +1011,310 @@ class MainWindow(QMainWindow):
 
         client = self._server_client
 
-        def on_auth_ok(level, boards):
-            client.auth_ok.disconnect(on_auth_ok)
-            client.auth_fail.disconnect(on_auth_fail)
+        def cleanup():
+            for sig, fn in ((client.auth_ok, on_auth_ok),
+                            (client.auth_fail, on_auth_fail),
+                            (client.disconnected, on_conn_fail)):
+                try:
+                    sig.disconnect(fn)
+                except Exception:
+                    pass
 
-            board_dlg = BoardSelectDialog(boards, self)
-            if board_dlg.exec() == BoardSelectDialog.DialogCode.Accepted:
-                board_id = board_dlg.get_board_id()
-                if board_id:
-                    self._new_board()
-                    if self.plugin:
-                        self.plugin.set_server_client(client)
-                    client.join_board(board_id)
-                    self._enter_server_mode(info["username"], board_id)
+        def on_auth_ok(level, boards):
+            cleanup()
+            board_dlg = ServerBoardListDialog(client, self)
+            if board_dlg.exec() != QDialog.DialogCode.Accepted:
+                # 보드 선택 취소 → 연결 종료
+                client.disconnect_from_server()
+                self.setWindowTitle("Qonvo")
+                return
+            board_id = board_dlg.get_board_id()
+            if not board_id:
+                client.disconnect_from_server()
+                self.setWindowTitle("Qonvo")
+                return
+            # 서버 보드는 화이트보드 — 종류 선택 다이얼로그 없이 바로 로드
+            from v.boards import get_plugin
+            wb = get_plugin("whiteboard")
+            if wb:
+                self._load_plugin(wb)
+            if self.current_plugin:
+                self.current_plugin.set_server_client(client)
+            # 스냅샷 prime 캐시 비활성 — 항상 서버 full sync 로 정확하게 받음.
+            # (prime 은 일부 노드가 비는 문제가 있어 끔. 첨부 이미지 캐시는 유지)
+            client._last_seq = 0
+            client.join_board(board_id)
+            self._enter_server_mode(info["username"], board_id)
 
         def on_auth_fail(reason):
-            client.auth_ok.disconnect(on_auth_ok)
-            client.auth_fail.disconnect(on_auth_fail)
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "Auth Failed", reason)
+            cleanup()
+            self.setWindowTitle("Qonvo")
+            QMessageBox.warning(self, "접속 실패", reason)
+
+        def on_conn_fail(reason):
+            # 연결 단계 실패(DNS/서버다운/포트/네트워크) — 멈추지 말고 에러 표시
+            cleanup()
+            self.setWindowTitle("Qonvo")
+            QMessageBox.warning(
+                self, "접속 실패",
+                f"서버에 연결할 수 없습니다.\n{reason}\n\n"
+                "주소·포트·네트워크를 확인하세요. (도메인이 방금 안 잡히면 잠시 후 재시도)")
 
         client.auth_ok.connect(on_auth_ok)
         client.auth_fail.connect(on_auth_fail)
+        client.disconnected.connect(on_conn_fail)
 
+        self.setWindowTitle("Qonvo — 접속 중…")
         client.connect_to_server(
             info["host"], info["port"],
             info["username"], info["password"],
+            secure=info.get("secure", False),
+            merri=info.get("merri", False),
         )
 
+    # ---- 인앱 호스팅("딸깍 초대") -------------------------------------
+    def _lan_ip(self) -> str:
+        """LAN 접속용 로컬 IP (UPnP 실패 시 안내용). 패킷은 보내지 않는다."""
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return "127.0.0.1"
+
+    def _host_current_board(self):
+        """지금 연 보드를 내 PC 임베드 서버에서 서빙하고 초대 링크를 만든다."""
+        import os
+        if self.current_plugin is None or not hasattr(self.current_plugin, "collect_data"):
+            QMessageBox.information(self, "호스팅", "먼저 보드를 여세요."); self._fire_invite_cb(None); return
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            QMessageBox.information(self, "호스팅", "이미 호스팅 중입니다."); self._fire_invite_cb(None); return
+        # 첨부 경로 해석을 위해 보드는 자기 이름으로 저장돼 있어야 한다.
+        if not getattr(self, "_current_filepath", None):
+            QMessageBox.information(self, "호스팅", "먼저 보드를 저장하세요 (Ctrl+S).\n저장된 보드만 호스팅할 수 있어요.")
+            self._fire_invite_cb(None); return
+
+        from v.boards.whiteboard.invite import generate_id
+        from v.boards.whiteboard.embedded_host import EmbeddedHost
+        from v.boards.whiteboard import profile as _profile
+        from v.board import BoardManager
+
+        board_id = generate_id()
+        self._host_board_id = board_id
+        prof = _profile.get_profile()
+        self._host_username = (prof["username"] if prof else "") or "호스트"
+        name = os.path.splitext(os.path.basename(self._current_filepath))[0]
+        data = self.current_plugin.collect_data()
+
+        self.setWindowTitle("Qonvo — 호스팅 준비 중…")
+        self._host_save_worker = _SaveWorker(name, data)
+
+        def _seed_and_host():
+            filepath = str(BoardManager.get_boards_dir() / f"{name}.qonvo")
+            self._embedded_host = EmbeddedHost(self)
+            self._embedded_host.ready.connect(self._on_host_ready)
+            self._embedded_host.failed.connect(self._on_host_failed)
+            self._embedded_host.start(board_id, qonvo_path=filepath,
+                                      host_username=self._host_username)
+
+        self._host_save_worker.done.connect(_seed_and_host)
+        self._host_save_worker.error.connect(
+            lambda m: (self.setWindowTitle("Qonvo"), QMessageBox.critical(self, "저장 실패", m)))
+        self._host_save_worker.start()
+
+    def _on_host_failed(self, reason: str):
+        self.setWindowTitle("Qonvo")
+        QMessageBox.warning(self, "호스팅 실패", reason)
+        self._fire_invite_cb(None)
+
+    def _on_host_ready(self, port: int, connect_host: str):
+        """임베드 서버 기동 완료 → 호스트 자가접속 + 초대 링크."""
+        from v.boards.whiteboard.invite import format_invite
+        host = connect_host or self._lan_ip()
+        link = format_invite(self._host_board_id, host, port, secure=False)
+        self._host_invite_link = link
+        # 호스트도 클라로 자기 서버에 접속(모두가 클라 → 코드 경로 통일)
+        self._connect_and_join("127.0.0.1", port, self._host_username, "",
+                               self._host_board_id, secure=False, merri=False)
+        # People 초대 요청 때문에 시작된 거면 → 카드 전송 콜백, 팝업 생략
+        if getattr(self, "_pending_invite_cb", None):
+            self._fire_invite_cb(link)
+            return
+        # 메뉴에서 직접 호스팅한 경우: 링크 안내 + 클립보드 복사
+        QApplication.clipboard().setText(link)
+        note = ("" if connect_host else
+                "\n\n⚠ UPnP가 안 열렸어요 — 같은 LAN(공유기)에서만 접속됩니다.\n"
+                "   외부 초대가 필요하면 전용 서버를 쓰세요.")
+        box = QMessageBox(self)
+        box.setWindowTitle("초대 링크")
+        box.setText(f"친구에게 이 링크를 보내세요 (클립보드에 복사됨):\n\n{link}{note}")
+        box.exec()
+
+    def _current_invite_link(self):
+        """호스팅 중이면 현재 초대 링크, 아니면 None."""
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            return getattr(self, "_host_invite_link", "") or None
+        return None
+
+    def _fire_invite_cb(self, link):
+        """대기 중인 People 초대 콜백을 1회 호출한다(link or None)."""
+        cb = getattr(self, "_pending_invite_cb", None)
+        self._pending_invite_cb = None
+        if cb:
+            cb(link)
+
+    def _request_invite_link(self, cb):
+        """초대 링크를 보장해 콜백에 넘긴다 — 호스팅 중이면 즉시, 아니면 자동 호스팅.
+
+        People 패널의 '보드 초대'가 사용. 호스팅을 못 시작하면 cb(None).
+        """
+        link = self._current_invite_link()
+        if link:
+            cb(link); return
+        self._pending_invite_cb = cb
+        self._host_current_board()   # 끝나면 _on_host_ready/_failed 가 cb 발화
+
+    def _join_invite_link(self, link: str):
+        """초대 링크로 접속한다(People 카드의 '참여' 버튼). 표시이름은 merri 프로필."""
+        from v.boards.whiteboard.invite import parse_invite
+        from v.boards.whiteboard import profile as _profile
+        inv = parse_invite(link or "")
+        if not inv or not inv.board_id:
+            QMessageBox.warning(self, "참여", "올바른 초대 링크가 아닙니다."); return
+        prof = _profile.get_profile()
+        name = (prof["username"] if prof else "") or "guest"
+        self._connect_and_join(inv.host, inv.port, name, "",
+                               inv.board_id, secure=inv.secure, merri=False)
+
+    def _add_image_to_board(self, qimage):
+        """People DM 이미지를 현재 보드에 이미지카드로 추가한다(보드↔DM 브릿지)."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self.current_plugin is None or not hasattr(self.current_plugin, "add_image_card"):
+            QMessageBox.information(self, "보드에 추가", "먼저 보드를 여세요.")
+            return
+        try:
+            import os, uuid, tempfile
+            tmp = os.path.join(tempfile.gettempdir(), f"qonvo_dm_{uuid.uuid4().hex}.png")
+            qimage.save(tmp, "PNG")
+            from PyQt6.QtCore import QPointF
+            pos = None
+            view = getattr(self.current_plugin, "view", None)
+            if view is not None:
+                pos = view.mapToScene(view.viewport().rect().center())
+            self.current_plugin.add_image_card(tmp, pos or QPointF(0, 0))
+            self.mark_modified()
+            QMessageBox.information(self, "보드에 추가", "이미지를 보드에 추가했어요.")
+        except Exception as e:
+            QMessageBox.warning(self, "보드에 추가", f"추가 실패: {e}")
+
+    def _stop_hosting(self):
+        """호스팅을 중지한다(임베드 서버 닫기 + 자가접속 해제). People 카드 '중지'용."""
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            self._disconnect_from_server()   # 임베드 서버 stop + 서버모드 종료 포함
+            self._host_invite_link = ""
+
+    def _toggle_people_panel(self):
+        """People 창(merri 동료/DM/초대)을 별도 창으로 띄운다."""
+        from v.boards.whiteboard.people_panel import PeopleWindow
+
+        win = getattr(self, "_people_window", None)
+        if win is None:
+            win = PeopleWindow(invite_requester=self._request_invite_link,
+                               invite_joiner=self._join_invite_link,
+                               host_status=self._current_invite_link,
+                               invite_stopper=self._stop_hosting,
+                               board_image_adder=self._add_image_to_board, parent=self)
+            self._people_window = win
+        if win.isVisible():
+            win.raise_(); win.activateWindow()
+        else:
+            win.reload()
+            win.show(); win.raise_(); win.activateWindow()
+
+    def _join_by_invite(self):
+        """초대 링크를 붙여넣어 접속한다(게스트 표시이름)."""
+        from v.boards.whiteboard.invite import parse_invite
+        text, ok = QInputDialog.getText(
+            self, "초대 링크로 접속", "초대 링크를 붙여넣으세요:\n(예: clever-otter-734@host:9700)")
+        if not ok or not text.strip():
+            return
+        inv = parse_invite(text)
+        if not inv or not inv.board_id:
+            QMessageBox.warning(self, "초대 링크",
+                                "올바른 초대 링크가 아닙니다.\n예: clever-otter-734@host:9700")
+            return
+        name, ok2 = QInputDialog.getText(self, "표시 이름", "사용할 이름:")
+        if not ok2 or not name.strip():
+            return
+        self._connect_and_join(inv.host, inv.port, name.strip(), "",
+                               inv.board_id, secure=inv.secure, merri=False)
+
+    def _connect_and_join(self, host, port, username, password, board_id,
+                          secure=False, merri=False):
+        """서버에 접속해 특정 board_id 로 바로 join (보드 목록 생략). 공용 헬퍼."""
+        from v.boards.whiteboard.server_client import ServerClient
+        from v.boards import get_plugin
+
+        if not hasattr(self, "_server_client") or self._server_client is None:
+            self._server_client = ServerClient(self)
+        client = self._server_client
+
+        def cleanup():
+            for sig, fn in ((client.auth_ok, on_auth_ok),
+                            (client.auth_fail, on_auth_fail),
+                            (client.disconnected, on_conn_fail)):
+                try:
+                    sig.disconnect(fn)
+                except Exception:
+                    pass
+
+        def on_auth_ok(level, boards):
+            cleanup()
+            wb = get_plugin("whiteboard")
+            if wb:
+                self._load_plugin(wb)
+            if self.current_plugin:
+                self.current_plugin.set_server_client(client)
+            client._last_seq = 0
+            client.join_board(board_id)
+            self._enter_server_mode(username, board_id)
+
+        def on_auth_fail(reason):
+            cleanup()
+            self.setWindowTitle("Qonvo")
+            QMessageBox.warning(self, "접속 실패", reason)
+
+        def on_conn_fail(reason):
+            cleanup()
+            self.setWindowTitle("Qonvo")
+            QMessageBox.warning(self, "접속 실패", f"서버에 연결할 수 없습니다.\n{reason}")
+
+        client.auth_ok.connect(on_auth_ok)
+        client.auth_fail.connect(on_auth_fail)
+        client.disconnected.connect(on_conn_fail)
+        self.setWindowTitle("Qonvo — 접속 중…")
+        client.connect_to_server(host, port, username, password,
+                                 secure=secure, merri=merri)
+
     def _enter_server_mode(self, username: str, board_id: str):
-        self.setWindowTitle(f"Qonvo - {board_id} ({username}@Server)")
+        # 접속 단계 피드백: 접속 중… → 로드 중… → 접속!(보드명)
+        self._server_user = username
+        self._server_board = board_id
+        self.setWindowTitle(f"Qonvo — 로드 중… ({board_id})")
         self.action_connect.setVisible(False)
+        if hasattr(self, "action_host"):
+            self.action_host.setVisible(False)
+            self.action_invite_join.setVisible(False)
         self.action_disconnect.setVisible(True)
+        # 온라인 모드는 서버가 실시간 자동저장 → 로컬 저장 비활성
+        self.action_save.setEnabled(False)
+        self.action_save_as.setEnabled(False)
 
         client = self._server_client
         client.user_joined.connect(self._on_server_user_joined)
@@ -1002,11 +1322,137 @@ class MainWindow(QMainWindow):
         client.disconnected.connect(self._on_server_disconnected)
         client.server_message.connect(self._on_server_message)
         client.error_received.connect(self._on_server_error)
+        client.sync_received.connect(self._on_server_loaded)
+        client.presence_received.connect(self._on_server_presence)
+        client.ping_updated.connect(self._on_server_ping)
+        client.chat_received.connect(self._on_chat_received)
+        self._setup_server_overlays(username, board_id)
+        self._setup_chat_dock(client)
+
+    def _setup_server_overlays(self, username, board_id):
+        """F1(사용자목록)/F12(디버그) 오버레이 생성·단축키 등록."""
+        from v.boards.whiteboard.server_overlays import DebugOverlay, UserListOverlay
+        from PyQt6.QtGui import QShortcut, QKeySequence
+
+        if not hasattr(self, '_dbg_overlay') or self._dbg_overlay is None:
+            self._dbg_overlay = DebugOverlay(self)
+            self._user_overlay = UserListOverlay(self)
+            self._sc_f12 = QShortcut(QKeySequence("F12"), self)
+            self._sc_f12.activated.connect(self._dbg_overlay.toggle)
+            self._sc_f1 = QShortcut(QKeySequence("F1"), self)
+            self._sc_f1.activated.connect(self._user_overlay.toggle)
+            self._user_overlay.user_clicked.connect(self._follow_user)
+            self._dbg_timer = QTimer(self)
+            self._dbg_timer.setInterval(1000)
+            self._dbg_timer.timeout.connect(self._update_debug_overlay)
+        host = ""
+        try:
+            host = self._server_client.http_base.split("://", 1)[-1]
+        except Exception:
+            pass
+        self._dbg_overlay.set(server=f"{username}@{host}", board=board_id)
+        self._dbg_timer.start()
+        self._position_server_overlays()
+
+    def _position_server_overlays(self):
+        if getattr(self, '_dbg_overlay', None) is None:
+            return
+        m = 12
+        self._dbg_overlay.move(self.width() - self._dbg_overlay.width() - m, m)
+        self._user_overlay.move(m, m)
+        for ov in (self._dbg_overlay, self._user_overlay):
+            if ov.isVisible():
+                ov.raise_()
+
+    def _update_debug_overlay(self):
+        if getattr(self, '_dbg_overlay', None) is None:
+            return
+        nodes = 0
+        try:
+            nodes = len(getattr(self.app, 'nodes', {}))
+        except Exception:
+            pass
+        self._dbg_overlay.set(nodes=nodes)
+        self._position_server_overlays()
+
+    def _on_server_presence(self, users):
+        if getattr(self, '_user_overlay', None) is not None:
+            self._user_overlay.set_users(users)
+            self._dbg_overlay.set(users=len(users))
+            self._position_server_overlays()
+
+    def _follow_user(self, username: str):
+        """F1 목록에서 사용자 클릭 → 그 사람 커서 위치로 화면 이동(따라가기)."""
+        from PyQt6.QtCore import QPointF
+        plg = self.current_plugin
+        cl = getattr(plg, "_cursor_layer", None)
+        view = getattr(plg, "view", None)
+        if cl is None or view is None:
+            return
+        c = cl._cursors.get(username)
+        if not c:
+            self.statusBar().showMessage(f"{username} 님의 커서를 아직 못 봤어요", 3000)
+            return
+        x, y = c["cur"]
+        view.centerOn(QPointF(float(x), float(y)))
+        self.statusBar().showMessage(f"{username} 님 위치로 이동", 2500)
+
+    def _on_server_ping(self, ms):
+        if getattr(self, '_dbg_overlay', None) is not None:
+            self._dbg_overlay.set(ping=ms)
+
+    def _setup_chat_dock(self, client):
+        """서버 채팅 패널(우측 도크) 생성·표시."""
+        from PyQt6.QtWidgets import QDockWidget
+        from v.boards.whiteboard.chat_panel import ChatPanel
+
+        if getattr(self, '_chat_dock', None) is None:
+            self._chat_panel = ChatPanel(self)
+            self._chat_dock = QDockWidget("채팅", self)
+            self._chat_dock.setWidget(self._chat_panel)
+            self._chat_dock.setObjectName("server_chat")
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
+            self._chat_panel.send_message.connect(self._send_chat)
+            self._chat_dock.hide()  # 히스토리용 — 기본 숨김(말풍선이 메인)
+
+    def _send_chat(self, text):
+        if getattr(self, '_server_client', None) is not None:
+            self._server_client.send_chat(text)
+
+    def _on_chat_received(self, msg: dict):
+        if getattr(self, '_chat_panel', None) is not None:
+            self._chat_panel.add_message(msg.get("user", "?"), msg.get("color", "#888"),
+                                         msg.get("text", ""), msg.get("ts", 0))
+
+    def _on_server_loaded(self, _snapshot):
+        """첫 sync(보드 데이터) 도착 = 구조 로드 완료. 첨부 다운로드는 이어서 진행."""
+        # 첨부가 없으면 바로 완료 표시, 있으면 % 진행이 이어받음
+        self.setWindowTitle(f"Qonvo — 로드 중… ({self._server_board})")
+
+    def set_server_loading_progress(self, done: int, total: int):
+        """첨부 다운로드 진행률을 타이틀에 % 로 표시(플러그인이 호출)."""
+        if total > 0:
+            pct = int(done * 100 / total)
+            self.setWindowTitle(f"Qonvo — 로드 중… {pct}%  ({self._server_board})")
+
+    def set_server_loaded(self):
+        """로드 완료 → 최종 타이틀 + '접속!'."""
+        self.setWindowTitle(f"Qonvo - {self._server_board} ({self._server_user}@Server)")
+        try:
+            self.statusBar().showMessage("접속!", 3000)
+        except Exception:
+            pass
 
     def _exit_server_mode(self):
         self.setWindowTitle("Qonvo")
+        self._server_board = ""      # presence: 협업 종료 → online 로
         self.action_connect.setVisible(True)
+        if hasattr(self, "action_host"):
+            self.action_host.setVisible(True)
+            self.action_invite_join.setVisible(True)
         self.action_disconnect.setVisible(False)
+        self.action_save.setEnabled(True)
+        self.action_save_as.setEnabled(True)
 
         if self._server_client:
             try:
@@ -1015,14 +1461,30 @@ class MainWindow(QMainWindow):
                 self._server_client.disconnected.disconnect(self._on_server_disconnected)
                 self._server_client.server_message.disconnect(self._on_server_message)
                 self._server_client.error_received.disconnect(self._on_server_error)
+                self._server_client.sync_received.disconnect(self._on_server_loaded)
+                self._server_client.presence_received.disconnect(self._on_server_presence)
+                self._server_client.ping_updated.disconnect(self._on_server_ping)
+                self._server_client.chat_received.disconnect(self._on_chat_received)
             except Exception:
                 pass
+        # 오버레이/채팅 정리
+        if getattr(self, '_dbg_timer', None) is not None:
+            self._dbg_timer.stop()
+        for ov in ('_dbg_overlay', '_user_overlay'):
+            w = getattr(self, ov, None)
+            if w is not None:
+                w.hide()
+        if getattr(self, '_chat_dock', None) is not None:
+            self._chat_dock.hide()
 
     def _disconnect_from_server(self):
         if hasattr(self, '_server_client') and self._server_client:
-            if self.plugin and hasattr(self.plugin, 'detach_server_client'):
-                self.plugin.detach_server_client()
+            if self.current_plugin and hasattr(self.current_plugin, 'detach_server_client'):
+                self.current_plugin.detach_server_client()
             self._server_client.disconnect_from_server()
+        # 내가 호스트였다면 임베드 서버도 종료
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            self._embedded_host.stop()
         self._exit_server_mode()
 
     def _on_server_user_joined(self, user: str, level: int):
@@ -1033,8 +1495,8 @@ class MainWindow(QMainWindow):
 
     def _on_server_disconnected(self, reason: str):
         from PyQt6.QtWidgets import QMessageBox
-        if self.plugin and hasattr(self.plugin, 'detach_server_client'):
-            self.plugin.detach_server_client()
+        if self.current_plugin and hasattr(self.current_plugin, 'detach_server_client'):
+            self.current_plugin.detach_server_client()
         self._exit_server_mode()
         QMessageBox.warning(self, "Disconnected", f"Server connection lost: {reason}")
 

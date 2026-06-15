@@ -4,7 +4,7 @@ from typing import Optional
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox, QFrame,
+    QPushButton, QLabel, QLineEdit, QComboBox, QFrame, QCheckBox,
 )
 from PyQt6.QtCore import Qt
 
@@ -93,6 +93,11 @@ class ConnectDialog(QDialog):
         self._port_input.setStyleSheet(_INPUT_STYLE)
         form.addRow(self._make_label("Port"), self._port_input)
 
+        self._secure_check = QCheckBox("Secure (wss / TLS) — 터널·도메인 접속 시")
+        self._secure_check.setChecked(bool(saved.get("secure", False)))
+        self._secure_check.setStyleSheet("color: #bbb; font-size: 12px;")
+        form.addRow("", self._secure_check)
+
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet("color: #333;")
@@ -166,10 +171,14 @@ class ConnectDialog(QDialog):
             self._status_label.setStyleSheet("color: #ff6b6b; font-size: 11px;")
             return
 
+        # host 에 wss://(또는 https://) 스킴이 있으면 secure 자동 활성화
+        secure = self._secure_check.isChecked() or host.lower().startswith(("wss://", "https://"))
+
         set_setting("server_connection", {
             "host": host,
             "port": port,
             "username": username,
+            "secure": secure,
         })
 
         self._result_data = {
@@ -177,6 +186,7 @@ class ConnectDialog(QDialog):
             "port": port,
             "username": username,
             "password": password,
+            "secure": secure,
         }
         self.accept()
 

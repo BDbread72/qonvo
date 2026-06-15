@@ -55,6 +55,13 @@ class ServerMixin:
         client.remote_ops.connect(self._on_remote_ops)
         client.ai_progress.connect(self._on_ai_progress)
         client.ai_complete.connect(self._on_ai_complete)
+        client.presence_received.connect(self._on_presence_cursors)
+        client.chat_received.connect(self._on_chat_bubble)
+        # 라이브 커서 레이어 (뷰 drawForeground 에서 그림)
+        from .cursor_layer import CursorLayer
+        self._cursor_layer = CursorLayer(self.view)
+        if self.view is not None:
+            self.view._cursor_layer = self._cursor_layer
 
     def detach_server_client(self):
         if self._server_client:
@@ -63,9 +70,55 @@ class ServerMixin:
                 self._server_client.remote_ops.disconnect(self._on_remote_ops)
                 self._server_client.ai_progress.disconnect(self._on_ai_progress)
                 self._server_client.ai_complete.disconnect(self._on_ai_complete)
+                self._server_client.presence_received.disconnect(self._on_presence_cursors)
+                self._server_client.chat_received.disconnect(self._on_chat_bubble)
             except Exception:
                 pass
+        if getattr(self, '_cursor_layer', None) is not None:
+            self._cursor_layer.clear()
+            self._cursor_layer.deleteLater()  # 오버레이 위젯 정리
+            self._cursor_layer = None
+        if getattr(self, 'view', None) is not None:
+            self.view._cursor_layer = None
         self._server_client = None
+
+    def report_cursor(self, scene_x: float, scene_y: float):
+        """뷰의 마우스 이동을 서버에 커서 위치로 보고한다(서버모드일 때)."""
+        if self._server_client and self._server_client.is_connected:
+            self._server_client.update_cursor(scene_x, scene_y)
+        if getattr(self, '_cursor_layer', None) is not None:
+            self._cursor_layer.set_self(scene_x, scene_y)  # 내 말풍선 위치용
+
+    def report_selection(self, x=None, y=None, w=None, h=None):
+        """영역 선택 사각형을 서버에 보고(None 이면 해제)."""
+        if not (self._server_client and self._server_client.is_connected):
+            return
+        sel = None if x is None else {"x": round(x, 1), "y": round(y, 1),
+                                      "w": round(w, 1), "h": round(h, 1)}
+        self._server_client.update_selection(sel)
+
+    def send_chat_message(self, text: str):
+        """뷰의 채팅 입력 → 서버로 전송."""
+        if self._server_client and self._server_client.is_connected:
+            self._server_client.send_chat(text)
+
+    def _on_chat_bubble(self, msg: dict):
+        """채팅 수신 → 해당 사용자 커서 위 말풍선."""
+        if getattr(self, '_cursor_layer', None) is None:
+            return
+        me = self._server_client.username if self._server_client else ""
+        user = msg.get("user", "")
+        self._cursor_layer.add_bubble(user, msg.get("color", "#888"),
+                                      msg.get("text", ""), is_self=(user == me))
+
+    def _on_presence_cursors(self, users: list):
+        if getattr(self, '_cursor_layer', None) is None:
+            return
+        me = self._server_client.username if self._server_client else ""
+        try:
+            self._cursor_layer.update_from_presence(users, exclude_user=me)
+        except Exception:
+            pass
 
     def _send_op(self, op_type: str, target, data: dict | None = None):
         if self._applying_remote_op:
@@ -74,11 +127,156 @@ class ServerMixin:
             self._server_client.send_op(op_type, str(target), data)
 
     def _on_server_sync(self, snapshot: dict):
+        # 서버모드: board_name 을 board_id 로 맞춘 뒤 **즉시 복원**(구조/텍스트 바로 표시).
+        # 첨부(이미지)는 백그라운드로 내려받아 끝나면 이미지 노드를 새로고침한다.
+        board_id = self._server_client.board_id if self._server_client else ""
+        if board_id:
+            self._board_name = board_id
+
+        # 스냅샷 prime 캐시는 비활성(일부 노드 비는 문제) — 항상 서버 full sync 로 복원.
+        # 첨부(이미지)만 백그라운드로 증분 다운로드한다.
         self._applying_remote_op = True
         try:
             self.restore_data(snapshot)
         finally:
             self._applying_remote_op = False
+
+        self._start_attachment_sync(board_id)
+
+    def _start_attachment_sync(self, board_id):
+        """서버 첨부를 백그라운드로 증분 다운로드(이미 받은 건 건너뜀)."""
+        client = self._server_client
+        dest = self._server_attachments_dir(board_id) if board_id else None
+        if dest and client and client.http_base and client.http_token:
+            try:
+                th = client.start_attachment_download(board_id, dest)
+                self._attach_dl_thread = th  # GC 방지
+                th.progress.connect(self._on_attachment_progress)
+                th.finished_dl.connect(self._on_attachments_ready)
+                self._notify_server_status("보드 첨부 동기화 중...")
+                th.start()
+            except Exception:
+                pass
+
+    # ---- 스냅샷 캐시 (재접속 가속) --------------------------------------
+    def _server_cache_dir(self):
+        from v.board import BoardManager
+        d = BoardManager.get_boards_dir().parent / 'server_cache'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _server_cache_path(self, board_id):
+        import re
+        base = (self._server_client.http_base if self._server_client else '') or ''
+        key = re.sub(r'[^A-Za-z0-9._-]', '_', f"{base}_{board_id}")[:120]
+        return self._server_cache_dir() / (key + '.json')
+
+    def _save_server_cache(self, board_id, seq, doc):
+        import json, os
+        try:
+            p = self._server_cache_path(board_id)
+            tmp = p.with_suffix('.json.tmp')
+            tmp.write_text(json.dumps({'seq': int(seq), 'doc': doc}, ensure_ascii=False),
+                           encoding='utf-8')
+            os.replace(tmp, p)
+        except Exception:
+            pass
+
+    def prime_from_cache(self, board_id) -> int:
+        """캐시된 스냅샷이 있으면 즉시 복원하고 그 seq 를 반환(없으면 0).
+
+        join 전에 호출 → 보드가 즉시 뜨고, join 은 이 seq 로 delta 만 받는다.
+        """
+        import json
+        try:
+            p = self._server_cache_path(board_id)
+            if not p.exists():
+                return 0
+            data = json.loads(p.read_text(encoding='utf-8'))
+            self._board_name = board_id
+            self._applying_remote_op = True
+            try:
+                self.restore_data(data.get('doc', {}))
+            finally:
+                self._applying_remote_op = False
+            self._notify_server_status("캐시에서 불러옴 — 최신 변경 동기화 중…")
+            self._start_attachment_sync(board_id)  # 증분(이미 받은 첨부는 스킵)
+            return int(data.get('seq', 0))
+        except Exception:
+            return 0
+
+    def _server_attachments_dir(self, board_id):
+        if not board_id:
+            return None
+        from v.board import BoardManager
+        return str(BoardManager.get_boards_dir() / '.temp' / board_id / 'attachments')
+
+    def _server_window(self):
+        try:
+            return self.view.window() if getattr(self, 'view', None) else None
+        except Exception:
+            return None
+
+    def _on_attachment_progress(self, done, total):
+        if total:
+            pct = int(done * 100 / total)
+            self._notify_server_status(f"보드 첨부 동기화 {done}/{total} ({pct}%)")
+            win = self._server_window()
+            if win is not None and hasattr(win, 'set_server_loading_progress'):
+                win.set_server_loading_progress(done, total)
+            # 주기적으로 이미지 새로고침(받는 중에도 점점 채워지게). 너무 잦으면
+            # chat 재렌더 churn 이 크므로 드물게.
+            if done % 200 == 0:
+                self._refresh_image_nodes()
+
+    def _on_attachments_ready(self, ok, total):
+        if total:
+            self._notify_server_status(f"첨부 {ok}/{total} 동기화 완료")
+        self._refresh_image_nodes()
+        win = self._server_window()
+        if win is not None and hasattr(win, 'set_server_loaded'):
+            win.set_server_loaded()
+
+    def _refresh_image_nodes(self):
+        """첨부 다운로드 후 이미 생성된 이미지 노드를 다시 그린다."""
+        from .chat_node import ChatNodeWidget
+        # 채팅 노드: 히스토리 이미지 재렌더
+        app = getattr(self, 'app', None)
+        if app is not None:
+            for node in list(getattr(app, 'nodes', {}).values()):
+                try:
+                    if (isinstance(node, ChatNodeWidget) and hasattr(node, '_render_page')
+                            and hasattr(node, '_current_page')):
+                        node._render_page(node._current_page)
+                except Exception:
+                    pass
+        # 이미지 카드: 아직 못 불러온 것만 로드 시도.
+        # ⚠️ 로딩 중인 항목에 _start_load 를 다시 호출하면 _load_signal(QObject)이
+        #    교체→옛 객체 GC→워커 스레드가 죽은 객체에 emit → 세그폴트. 절대 금지.
+        for item in list(getattr(self, 'image_card_items', {}).values()):
+            try:
+                if not hasattr(item, '_start_load'):
+                    continue
+                if getattr(item, '_loading', False):
+                    continue  # 로딩 중 → 건드리지 않음
+                if getattr(item, '_pixmap', None) is None:  # 미로드/실패한 것만 재시도
+                    item._load_failed = False
+                    item._start_load()
+            except Exception:
+                pass
+        try:
+            if getattr(self, 'view', None):
+                self.view.viewport().update()
+        except Exception:
+            pass
+
+    def _notify_server_status(self, text: str):
+        try:
+            win = self.view.window() if getattr(self, 'view', None) else None
+            if win is not None:
+                win.statusBar().showMessage(text, 0)
+        except Exception:
+            pass
 
     def _on_remote_ops(self, ops: list, author: str):
         self._applying_remote_op = True
@@ -330,6 +528,18 @@ class ServerMixin:
         if not self.server_mode or self._applying_remote_op:
             return
         self._send_op("node_move", node_id, {"x": x, "y": y})
+
+    def _send_node_move_throttled(self, node_id: int, x: float, y: float):
+        """드래그 중 위치를 throttle(약 25/s)로 전송 → 상대가 점프 없이 부드럽게 본다."""
+        if not self.server_mode or self._applying_remote_op:
+            return
+        import time
+        if not hasattr(self, '_move_throttle'):
+            self._move_throttle = {}
+        now = time.monotonic()
+        if now - self._move_throttle.get(node_id, 0.0) >= 0.04:
+            self._move_throttle[node_id] = now
+            self._send_op("node_move", node_id, {"x": x, "y": y})
 
     def _send_edge_add_op(self, edge):
         if not self.server_mode or self._applying_remote_op:
