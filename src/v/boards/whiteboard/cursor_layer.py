@@ -109,8 +109,14 @@ class CursorLayer(QWidget):
 
     # ---- 내부 ----------------------------------------------------------
     def eventFilter(self, obj, event):
-        if obj is self._view.viewport() and event.type() == QEvent.Type.Resize:
-            self.setGeometry(self._view.viewport().rect())
+        if obj is self._view.viewport():
+            et = event.type()
+            if et == QEvent.Type.Resize:
+                self.setGeometry(self._view.viewport().rect())
+            elif et == QEvent.Type.Paint and (self._cursors or self._bubbles):
+                # 뷰포트가 다시 그려질 때(줌·핏·콘텐츠 변경 등)마다 오버레이도 갱신
+                # → 줌해도 원격 커서가 정확한 위치에 따라옴(스크롤뿐 아니라 변환 전체 추적)
+                self.update()
         return super().eventFilter(obj, event)
 
     def _tick(self):

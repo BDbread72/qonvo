@@ -283,7 +283,8 @@ class ServerClient(QObject):
 
     def update_cursor(self, x: float, y: float, state: str = ""):
         """라이브 커서 위치+상태 보고(초당 ~12회로 throttle)."""
-        self._last_cursor = {"x": round(x, 1), "y": round(y, 1)}
+        # 고배율 줌에서도 정확하도록 0.01 단위(0.1이면 줌 시 몇 px 어긋남)
+        self._last_cursor = {"x": round(x, 2), "y": round(y, 2)}
         changed_state = (state != self._last_state)
         self._last_state = state
         now = time.time()
