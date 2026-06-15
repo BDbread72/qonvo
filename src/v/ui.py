@@ -250,6 +250,11 @@ class MainWindow(QMainWindow):
         # 파일 메뉴
         file_menu = menubar.addMenu(t("menu.file"))
 
+        self.action_home = file_menu.addAction("메인 화면으로")
+        self.action_home.setShortcut("Ctrl+Shift+H")
+        self.action_home.triggered.connect(self._go_home)
+        file_menu.addSeparator()
+
         action_new = file_menu.addAction(t("menu.new_board"))
         action_new.setShortcut("Ctrl+N")
         action_new.triggered.connect(self._new_board)
@@ -1486,6 +1491,46 @@ class MainWindow(QMainWindow):
         if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
             self._embedded_host.stop()
         self._exit_server_mode()
+        self._reset_to_welcome()   # 서버 끊으면 메인으로
+
+    def _go_home(self):
+        """현재 보드를 닫고 메인(웰컴) 화면으로 간다."""
+        # 서버 모드면 끊기(끊으면 메인까지 감)
+        if getattr(self, '_server_client', None) and getattr(self._server_client, 'is_connected', False):
+            self._disconnect_from_server()
+            return
+        if self.current_plugin is None:
+            return  # 이미 메인
+        # 로컬 보드 미저장 변경 확인
+        if self._modified and self.current_plugin:
+            reply = QMessageBox.question(
+                self, t("app.title"), t("dialog.unsaved_message"),
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            if reply == QMessageBox.StandardButton.Save:
+                self._save_board()
+                if self._save_worker and self._save_worker.isRunning():
+                    self._save_worker.wait()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
+        self._reset_to_welcome()
+
+    def _reset_to_welcome(self):
+        """보드 언로드 + 메인(웰컴) 화면 표시 + 보드 전용 액션 비활성."""
+        try:
+            self.app.clear()
+        except Exception:
+            pass
+        self.current_plugin = None
+        self._current_filepath = None
+        self._modified = False
+        for act in ('action_reset_view', 'action_reset_zoom', 'action_add_node',
+                    'action_search_history', 'action_export_folder'):
+            a = getattr(self, act, None)
+            if a is not None:
+                a.setEnabled(False)
+        self._show_welcome()
+        self._update_title()
 
     def _on_server_user_joined(self, user: str, level: int):
         self.statusBar().showMessage(f"{user} joined", 5000)
@@ -1497,8 +1542,11 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QMessageBox
         if self.current_plugin and hasattr(self.current_plugin, 'detach_server_client'):
             self.current_plugin.detach_server_client()
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            self._embedded_host.stop()
         self._exit_server_mode()
-        QMessageBox.warning(self, "Disconnected", f"Server connection lost: {reason}")
+        self._reset_to_welcome()   # 연결 끊기면 메인으로
+        QMessageBox.warning(self, "연결 끊김", f"서버 연결이 끊어졌어요: {reason}")
 
     def _on_server_message(self, text: str):
         self.statusBar().showMessage(f"[Server] {text}", 8000)
