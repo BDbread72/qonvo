@@ -1,19 +1,21 @@
 """라이브 커서 — 다른 사용자의 마우스를 캔버스 위에 이름표/말풍선으로 표시.
 
-뷰포트 위에 **투명 오버레이 위젯**으로 그린다(QGraphicsScene 과 분리) →
-- 캔버스(이미지카드 수백 개) 리페인트를 유발하지 않아 가볍고 드래그가 안 끊긴다
-- 위젯이 자기 픽셀만 다시 그리므로 잔상이 없다
+**scene 아이템(QGraphicsItem)** 으로 그린다. 각 커서/말풍선은
+`ItemIgnoresTransformations` 플래그라 줌과 무관하게 항상 화면 픽셀 크기로 보이고,
+`setPos(scene_x, scene_y)` 로 보드 좌표에 놓이면 Qt 가 줌·팬·DPI(디스플레이 배율)를
+**전부 알아서** 화면 위치로 변환한다 → 우리가 mapFromScene 같은 좌표 계산을 안 하므로
+줌/배율이 달라도 절대 어긋나지 않는다(예전 오버레이 위젯 방식의 오프셋 문제 해결).
 
-서버 presence 의 cursor{x,y}(보드 좌표)를 목표로 두고 60fps 로 보간해 부드럽게 움직인다.
+서버 presence 의 cursor{x,y}(보드 좌표)를 목표로 60fps 로 보간해 부드럽게 움직인다.
 채팅은 해당 사용자 커서 위 말풍선으로 떠서 서서히 사라진다. 글리프는 자작.
 """
 from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QEvent
-from PyQt6.QtGui import (QColor, QPolygonF, QPainterPath, QFont, QFontMetrics, QPainter, QPen)
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QObject
+from PyQt6.QtGui import (QColor, QPolygonF, QPainterPath, QFont, QFontMetrics, QPen)
+from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem
 
 _ARROW = QPolygonF([
     QPointF(0, 0), QPointF(0, 18), QPointF(4.5, 13.5), QPointF(8, 21),
@@ -25,53 +27,155 @@ _BUBBLE_TTL = 6.0
 _BUBBLE_FADE = 1.8
 _STATE_LABEL = {"menu": "≡ 메뉴", "typing": "⌨ 입력 중", "away": "💤 자리비움"}
 
+_Z_SEL = 1_000_000.0
+_Z_CURSOR = 1_000_002.0
+_Z_BUBBLE = 1_000_003.0
 
-class CursorLayer(QWidget):
-    """뷰포트 위 투명 오버레이. 원격 커서/말풍선을 그린다."""
+_FONT = QFont(); _FONT.setPointSize(8); _FONT.setBold(True)
+_BFONT = QFont(); _BFONT.setPointSize(9)
+
+
+class _CursorItem(QGraphicsItem):
+    """화면 픽셀 고정 크기 커서 글리프 + 이름표. setPos = 보드 좌표(scene)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setZValue(_Z_CURSOR)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._color = QColor("#888")
+        self._name = ""
+        self._state = ""
+        self._fm = QFontMetrics(_FONT)
+        self._lw = 0.0
+        self._lh = float(self._fm.height() + 4)
+        self._recalc()
+
+    def set_label(self, name: str, state: str, color: QColor):
+        if name == self._name and state == self._state and color == self._color:
+            return
+        self.prepareGeometryChange()
+        self._name, self._state, self._color = name, state, color
+        self._recalc()
+        self.update()
+
+    def _recalc(self):
+        st = _STATE_LABEL.get(self._state, "")
+        label = f"{self._name}  {st}" if st else self._name
+        self._label = label
+        self._lw = float(self._fm.horizontalAdvance(label) + 12)
+
+    def shape(self):
+        return QPainterPath()   # 클릭 안 잡힘(장식용)
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-2, -2, 18 + self._lw, 20 + self._lh)
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(p.RenderHint.Antialiasing, True)
+        p.setPen(QColor(255, 255, 255, 230))
+        p.setBrush(self._color)
+        p.drawPolygon(_ARROW)
+        lw, lh = self._lw, self._lh
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(14, 14, lw, lh), 5, 5)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#555a64") if self._state == "away" else self._color)
+        p.drawPath(path)
+        p.setFont(_FONT)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(QRectF(20, 14, lw - 12, lh),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._label)
+
+
+class _BubbleItem(QGraphicsItem):
+    """커서 위 말풍선(채팅). 화면 픽셀 고정. setPos = 커서 보드 좌표(scene)."""
+
+    def __init__(self, text: str, color: QColor):
+        super().__init__()
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setZValue(_Z_BUBBLE)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._fm = QFontMetrics(_BFONT)
+        self._text = text[:200]
+        self._color = QColor(color)
+        self.alpha = 1.0
+        self._bw = float(min(240, self._fm.horizontalAdvance(self._text)) + 18)
+        self._bh = float(self._fm.height() + 10)
+
+    def shape(self):
+        return QPainterPath()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-2, -self._bh - 12, self._bw + 4, self._bh + 22)
+
+    def paint(self, p, opt, widget=None):
+        p.setRenderHint(p.RenderHint.Antialiasing, True)
+        bw, bh = self._bw, self._bh
+        by = -bh - 8
+        color = QColor(self._color); color.setAlphaF(0.92 * self.alpha)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, by, bw, bh), 8, 8)
+        p.drawPath(path)
+        p.drawPolygon(QPolygonF([
+            QPointF(10, by + bh), QPointF(22, by + bh), QPointF(13, by + bh + 7)]))
+        tc = QColor("#ffffff"); tc.setAlphaF(self.alpha)
+        p.setFont(_BFONT)
+        p.setPen(tc)
+        p.drawText(QRectF(9, by, bw - 18, bh),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._text)
+
+
+class CursorLayer(QObject):
+    """원격 커서/말풍선을 scene 아이템으로 관리(줌·DPI 무관)."""
 
     def __init__(self, view):
-        super().__init__(view.viewport())
+        super().__init__(view)
         self._view = view
-        self._cursors: dict = {}          # user -> {name,color,cur,tgt}
-        self._bubbles: dict = {}          # user -> {text,t0,color,pos}
+        self._scene = view.scene()
+        self._cursors: dict = {}   # user -> {name,color,cur,tgt,select,state,item,selitem}
+        self._bubbles: dict = {}   # user -> {t0, item}
         self._self_pos = None
-        self._font = QFont(); self._font.setPointSize(8); self._font.setBold(True)
-        self._bfont = QFont(); self._bfont.setPointSize(9)
-
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setGeometry(view.viewport().rect())
-        view.viewport().installEventFilter(self)   # 리사이즈 추적
-        # 팬/줌 시 갱신
-        view.horizontalScrollBar().valueChanged.connect(self.update)
-        view.verticalScrollBar().valueChanged.connect(self.update)
-        self.show()
-        self.raise_()
 
         self._timer = QTimer(self)
-        self._timer.setInterval(16)  # ~60fps (오버레이만 갱신 — 가벼움)
+        self._timer.setInterval(16)  # ~60fps 보간
         self._timer.timeout.connect(self._tick)
 
     # ---- 외부 API -------------------------------------------------------
+    def update(self):
+        """호환용 no-op(scene 아이템은 Qt 가 자동 리페인트)."""
+        pass
+
     def set_self(self, x: float, y: float, name: str = "", color: str = ""):
         self._self_pos = [x, y]
 
     def add_bubble(self, user: str, color: str, text: str, is_self: bool = False):
-        if not text:
+        if self._scene is None:
+            self._scene = self._view.scene()
+        if not text or self._scene is None:
             return
         if is_self:
             pos = list(self._self_pos) if self._self_pos else [0.0, 0.0]
         else:
             c = self._cursors.get(user)
             pos = list(c["cur"]) if c else (list(self._self_pos) if self._self_pos else [0.0, 0.0])
-        self._bubbles[user] = {"text": text[:200], "t0": time.monotonic(),
-                               "color": QColor(color or "#888"), "pos": pos}
+        old = self._bubbles.pop(user, None)
+        if old:
+            self._scene.removeItem(old["item"])
+        item = _BubbleItem(text, QColor(color or "#888"))
+        item.setPos(pos[0], pos[1])
+        self._scene.addItem(item)
+        self._bubbles[user] = {"t0": time.monotonic(), "item": item}
         if not self._timer.isActive():
             self._timer.start()
-        self.update()
 
     def update_from_presence(self, users: list, exclude_user: str = ""):
+        if self._scene is None:
+            self._scene = self._view.scene()
+        if self._scene is None:
+            return
         seen = set()
         for u in users:
             name = u.get("user", "")
@@ -85,39 +189,72 @@ class CursorLayer(QWidget):
             seen.add(name)
             sel = u.get("select")
             st = u.get("state", "")
+            color = QColor(u.get("color", "#888"))
             c = self._cursors.get(name)
             if c is None:
-                self._cursors[name] = {"name": name, "color": QColor(u.get("color", "#888")),
-                                       "cur": [tx, ty], "tgt": [tx, ty], "select": sel, "state": st}
+                item = _CursorItem()
+                item.set_label(name, st, color)
+                item.setPos(tx, ty)
+                self._scene.addItem(item)
+                c = {"name": name, "color": color, "cur": [tx, ty], "tgt": [tx, ty],
+                     "select": None, "state": st, "item": item, "selitem": None}
+                self._cursors[name] = c
             else:
                 c["tgt"] = [tx, ty]
-                c["color"] = QColor(u.get("color", "#888"))
-                c["select"] = sel
+                c["color"] = color
                 c["state"] = st
+                c["item"].set_label(name, st, color)
+            self._apply_select(c, sel)
         for name in list(self._cursors.keys()):
             if name not in seen:
-                del self._cursors[name]
+                self._remove_cursor(name)
         if self._cursors and not self._timer.isActive():
             self._timer.start()
-        self.update()
 
     def clear(self):
         self._timer.stop()
+        for name in list(self._cursors.keys()):
+            self._remove_cursor(name)
+        for user in list(self._bubbles.keys()):
+            self._remove_bubble(user)
         self._cursors.clear()
         self._bubbles.clear()
-        self.update()
 
     # ---- 내부 ----------------------------------------------------------
-    def eventFilter(self, obj, event):
-        if obj is self._view.viewport():
-            et = event.type()
-            if et == QEvent.Type.Resize:
-                self.setGeometry(self._view.viewport().rect())
-            elif et == QEvent.Type.Paint and (self._cursors or self._bubbles):
-                # 뷰포트가 다시 그려질 때(줌·핏·콘텐츠 변경 등)마다 오버레이도 갱신
-                # → 줌해도 원격 커서가 정확한 위치에 따라옴(스크롤뿐 아니라 변환 전체 추적)
-                self.update()
-        return super().eventFilter(obj, event)
+    def _apply_select(self, c, sel):
+        if sel:
+            if c["selitem"] is None and self._scene is not None:
+                r = QGraphicsRectItem()
+                r.setZValue(_Z_SEL)
+                r.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                pen = QPen(c["color"], 1.5, Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)   # 줌 무관 1.5px
+                r.setPen(pen)
+                fill = QColor(c["color"]); fill.setAlphaF(0.12)
+                r.setBrush(fill)
+                self._scene.addItem(r)
+                c["selitem"] = r
+            if c["selitem"] is not None:
+                c["selitem"].setRect(QRectF(sel["x"], sel["y"], sel["w"], sel["h"]))
+            c["select"] = sel
+        elif c["selitem"] is not None:
+            self._scene.removeItem(c["selitem"])
+            c["selitem"] = None
+            c["select"] = None
+
+    def _remove_cursor(self, name):
+        c = self._cursors.pop(name, None)
+        if not c or self._scene is None:
+            return
+        if c.get("item") is not None:
+            self._scene.removeItem(c["item"])
+        if c.get("selitem") is not None:
+            self._scene.removeItem(c["selitem"])
+
+    def _remove_bubble(self, user):
+        b = self._bubbles.pop(user, None)
+        if b and self._scene is not None:
+            self._scene.removeItem(b["item"])
 
     def _tick(self):
         moving = False
@@ -128,86 +265,17 @@ class CursorLayer(QWidget):
                 continue
             cur[0] += dx * _EASE
             cur[1] += dy * _EASE
+            c["item"].setPos(cur[0], cur[1])
             moving = True
         now = time.monotonic()
-        fading = bool(self._bubbles)
         for user in list(self._bubbles.keys()):
-            if now - self._bubbles[user]["t0"] >= _BUBBLE_TTL:
-                del self._bubbles[user]
-        if moving or fading or self._bubbles:
-            self.update()
+            b = self._bubbles[user]
+            age = now - b["t0"]
+            if age >= _BUBBLE_TTL:
+                self._remove_bubble(user)
+                continue
+            if age >= _BUBBLE_TTL - _BUBBLE_FADE:
+                b["item"].alpha = max(0.0, (_BUBBLE_TTL - age) / _BUBBLE_FADE)
+                b["item"].update()
         if not moving and not self._bubbles:
             self._timer.stop()
-
-    def paintEvent(self, event):
-        if not self._cursors and not self._bubbles:
-            return
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        view = self._view
-        # 영역 선택 사각형(다른 사용자)
-        for c in self._cursors.values():
-            sel = c.get("select")
-            if not sel:
-                continue
-            tl = view.mapFromScene(QPointF(sel["x"], sel["y"]))
-            br = view.mapFromScene(QPointF(sel["x"] + sel["w"], sel["y"] + sel["h"]))
-            color = c["color"]
-            p.setPen(QPen(color, 1.5, Qt.PenStyle.DashLine))
-            fill = QColor(color); fill.setAlphaF(0.12)
-            p.setBrush(fill)
-            p.drawRect(QRectF(float(tl.x()), float(tl.y()),
-                              float(br.x() - tl.x()), float(br.y() - tl.y())))
-        # 말풍선
-        self._paint_bubbles(p, view)
-        # 커서 글리프
-        p.setFont(self._font)
-        fm = QFontMetrics(self._font)
-        for c in self._cursors.values():
-            vp = view.mapFromScene(QPointF(c["cur"][0], c["cur"][1]))
-            p.save()
-            p.translate(vp.x(), vp.y())
-            color = c["color"]
-            p.setPen(QColor(255, 255, 255, 230))
-            p.setBrush(color)
-            p.drawPolygon(_ARROW)
-            st = _STATE_LABEL.get(c.get("state", ""), "")
-            label = f"{c['name']}  {st}" if st else c["name"]
-            lw = fm.horizontalAdvance(label) + 12
-            lh = fm.height() + 4
-            path = QPainterPath()
-            path.addRoundedRect(QRectF(14, 14, lw, lh), 5, 5)
-            p.setPen(Qt.PenStyle.NoPen)
-            # away 면 라벨을 흐리게(자리비움 느낌)
-            p.setBrush(QColor("#555a64") if c.get("state") == "away" else color)
-            p.drawPath(path)
-            p.setPen(QColor("#ffffff"))
-            p.drawText(QRectF(20, 14, lw - 12, lh),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
-            p.restore()
-        p.end()
-
-    def _paint_bubbles(self, p, view):
-        now = time.monotonic()
-        p.setFont(self._bfont)
-        fm = QFontMetrics(self._bfont)
-        for info in self._bubbles.values():
-            age = now - info["t0"]
-            alpha = 1.0 if age < _BUBBLE_TTL - _BUBBLE_FADE else max(0.0, (_BUBBLE_TTL - age) / _BUBBLE_FADE)
-            vp = view.mapFromScene(QPointF(info["pos"][0], info["pos"][1]))
-            text = info["text"]
-            bw = min(240, fm.horizontalAdvance(text)) + 18
-            bh = fm.height() + 10
-            bx, by = float(vp.x()), float(vp.y()) - bh - 8
-            color = QColor(info["color"]); color.setAlphaF(0.92 * alpha)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(color)
-            path = QPainterPath()
-            path.addRoundedRect(QRectF(bx, by, bw, bh), 8, 8)
-            p.drawPath(path)
-            p.drawPolygon(QPolygonF([
-                QPointF(bx + 10, by + bh), QPointF(bx + 22, by + bh), QPointF(bx + 13, by + bh + 7)]))
-            tc = QColor("#ffffff"); tc.setAlphaF(alpha)
-            p.setPen(tc)
-            p.drawText(QRectF(bx + 9, by, bw - 18, bh),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
