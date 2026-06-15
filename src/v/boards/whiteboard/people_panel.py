@@ -965,20 +965,31 @@ class PeopleWindow(QDialog):
                 bubble.add_custom(self._make_attachment_card(att, inv, mine))
         return bubble
 
-    def _find_invite(self, post: dict) -> str:
-        """초대 링크를 숨은 prop(qonvo_invite)에서, 없으면 본문에서 찾는다."""
-        link = (post.get("props") or {}).get("qonvo_invite", "")
+    def _find_invite(self, post: dict) -> dict:
+        """초대 spec 을 숨은 prop(qonvo_spec)에서, 없으면 링크에서 복원."""
+        props = post.get("props") or {}
+        raw = props.get("qonvo_spec", "")
+        if raw:
+            try:
+                d = json.loads(raw)
+                if isinstance(d, dict) and d.get("board_id"):
+                    return d
+            except Exception:
+                pass
+        link = props.get("qonvo_invite", "")
+        if not link:
+            for tok in (post.get("message", "") or "").replace("👉", " ").split():
+                if "@" in tok:
+                    link = tok; break
         if link:
-            return link
-        from .invite import parse_invite
-        for tok in (post.get("message", "") or "").replace("👉", " ").split():
-            if "@" in tok:
-                inv = parse_invite(tok)
-                if inv and inv.board_id:
-                    return tok
-        return ""
+            from .invite import parse_invite
+            inv = parse_invite(link)
+            if inv and inv.board_id:
+                return {"board_id": inv.board_id, "primary": link, "relay": "",
+                        "hosts": [{"host": inv.host, "port": inv.port, "secure": inv.secure}]}
+        return {}
 
-    def _make_attachment_card(self, att: dict, invite_link: str, mine: bool) -> QWidget:
+    def _make_attachment_card(self, att: dict, spec: dict, mine: bool) -> QWidget:
         color = att.get("color", "#5865f2")
         card = QFrame()
         card.setStyleSheet(f"QFrame{{background:#2f3136;border-left:3px solid {color};border-radius:6px;}}")
@@ -1004,9 +1015,10 @@ class PeopleWindow(QDialog):
         cv.addLayout(top)
 
         # 액션: 내 초대면 호스팅중지/종료, 받은 초대면 참여하기
+        primary = (spec or {}).get("primary", "")
         active_link = self._host_status() if self._host_status else None
         if mine:
-            if invite_link and active_link == invite_link:
+            if primary and active_link == primary:
                 stop = QPushButton("🟢 호스팅 중 · 중지")
                 stop.setStyleSheet("QPushButton{background:#3a3f47;color:#fff;border-radius:6px;padding:6px;}"
                                    "QPushButton:hover{background:#f04747;}")
@@ -1015,11 +1027,11 @@ class PeopleWindow(QDialog):
             else:
                 gone = QLabel("⚫ 종료된 초대"); gone.setStyleSheet("color:#888;font-size:11px;background:transparent;")
                 cv.addWidget(gone)
-        elif invite_link and self._invite_joiner:
+        elif spec and spec.get("board_id") and self._invite_joiner:
             join = QPushButton("참여하기")
             join.setStyleSheet("QPushButton{background:#43b581;color:#fff;font-weight:bold;"
                                "border-radius:6px;padding:6px;}QPushButton:hover{background:#3aa372;}")
-            join.clicked.connect(lambda _=None, lk=invite_link: self._invite_joiner(lk))
+            join.clicked.connect(lambda _=None, sp=spec: self._invite_joiner(sp))
             cv.addWidget(join)
 
         thumb_url = att.get("thumb_url") or att.get("image_url")
@@ -1252,18 +1264,20 @@ class PeopleWindow(QDialog):
         # 호스팅 보장(없으면 자동 시작) → 링크 받으면 카드 전송
         self._invite_requester(self._send_invite_card)
 
-    def _send_invite_card(self, link):
+    def _send_invite_card(self, spec):
         self._invite_btn.setEnabled(True); self._invite_btn.setText("＋ 보드 초대")
-        if not link or not self._cur_channel:
+        if not spec or not isinstance(spec, dict) or not self._cur_channel:
             QMessageBox.information(
                 self, "보드 초대",
                 "보드를 호스팅할 수 없습니다.\n보드를 먼저 저장(Ctrl+S)했는지 확인하세요.")
             return
         ch = self._cur_channel
-        board_id = link.split("@", 1)[0]
-        # 링크는 숨은 prop(qonvo_invite)에만 — 본문 문구 없이 카드만 보이게.
+        board_id = spec.get("board_id", "")
+        primary = spec.get("primary", "")
+        # spec(접속후보+릴레이)은 숨은 prop 으로 — 본문 문구 없이 카드만 보이게.
         props = {
-            "qonvo_invite": link,
+            "qonvo_spec": json.dumps(spec),
+            "qonvo_invite": primary,
             "attachments": [{
                 "color": "#5865f2",
                 "author_name": "qonvo",

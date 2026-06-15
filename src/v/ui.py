@@ -1126,7 +1126,8 @@ class MainWindow(QMainWindow):
             self._embedded_host.ready.connect(self._on_host_ready)
             self._embedded_host.failed.connect(self._on_host_failed)
             self._embedded_host.start(board_id, qonvo_path=filepath,
-                                      host_username=self._host_username)
+                                      host_username=self._host_username,
+                                      relay_url=self._relay_ws_base())   # 릴레이 폴백
 
         self._host_save_worker.done.connect(_seed_and_host)
         self._host_save_worker.error.connect(
@@ -1139,26 +1140,35 @@ class MainWindow(QMainWindow):
         self._fire_invite_cb(None)
 
     def _on_host_ready(self, port: int, connect_host: str):
-        """임베드 서버 기동 완료 → 호스트 자가접속 + 초대 링크."""
+        """임베드 서버 기동 완료 → 호스트 자가접속 + 초대 spec(직접후보들+릴레이)."""
         from v.boards.whiteboard.invite import format_invite
-        host = connect_host or self._lan_ip()
-        link = format_invite(self._host_board_id, host, port, secure=False)
-        self._host_invite_link = link
-        # 호스트도 클라로 자기 서버에 접속(모두가 클라 → 코드 경로 통일)
-        self._connect_and_join("127.0.0.1", port, self._host_username, "",
-                               self._host_board_id, secure=False, merri=False)
-        # People 초대 요청 때문에 시작된 거면 → 카드 전송 콜백, 팝업 생략
+        # 직접 접속 후보: LAN IP들 + (UPnP되면)공인주소
+        hosts = [{"host": ip, "port": port, "secure": False} for ip in self._lan_ips()]
+        if connect_host:
+            hosts.append({"host": connect_host, "port": port, "secure": False})
+        relay = self._relay_ws_base()
+        primary_host = connect_host or (hosts[0]["host"] if hosts else "127.0.0.1")
+        primary = format_invite(self._host_board_id, primary_host, port, secure=False)
+        spec = {"board_id": self._host_board_id, "port": port, "hosts": hosts,
+                "relay": relay, "primary": primary}
+        self._host_invite_spec = spec
+        self._host_invite_link = primary
+        # 호스트도 클라로 자기 서버에 접속(localhost 직접)
+        self._connect_and_join(
+            [{"kind": "direct", "host": "127.0.0.1", "port": port, "secure": False}],
+            self._host_username, "", self._host_board_id, merri=False)
+        # People 초대 요청 때문에 시작된 거면 → 카드 전송 콜백(spec), 팝업 생략
         if getattr(self, "_pending_invite_cb", None):
-            self._fire_invite_cb(link)
+            self._fire_invite_cb(spec)
             return
         # 메뉴에서 직접 호스팅한 경우: 링크 안내 + 클립보드 복사
-        QApplication.clipboard().setText(link)
-        note = ("" if connect_host else
-                "\n\n⚠ UPnP가 안 열렸어요 — 같은 LAN(공유기)에서만 접속됩니다.\n"
-                "   외부 초대가 필요하면 전용 서버를 쓰세요.")
+        QApplication.clipboard().setText(primary)
+        note = ("" if relay else
+                "\n\n⚠ 릴레이를 못 찾았어요 — 같은 LAN에서만 접속됩니다.")
         box = QMessageBox(self)
         box.setWindowTitle("초대 링크")
-        box.setText(f"친구에게 이 링크를 보내세요 (클립보드에 복사됨):\n\n{link}{note}")
+        box.setText(f"친구에게 이 링크를 보내세요 (클립보드에 복사됨):\n\n{primary}{note}"
+                    "\n\n(People에서 '보드 초대'로 보내면 어디서든 자동 접속됩니다)")
         box.exec()
 
     def _current_invite_link(self):
@@ -1167,26 +1177,26 @@ class MainWindow(QMainWindow):
             return getattr(self, "_host_invite_link", "") or None
         return None
 
-    def _fire_invite_cb(self, link):
-        """대기 중인 People 초대 콜백을 1회 호출한다(link or None)."""
+    def _fire_invite_cb(self, spec):
+        """대기 중인 People 초대 콜백을 1회 호출한다(spec dict or None)."""
         cb = getattr(self, "_pending_invite_cb", None)
         self._pending_invite_cb = None
         if cb:
-            cb(link)
+            cb(spec)
 
     def _request_invite_link(self, cb):
         """초대 링크를 보장해 콜백에 넘긴다 — 호스팅 중이면 즉시, 아니면 자동 호스팅.
 
         People 패널의 '보드 초대'가 사용. 호스팅을 못 시작하면 cb(None).
         """
-        link = self._current_invite_link()
-        if link:
-            cb(link); return
+        # 이미 호스팅 중이면 저장된 spec 즉시 반환
+        if self._current_invite_link() and getattr(self, "_host_invite_spec", None):
+            cb(self._host_invite_spec); return
         self._pending_invite_cb = cb
-        self._host_current_board()   # 끝나면 _on_host_ready/_failed 가 cb 발화
+        self._host_current_board()   # 끝나면 _on_host_ready/_failed 가 cb(spec) 발화
 
     def _join_invite_link(self, link: str):
-        """초대 링크로 접속한다(People 카드의 '참여' 버튼). 표시이름은 merri 프로필."""
+        """(구) 초대 링크 문자열로 접속. 현재는 _join_invite_spec 사용."""
         from v.boards.whiteboard.invite import parse_invite
         from v.boards.whiteboard import profile as _profile
         inv = parse_invite(link or "")
@@ -1231,7 +1241,7 @@ class MainWindow(QMainWindow):
         win = getattr(self, "_people_window", None)
         if win is None:
             win = PeopleWindow(invite_requester=self._request_invite_link,
-                               invite_joiner=self._join_invite_link,
+                               invite_joiner=self._join_invite_spec,
                                host_status=self._current_invite_link,
                                invite_stopper=self._stop_hosting,
                                board_image_adder=self._add_image_to_board, parent=self)
@@ -1257,29 +1267,97 @@ class MainWindow(QMainWindow):
         name, ok2 = QInputDialog.getText(self, "표시 이름", "사용할 이름:")
         if not ok2 or not name.strip():
             return
-        self._connect_and_join(inv.host, inv.port, name.strip(), "",
-                               inv.board_id, secure=inv.secure, merri=False)
+        attempts = [{"kind": "direct", "host": inv.host, "port": inv.port, "secure": inv.secure}]
+        rb = self._relay_ws_base()
+        if rb:
+            attempts.append({"kind": "relay", "relay": rb, "session": inv.board_id})
+        self._connect_and_join(attempts, name.strip(), "", inv.board_id, merri=False)
 
-    def _connect_and_join(self, host, port, username, password, board_id,
-                          secure=False, merri=False):
-        """서버에 접속해 특정 board_id 로 바로 join (보드 목록 생략). 공용 헬퍼."""
+    # ---- 네트워크 후보 -------------------------------------------------
+    def _lan_ips(self):
+        """이 PC 의 로컬 IPv4 들(직접 접속 후보)."""
+        import socket
+        ips = []
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80))
+            ips.append(s.getsockname()[0]); s.close()
+        except Exception:
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127.") and ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+        return ips
+
+    def _relay_ws_base(self):
+        """릴레이(merri 광고 qonvo 서버 = 집서버)의 ws base. 없으면 ""."""
+        try:
+            from v.boards.whiteboard.qonvo_presence import hub_base
+            b = hub_base()
+            if b:
+                return b.replace("https://", "wss://").replace("http://", "ws://")
+        except Exception:
+            pass
+        return ""
+
+    def _join_invite_spec(self, spec):
+        """People 카드 '참여하기' — 직접 후보들 → 릴레이 순으로 시도."""
+        from v.boards.whiteboard import profile as _profile
+        board_id = (spec or {}).get("board_id", "")
+        if not board_id:
+            QMessageBox.warning(self, "참여", "올바른 초대가 아닙니다.")
+            return
+        prof = _profile.get_profile()
+        name = (prof["username"] if prof else "") or "guest"
+        attempts = []
+        for h in spec.get("hosts", []):
+            attempts.append({"kind": "direct", "host": h.get("host", ""),
+                             "port": int(h.get("port", 9700)), "secure": bool(h.get("secure"))})
+        if spec.get("relay"):
+            attempts.append({"kind": "relay", "relay": spec["relay"], "session": board_id})
+        if not attempts:
+            QMessageBox.warning(self, "참여", "접속 주소가 없습니다.")
+            return
+        self._connect_and_join(attempts, name, "", board_id, merri=False)
+
+    def _connect_and_join(self, attempts, username, password, board_id, merri=False):
+        """접속 시도 목록을 순서대로 시도(직접→릴레이), 첫 성공에서 board_id join.
+
+        attempts: [{"kind":"direct","host","port","secure"} | {"kind":"relay","relay","session"}]
+        각 시도는 타임아웃(9s) 안에 auth_ok 없으면 다음으로 넘어간다.
+        """
         from v.boards.whiteboard.server_client import ServerClient
-        from v.boards import get_plugin
-
-        if not hasattr(self, "_server_client") or self._server_client is None:
+        if not getattr(self, "_server_client", None):
             self._server_client = ServerClient(self)
+        self._ja = list(attempts)
+        self._ja_ctx = (username, password, board_id, merri)
+        self._try_next_attempt()
+
+    def _try_next_attempt(self):
+        from v.boards import get_plugin
         client = self._server_client
+        if not getattr(self, "_ja", None):
+            self.setWindowTitle("Qonvo")
+            QMessageBox.warning(self, "접속 실패",
+                                "모든 경로로 접속할 수 없습니다.\n호스트가 켜져 있는지 확인하세요.")
+            return
+        a = self._ja.pop(0)
+        username, password, board_id, merri = self._ja_ctx
+        timer = QTimer(self); timer.setSingleShot(True); timer.setInterval(9000)
 
         def cleanup():
-            for sig, fn in ((client.auth_ok, on_auth_ok),
-                            (client.auth_fail, on_auth_fail),
-                            (client.disconnected, on_conn_fail)):
+            timer.stop()
+            for sig, fn in ((client.auth_ok, on_ok), (client.auth_fail, on_authfail),
+                            (client.disconnected, on_fail)):
                 try:
                     sig.disconnect(fn)
                 except Exception:
                     pass
 
-        def on_auth_ok(level, boards):
+        def on_ok(level, boards):
             cleanup()
             wb = get_plugin("whiteboard")
             if wb:
@@ -1290,22 +1368,38 @@ class MainWindow(QMainWindow):
             client.join_board(board_id)
             self._enter_server_mode(username, board_id)
 
-        def on_auth_fail(reason):
+        def on_authfail(reason):
             cleanup()
+            try:
+                client.disconnect_from_server()
+            except Exception:
+                pass
             self.setWindowTitle("Qonvo")
-            QMessageBox.warning(self, "접속 실패", reason)
+            QMessageBox.warning(self, "접속 실패", reason)   # 인증 실패는 경로 바꿔도 동일 → 중단
 
-        def on_conn_fail(reason):
+        def on_fail(reason=""):
             cleanup()
-            self.setWindowTitle("Qonvo")
-            QMessageBox.warning(self, "접속 실패", f"서버에 연결할 수 없습니다.\n{reason}")
+            try:
+                client.disconnect_from_server()
+            except Exception:
+                pass
+            self._try_next_attempt()   # 다음 경로
 
-        client.auth_ok.connect(on_auth_ok)
-        client.auth_fail.connect(on_auth_fail)
-        client.disconnected.connect(on_conn_fail)
-        self.setWindowTitle("Qonvo — 접속 중…")
-        client.connect_to_server(host, port, username, password,
-                                 secure=secure, merri=merri)
+        timer.timeout.connect(lambda: on_fail("timeout"))
+        client.auth_ok.connect(on_ok)
+        client.auth_fail.connect(on_authfail)
+        client.disconnected.connect(on_fail)
+
+        label = "직접" if a.get("kind") == "direct" else "릴레이"
+        self.setWindowTitle(f"Qonvo — 접속 중… ({label})")
+        timer.start()
+        if a.get("kind") == "direct":
+            client.connect_to_server(a.get("host", ""), int(a.get("port", 9700)),
+                                     username, password, secure=a.get("secure", False), merri=merri)
+        else:
+            ws = (a.get("relay", "").rstrip("/")
+                  + "/relay/c?session=" + a.get("session", ""))
+            client.connect_to_server("", 0, username, password, merri=merri, ws_url=ws)
 
     def _enter_server_mode(self, username: str, board_id: str):
         # 접속 단계 피드백: 접속 중… → 로드 중… → 접속!(보드명)

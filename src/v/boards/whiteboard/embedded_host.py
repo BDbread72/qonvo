@@ -79,16 +79,18 @@ class EmbeddedHost(QObject):
 
     def start(self, board_id: str, qonvo_path: Optional[str] = None,
               host_username: str = "", name: str = "", upnp: bool = True,
-              allow_guests: bool = True) -> None:
+              allow_guests: bool = True, relay_url: str = "") -> None:
         """임베드 서버를 시작한다.
 
-        qonvo_path 가 주어지면 그 .qonvo 를 board_id 로 seed 한 뒤 서빙한다
-        (이미 서버 store 에 board_id 가 있으면 seed 생략하고 그대로 서빙).
+        qonvo_path 가 주어지면 그 .qonvo 를 board_id 로 seed 한 뒤 서빙한다.
+        relay_url 이 주어지면 그 릴레이(ws://...)에 board_id 세션으로 노출한다
+        (잠긴 망에서도 외부 접속 가능 — 스팀 SDR 식).
         """
         if self.is_running():
             self.failed.emit("이미 호스팅 중입니다.")
             return
         self.board_id = board_id
+        self._relay_url = relay_url
         port = _free_port()
         self.port = port
         cfg = _build_config(port, name or f"{host_username or 'Qonvo'} 님의 보드",
@@ -125,11 +127,21 @@ class EmbeddedHost(QObject):
                 pass
             return
 
+        # 릴레이 터널(잠긴 망 폴백) — 설정됐으면 백그라운드 task 로
+        tunnel_stop = asyncio.Event()
+        if getattr(self, "_relay_url", ""):
+            try:
+                from server.relay_client import run_tunnel
+                loop.create_task(run_tunnel(self._relay_url, board_id, server.port, tunnel_stop))
+            except Exception:
+                pass
+
         # connect_host 는 start() 안에서 UPnP 후 채워진다(실패 시 None)
         self.ready.emit(server.port, server.connect_host or "")
         try:
             loop.run_until_complete(self._stop_event.wait())
         finally:
+            tunnel_stop.set()
             try:
                 loop.run_until_complete(server.stop())
             except Exception:

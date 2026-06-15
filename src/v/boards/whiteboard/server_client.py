@@ -122,11 +122,11 @@ class ServerClient(QObject):
         return self._applying_remote
 
     def connect_to_server(self, host: str, port: int, username: str, password: str,
-                          secure: bool = False, merri: bool = False):
+                          secure: bool = False, merri: bool = False, ws_url: str = ""):
         """서버에 WebSocket 연결을 시작하고 인증 스레드를 구성한다.
 
         secure=True 또는 host 에 wss:// 스킴이 있으면 TLS(wss) 로 접속한다.
-        (Cloudflare 터널 등 공개 wss 주소 지원)
+        ws_url 이 주어지면 그 URL 로 직접 접속한다(릴레이 /relay/c 등).
         """
         if not HAS_WEBSOCKET:
             self.auth_fail.emit("websocket-client not installed (pip install websocket-client)")
@@ -137,8 +137,9 @@ class ServerClient(QObject):
             self._ws_thread.wait(2000)
 
         self._username = username
-        url = compose_ws_url(host, port, secure)
+        url = ws_url or compose_ws_url(host, port, secure)
         # 첨부 HTTP 베이스: ws://host:port/ws -> http://host:port
+        # (릴레이 경유 시 첨부 HTTP 는 터널 안 됨 — 보드 구조는 동기화, 이미지는 제한)
         self._http_base = (url.replace("wss://", "https://")
                               .replace("ws://", "http://")).rsplit("/ws", 1)[0]
 

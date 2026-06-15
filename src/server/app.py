@@ -69,12 +69,18 @@ class QonvoServer:
         self.presence = PresenceRegistry()
         self._merri_user_cache: dict = {}   # merri token -> (username, expires)
 
+        from .relay import RelayHub
+        self.relay = RelayHub()
+
         self._app.router.add_get("/", self._health)
         self._app.router.add_get("/ws", self.ws_handler)
         self._app.router.add_get("/boards", self._boards_meta)   # 보드 목록 + 노드수
         # qonvo 전용 presence — 앱 켜짐/작업중 하트비트
         self._app.router.add_post("/presence", self._presence_beat)
         self._app.router.add_get("/presence/list", self._presence_list)
+        # 릴레이 — 잠긴 망 호스트도 외부 접속 받게(스팀 SDR 식). 보드는 호스트에 그대로
+        self._app.router.add_get("/relay/host", self.relay.host_handler)
+        self._app.router.add_get("/relay/c", self.relay.join_handler)
         # 첨부(이미지 등) HTTP 전송 — 서버모드에서 보드 이미지를 받고/올림
         self._app.router.add_get("/board/{bid}/manifest", self._attach_manifest)
         self._app.router.add_get("/board/{bid}/attach/{name}", self._attach_get)
