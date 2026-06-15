@@ -173,9 +173,13 @@ class WhiteboardView(QGraphicsView):
         self._notify_viewport_changed()
 
     def _notify_viewport_changed(self):
-        """뷰포트 변경 시 lazy loader에 알림."""
+        """뷰포트 변경(줌/팬) 시 lazy loader + 라이브 커서 오버레이 갱신."""
         if self.plugin and hasattr(self.plugin, '_lazy_mgr'):
             self.plugin._lazy_mgr.schedule_check()
+        # 줌/팬 해도 원격 커서가 정확한 scene 위치를 따라오게(안 그러면 옛 픽셀에 얼어붙음)
+        cl = getattr(self, '_cursor_layer', None)
+        if cl is not None:
+            cl.update()
 
     def wheelEvent(self, event: QWheelEvent):
         if self.radial_menu:
