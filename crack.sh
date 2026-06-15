@@ -13,6 +13,7 @@ set -e
 
 python3 -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --distpath . \
     --add-data "icon.ico:." \
+    --add-data "icon.png:." \
     --add-data "lang:lang" \
     --add-data "build.toml:." \
     --add-data "plugins:plugins" \
@@ -49,3 +50,23 @@ python3 -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --distpath
 echo
 echo "빌드 완료 → ./qonvo  (실행: ./qonvo)"
 echo "Qt 오류(xcb) 나면:  sudo apt install -y libxcb-cursor0 libxcb-xinerama0"
+
+# --- 독/메뉴 아이콘용 .desktop 설치 (GNOME 등) ---
+# 리눅스는 실행파일에 아이콘이 안 박힘 → .desktop 으로 등록해야 독에 아이콘이 뜬다.
+BIN="$(pwd)/qonvo"
+ICON_DEST="$HOME/.local/share/icons/qonvo.png"
+DESK_DEST="$HOME/.local/share/applications/qonvo.desktop"
+mkdir -p "$(dirname "$ICON_DEST")" "$(dirname "$DESK_DEST")"
+cp -f icon.png "$ICON_DEST" 2>/dev/null || true
+cat > "$DESK_DEST" <<DESK
+[Desktop Entry]
+Type=Application
+Name=Qonvo
+Exec=$BIN
+Icon=$ICON_DEST
+Terminal=false
+Categories=Graphics;Utility;
+StartupWMClass=qonvo
+DESK
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+echo "아이콘 등록됨: $DESK_DEST  (독에 안 뜨면 로그아웃/재로그인)"

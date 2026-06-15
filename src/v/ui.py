@@ -1622,13 +1622,19 @@ def run_app(app: App):
     qapp = QApplication(sys.argv)
     qapp.setStyle("Fusion")
 
-    # 아이콘 설정
-    if getattr(sys, 'frozen', False):
-        icon_path = Path(sys._MEIPASS) / 'icon.ico'
-    else:
-        icon_path = Path(__file__).parent.parent.parent / 'icon.ico'
-    if icon_path.exists():
-        qapp.setWindowIcon(QIcon(str(icon_path)))
+    # 아이콘 설정 — 리눅스/GNOME 호환 위해 PNG 우선(.ico 폴백)
+    base = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) \
+        else Path(__file__).parent.parent.parent
+    for _name in ('icon.png', 'icon.ico'):
+        _p = base / _name
+        if _p.exists():
+            qapp.setWindowIcon(QIcon(str(_p)))
+            break
+    # GNOME 등에서 독/작업표시줄 아이콘을 .desktop 으로 매칭하게 함
+    try:
+        qapp.setDesktopFileName("qonvo")
+    except Exception:
+        pass
 
     # 다크 테마
     from PyQt6.QtGui import QPalette
