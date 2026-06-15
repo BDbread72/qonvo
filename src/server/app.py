@@ -264,6 +264,8 @@ class QonvoServer:
             sess.cursor = data.get("cursor")  # {x,y} 또는 None
         if "select" in data:
             sess.select = data.get("select")  # {x,y,w,h} 또는 None
+        if "state" in data:
+            sess.state = str(data.get("state") or "")[:16]  # menu/typing/away
         if sess.board_id:
             await self._broadcast_presence(sess.board_id)
 

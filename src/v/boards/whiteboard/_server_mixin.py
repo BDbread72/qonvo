@@ -82,10 +82,13 @@ class ServerMixin:
             self.view._cursor_layer = None
         self._server_client = None
 
-    def report_cursor(self, scene_x: float, scene_y: float):
-        """뷰의 마우스 이동을 서버에 커서 위치로 보고한다(서버모드일 때)."""
+    def report_cursor(self, scene_x: float, scene_y: float, state: str = ""):
+        """뷰의 마우스 이동을 서버에 커서 위치+상태로 보고한다(서버모드일 때).
+
+        state: ""(보통) / "menu"(방사형메뉴) / "typing"(입력중) / "away"(앱 비활성).
+        """
         if self._server_client and self._server_client.is_connected:
-            self._server_client.update_cursor(scene_x, scene_y)
+            self._server_client.update_cursor(scene_x, scene_y, state)
         if getattr(self, '_cursor_layer', None) is not None:
             self._cursor_layer.set_self(scene_x, scene_y)  # 내 말풍선 위치용
 

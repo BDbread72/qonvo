@@ -91,6 +91,7 @@ class ServerClient(QObject):
         self._ping_ms = 0
         self._last_cursor = None
         self._last_select = None
+        self._last_state = ""
         self._last_cursor_sent = 0.0
         self._ping_timer = QTimer(self)
         self._ping_timer.setInterval(2000)
@@ -275,24 +276,28 @@ class ServerClient(QObject):
         except Exception:
             return
         self.ping_updated.emit(self._ping_ms)
-        # 내 핑(+커서/선택)을 서버에 보고 → 다른 사람 목록에 반영
+        # 내 핑(+커서/선택/상태)을 서버에 보고 → 다른 사람 목록에 반영
         self._send({"type": "presence", "ping": self._ping_ms,
-                    "cursor": self._last_cursor, "select": self._last_select})
+                    "cursor": self._last_cursor, "select": self._last_select,
+                    "state": self._last_state})
 
-    def update_cursor(self, x: float, y: float):
-        """라이브 커서 위치 보고(초당 ~12회로 throttle)."""
+    def update_cursor(self, x: float, y: float, state: str = ""):
+        """라이브 커서 위치+상태 보고(초당 ~12회로 throttle)."""
         self._last_cursor = {"x": round(x, 1), "y": round(y, 1)}
+        changed_state = (state != self._last_state)
+        self._last_state = state
         now = time.time()
-        if now - self._last_cursor_sent >= 0.08:
+        if changed_state or now - self._last_cursor_sent >= 0.08:
             self._last_cursor_sent = now
             self._send({"type": "presence", "ping": self._ping_ms,
-                        "cursor": self._last_cursor, "select": self._last_select})
+                        "cursor": self._last_cursor, "select": self._last_select,
+                        "state": self._last_state})
 
     def update_selection(self, sel):
         """영역 선택 사각형 보고({x,y,w,h} 또는 None). 즉시 1회 전송."""
         self._last_select = sel
         self._send({"type": "presence", "ping": self._ping_ms,
-                    "cursor": self._last_cursor, "select": sel})
+                    "cursor": self._last_cursor, "select": sel, "state": self._last_state})
 
     def send_chat(self, text: str):
         if text.strip():

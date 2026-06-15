@@ -606,6 +606,7 @@ class PeopleWindow(QDialog):
         self._cur_channel = ""
         self._thread_root = ""        # 스레드 뷰 중이면 루트 post id
         self._unread: set = set()     # 안 읽은 DM 의 상대 user_id
+        self._my_invite_posts: dict = {}   # board_id -> [내가 보낸 초대카드 post_id]
         self._jobs: set = set()
         self._socket: Optional[MerriSocket] = None
         self._build_ui()
@@ -1040,9 +1041,14 @@ class PeopleWindow(QDialog):
         return card
 
     def _on_stop_hosting(self):
+        # 닫기 전에 어떤 보드를 호스팅 중이었는지 파악(초대 카드 갱신용)
+        link = self._host_status() if self._host_status else None
+        board_id = link.split("@", 1)[0] if link else ""
         if self._invite_stopper:
             self._invite_stopper()
-        # 카드 상태 갱신(종료됨 표시)
+        # 보낸 초대 카드들을 '종료됨'으로 메시지 수정
+        if board_id:
+            self._close_invite_posts(board_id)
         self._rendered_ids = None
         self._render()
 
@@ -1286,8 +1292,26 @@ class PeopleWindow(QDialog):
                 "thumb_url": "https://placehold.co/120x120/5865f2/ffffff/png?text=qonvo",
             }],
         }
-        self._run(lambda: self._client.create_post(ch, "", props=props),
-                  lambda _p: (self.__setattr__("_rendered_ids", None), self._load_posts()))
+        def _sent(p):
+            self._rendered_ids = None
+            if isinstance(p, dict) and p.get("id"):
+                self._my_invite_posts.setdefault(board_id, []).append(p["id"])
+            self._load_posts()
+        self._run(lambda: self._client.create_post(ch, "", props=props), _sent)
+
+    def _close_invite_posts(self, board_id: str):
+        """그 보드의 내가 보낸 초대 카드들을 '종료됨'으로 갱신(메시지 수정)."""
+        posts = self._my_invite_posts.pop(board_id, [])
+        if not posts or self._client is None:
+            return
+        cli = self._client
+        closed = {"qonvo_spec": "", "qonvo_invite": "", "attachments": [{
+            "color": "#747f8d", "author_name": "qonvo",
+            "title": "qonvo 보드 초대 (종료됨)",
+            "text": "이 초대는 종료되었어요."}]}
+        for pid in posts:
+            self._run(lambda p=pid: cli.update_post(p, props=closed), lambda _r: None)
+        QTimer.singleShot(900, lambda: (self.__setattr__("_rendered_ids", None), self._load_posts()))
 
     def closeEvent(self, a0):
         self._poll.stop()

@@ -71,6 +71,15 @@ class WhiteboardView(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)  # 마우스 이동 항상 추적
         self.setAcceptDrops(True)  # 외부 파일 드래그 앤 드롭
+        self._last_report_pos = None   # 라이브 커서 마지막 보고 위치(상태만 바뀔 때 재사용)
+        # 앱 비활성(다른 창으로 alt-tab) → 커서 'away' 표시
+        try:
+            from PyQt6.QtWidgets import QApplication
+            _qa = QApplication.instance()
+            if _qa is not None:
+                _qa.applicationStateChanged.connect(lambda *_: self._report_cursor_state())
+        except Exception:
+            pass
 
         # 브랜치 그래프(미니맵) — 제거됨(미사용). 참조부는 hasattr 가드로 안전 무시
         # self._branch_graph = BranchGraphWidget(self)
@@ -605,13 +614,45 @@ class WhiteboardView(QGraphicsView):
         else:
             super().mousePressEvent(event)
 
+    def _cursor_state(self) -> str:
+        """라이브 커서 상태표시용: menu(방사형메뉴)/typing(입력중)/away(앱 비활성)."""
+        from PyQt6.QtWidgets import QApplication
+        if self.radial_menu:
+            return "menu"
+        ci = getattr(self, "_chat_input", None)
+        if self._has_focused_input() or (ci is not None and ci.isVisible()):
+            return "typing"
+        try:
+            if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive:
+                return "away"
+        except Exception:
+            pass
+        return ""
+
+    def _report_cursor_state(self):
+        """위치 변화 없이 상태만 바뀐 경우(메뉴 열림/입력/포커스) 마지막 위치로 재보고."""
+        if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
+                and hasattr(self.plugin, 'report_cursor')):
+            p = getattr(self, "_last_report_pos", None)
+            if p is not None:
+                try:
+                    self.plugin.report_cursor(p[0], p[1], self._cursor_state())
+                except Exception:
+                    pass
+
     def mouseMoveEvent(self, event: QMouseEvent):
         # 라이브 커서: 서버모드면 보드 좌표를 서버에 보고(전송 throttle 은 클라가 처리)
         if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
                 and hasattr(self.plugin, 'report_cursor')):
             try:
-                sp = self.mapToScene(event.pos())
-                self.plugin.report_cursor(sp.x(), sp.y())
+                # 방사형 메뉴 중엔 워프된 중앙이 아니라 원래 위치를 보낸다(남들 눈에 안 튀게)
+                if self.radial_menu and getattr(self, '_original_scene_pos', None) is not None:
+                    sx, sy = self._original_scene_pos.x(), self._original_scene_pos.y()
+                else:
+                    sp = self.mapToScene(event.pos())
+                    sx, sy = sp.x(), sp.y()
+                    self._last_report_pos = (sx, sy)
+                self.plugin.report_cursor(sx, sy, self._cursor_state())
             except Exception:
                 pass
 
@@ -707,6 +748,7 @@ class WhiteboardView(QGraphicsView):
         self._chat_input.show()
         self._chat_input.raise_()
         self._chat_input.setFocus()
+        self._report_cursor_state()   # 입력 중 표시
 
     def _send_chat_input(self):
         ci = getattr(self, '_chat_input', None)
@@ -715,6 +757,7 @@ class WhiteboardView(QGraphicsView):
         text = ci.text().strip()
         ci.hide()
         self.setFocus()
+        self._report_cursor_state()   # 입력 종료
         if text and self.plugin is not None and hasattr(self.plugin, 'send_chat_message'):
             self.plugin.send_chat_message(text)
 
@@ -724,9 +767,11 @@ class WhiteboardView(QGraphicsView):
             if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
                 self._chat_input.hide()
                 self.setFocus()
+                self._report_cursor_state()
                 return True
             if event.type() == QEvent.Type.FocusOut:
                 self._chat_input.hide()
+                self._report_cursor_state()
         return super().eventFilter(obj, event)
 
     def drawForeground(self, painter: QPainter, rect: QRectF):

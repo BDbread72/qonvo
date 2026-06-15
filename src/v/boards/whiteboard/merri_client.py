@@ -131,6 +131,15 @@ class MerriClient:
             body["root_id"] = root_id   # 답글(스레드)
         return self._req("POST", "/posts", body)
 
+    def update_post(self, post_id: str, message=None, props=None) -> dict:
+        """기존 메시지 수정(초대 카드 '종료됨' 갱신 등). PUT /posts/{id}/patch."""
+        body = {}
+        if message is not None:
+            body["message"] = message
+        if props is not None:
+            body["props"] = props
+        return self._req("PUT", f"/posts/{post_id}/patch", body)
+
     # ---- 반응(이모지) --------------------------------------------------
     def add_reaction(self, user_id: str, post_id: str, emoji_name: str) -> dict:
         return self._req("POST", "/reactions", {

@@ -23,6 +23,7 @@ _EASE = 0.35
 _SETTLE = 0.4
 _BUBBLE_TTL = 6.0
 _BUBBLE_FADE = 1.8
+_STATE_LABEL = {"menu": "≡ 메뉴", "typing": "⌨ 입력 중", "away": "💤 자리비움"}
 
 
 class CursorLayer(QWidget):
@@ -83,14 +84,16 @@ class CursorLayer(QWidget):
                 continue
             seen.add(name)
             sel = u.get("select")
+            st = u.get("state", "")
             c = self._cursors.get(name)
             if c is None:
                 self._cursors[name] = {"name": name, "color": QColor(u.get("color", "#888")),
-                                       "cur": [tx, ty], "tgt": [tx, ty], "select": sel}
+                                       "cur": [tx, ty], "tgt": [tx, ty], "select": sel, "state": st}
             else:
                 c["tgt"] = [tx, ty]
                 c["color"] = QColor(u.get("color", "#888"))
                 c["select"] = sel
+                c["state"] = st
         for name in list(self._cursors.keys()):
             if name not in seen:
                 del self._cursors[name]
@@ -162,17 +165,19 @@ class CursorLayer(QWidget):
             p.setPen(QColor(255, 255, 255, 230))
             p.setBrush(color)
             p.drawPolygon(_ARROW)
-            name = c["name"]
-            lw = fm.horizontalAdvance(name) + 12
+            st = _STATE_LABEL.get(c.get("state", ""), "")
+            label = f"{c['name']}  {st}" if st else c["name"]
+            lw = fm.horizontalAdvance(label) + 12
             lh = fm.height() + 4
             path = QPainterPath()
             path.addRoundedRect(QRectF(14, 14, lw, lh), 5, 5)
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(color)
+            # away 면 라벨을 흐리게(자리비움 느낌)
+            p.setBrush(QColor("#555a64") if c.get("state") == "away" else color)
             p.drawPath(path)
             p.setPen(QColor("#ffffff"))
             p.drawText(QRectF(20, 14, lw - 12, lh),
-                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, name)
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
             p.restore()
         p.end()
 

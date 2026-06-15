@@ -29,6 +29,7 @@ class Session:
         self.ping: int = 0            # 클라가 보고한 서버까지 RTT(ms)
         self.cursor: Optional[dict] = None   # {x, y} 보드 좌표 (라이브 커서)
         self.select: Optional[dict] = None   # {x,y,w,h} 영역 선택 사각형
+        self.state: str = ""          # "" / menu / typing / away (커서 상태표시)
         self.color: str = ""          # 커서/이름표 색
 
     async def send(self, msg: Dict[str, Any]) -> None:
@@ -74,7 +75,7 @@ class Registry:
             if not s.authed:
                 continue
             out.append({"user": s.username, "level": s.level, "ping": s.ping,
-                        "cursor": s.cursor, "select": s.select,
+                        "cursor": s.cursor, "select": s.select, "state": s.state,
                         "color": s.color, "sid": s.id})
         out.sort(key=lambda d: d["user"].lower())
         return out

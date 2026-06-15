@@ -1196,16 +1196,14 @@ class MainWindow(QMainWindow):
         self._host_current_board()   # 끝나면 _on_host_ready/_failed 가 cb(spec) 발화
 
     def _join_invite_link(self, link: str):
-        """(구) 초대 링크 문자열로 접속. 현재는 _join_invite_spec 사용."""
+        """초대 링크 문자열 → spec 으로 변환해 접속(직접+릴레이 폴백)."""
         from v.boards.whiteboard.invite import parse_invite
-        from v.boards.whiteboard import profile as _profile
         inv = parse_invite(link or "")
         if not inv or not inv.board_id:
             QMessageBox.warning(self, "참여", "올바른 초대 링크가 아닙니다."); return
-        prof = _profile.get_profile()
-        name = (prof["username"] if prof else "") or "guest"
-        self._connect_and_join(inv.host, inv.port, name, "",
-                               inv.board_id, secure=inv.secure, merri=False)
+        spec = {"board_id": inv.board_id, "primary": link, "relay": self._relay_ws_base(),
+                "hosts": [{"host": inv.host, "port": inv.port, "secure": inv.secure}]}
+        self._join_invite_spec(spec)
 
     def _add_image_to_board(self, qimage):
         """People DM 이미지를 현재 보드에 이미지카드로 추가한다(보드↔DM 브릿지)."""
