@@ -412,6 +412,36 @@ class WhiteBoardPlugin(
     def _mark_node_dirty(self, node_id):
         self._dirty_node_ids.add(node_id)
         self._notify_modified()
+        # 서버모드: 텍스트/속성 편집을 다른 멤버에게 동기화(원격 op 적용 중에는 제외)
+        if getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False):
+            self._schedule_prop_sync(node_id)
+
+    def _schedule_prop_sync(self, node_id):
+        """노드 속성 변경을 디바운스해 node_prop op 로 전송(연타 합침)."""
+        if not hasattr(self, '_prop_sync_pending'):
+            self._prop_sync_pending = set()
+            self._prop_sync_timer = None
+        self._prop_sync_pending.add(node_id)
+        if self._prop_sync_timer is None:
+            from PyQt6.QtCore import QTimer
+            self._prop_sync_timer = QTimer(self.view if self.view is not None else None)
+            self._prop_sync_timer.setSingleShot(True)
+            self._prop_sync_timer.setInterval(300)
+            self._prop_sync_timer.timeout.connect(self._flush_prop_sync)
+        self._prop_sync_timer.start()
+
+    def _flush_prop_sync(self):
+        if not getattr(self, 'server_mode', False):
+            return
+        for nid in list(getattr(self, '_prop_sync_pending', ())):
+            node = self.app.nodes.get(nid)
+            # apply_sync_data 가 있는(=제자리 갱신 가능한) 텍스트성 노드만 전송
+            if node is not None and hasattr(node, 'apply_sync_data') and hasattr(node, 'get_data'):
+                try:
+                    self._send_op("node_prop", nid, {"data": node.get_data()})
+                except Exception:
+                    pass
+        self._prop_sync_pending.clear()
 
     def _notify_modified(self):
         if self._batch_loading:

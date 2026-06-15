@@ -439,6 +439,16 @@ class ServerMixin:
         node = self.app.nodes.get(node_id)
         if node is None:
             return
+        # 신규: 전체 노드 데이터를 제자리 적용(텍스트/제목/색상 등 위젯 갱신)
+        full = data.get("data")
+        if isinstance(full, dict):
+            if hasattr(node, "apply_sync_data"):
+                try:
+                    node.apply_sync_data(full)
+                except Exception:
+                    pass
+            return
+        # 레거시: 단일 key/value
         key = data.get("key", "")
         value = data.get("value")
         if key and hasattr(node, key):

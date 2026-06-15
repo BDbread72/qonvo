@@ -178,3 +178,31 @@ class StickyNoteWidget(QWidget, BaseNode):
             "body": self.body_edit.toPlainText(),
             "color": self.color,
         }
+
+    def apply_sync_data(self, data):
+        """원격 편집을 제자리 반영(시그널 차단 → 에코 방지)."""
+        title = data.get("title", "")
+        if self.title_edit.text() != title:
+            self.title_edit.blockSignals(True)
+            self.title_edit.setText(title)
+            self.title_edit.blockSignals(False)
+        body = data.get("body", "")
+        if self.body_edit.toPlainText() != body:
+            self.body_edit.blockSignals(True)
+            self.body_edit.setPlainText(body)
+            self.body_edit.blockSignals(False)
+        color = data.get("color")
+        if color and color != self.color and color in STICKY_COLORS:
+            self.color = color
+            self._apply_style()
+            self.header.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {STICKY_COLORS[color][1]}22;
+                    border: none; border-bottom: 1px solid {STICKY_COLORS[color][1]}44;
+                    border-top-left-radius: 6px; border-top-right-radius: 6px;
+                }}
+            """)
+            self._update_palette_btn()
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self.width() != w or self.height() != h):
+            self.resize(int(w), int(h))

@@ -264,9 +264,16 @@ class Board:
                 n["y"] = data.get("y", n.get("y", 0))
         elif t == "node_prop":
             n = self._find_node(target)
-            key = data.get("key")
-            if n is not None and key:
-                n[key] = data.get("value")
+            if n is not None:
+                full = data.get("data")
+                if isinstance(full, dict):
+                    # 전체 노드 데이터 머지(텍스트/제목/색상/크기 등) — 늦은 합류·영속용
+                    for k, v in full.items():
+                        n[k] = v
+                else:
+                    key = data.get("key")
+                    if key:
+                        n[key] = data.get("value")
         elif t == "edge_add":
             edges = self._list_of("edges")
             if not _edge_exists(edges, data):

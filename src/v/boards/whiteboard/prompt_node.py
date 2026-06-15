@@ -277,3 +277,41 @@ class PromptNodeWidget(QWidget, BaseNode):
             "enabled": self._prompt_enabled,  # 활성 상태
             "priority": self.priority_spin.value(),  # 우선순위
         }
+
+    def apply_sync_data(self, data):
+        """원격 편집을 제자리 반영(시그널 차단 → 에코 방지)."""
+        title = data.get("title", "")
+        if self.title_edit.text() != title:
+            self.title_edit.blockSignals(True)
+            self.title_edit.setText(title)
+            self.title_edit.blockSignals(False)
+        body = data.get("body", "")
+        if self.body_edit.toPlainText() != body:
+            self.body_edit.blockSignals(True)
+            self.body_edit.setPlainText(body)
+            self.body_edit.blockSignals(False)
+            self._update_token_count()
+        role = data.get("role")
+        if role is not None:
+            idx = self.role_combo.findData(role)
+            if idx >= 0 and idx != self.role_combo.currentIndex():
+                self.role_combo.blockSignals(True)
+                self.role_combo.setCurrentIndex(idx)
+                self.role_combo.blockSignals(False)
+                self.badge.setText(_ROLE_BADGE.get(role, "SP"))
+        enabled = bool(data.get("enabled", True))
+        if enabled != self._prompt_enabled:
+            self._prompt_enabled = enabled
+            self.btn_enable.blockSignals(True)
+            self.btn_enable.setChecked(enabled)
+            self.btn_enable.blockSignals(False)
+            self.btn_enable.setText("ON" if enabled else "OFF")
+            self._apply_enabled_visual()
+        priority = data.get("priority")
+        if priority is not None and priority != self.priority_spin.value():
+            self.priority_spin.blockSignals(True)
+            self.priority_spin.setValue(int(priority))
+            self.priority_spin.blockSignals(False)
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self.width() != w or self.height() != h):
+            self.resize(int(w), int(h))

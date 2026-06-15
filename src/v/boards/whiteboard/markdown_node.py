@@ -172,3 +172,18 @@ class MarkdownNodeWidget(QWidget, BaseNode):
             "markdown": self._raw_md,
             "preview_mode": self._preview_mode,
         }
+
+    def apply_sync_data(self, data):
+        """원격 편집을 제자리 반영(현재 보기 모드 유지, 시그널 차단)."""
+        md = data.get("markdown")
+        if md is not None and md != self._raw_md:
+            self._raw_md = md
+            self.text_area.blockSignals(True)
+            if self._preview_mode:
+                self.text_area.setMarkdown(md)
+            else:
+                self.text_area.setPlainText(md)
+            self.text_area.blockSignals(False)
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self.width() != w or self.height() != h):
+            self.resize(int(w), int(h))
