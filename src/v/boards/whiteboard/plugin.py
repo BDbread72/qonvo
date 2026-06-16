@@ -417,7 +417,8 @@ class WhiteBoardPlugin(
             self._schedule_prop_sync(node_id)
 
     def _schedule_prop_sync(self, node_id):
-        """노드 속성 변경을 디바운스해 node_prop op 로 전송(연타 합침)."""
+        """노드 속성 변경을 throttle 로 전송(최대 ~10/s). 디바운스가 아니라 throttle 이라
+        편집 중에도 주기적으로 흘러나가 '늦게 반영되는' 느낌이 없다(첫 변경은 ~100ms 내)."""
         if not hasattr(self, '_prop_sync_pending'):
             self._prop_sync_pending = set()
             self._prop_sync_timer = None
@@ -426,9 +427,11 @@ class WhiteBoardPlugin(
             from PyQt6.QtCore import QTimer
             self._prop_sync_timer = QTimer(self.view if self.view is not None else None)
             self._prop_sync_timer.setSingleShot(True)
-            self._prop_sync_timer.setInterval(300)
+            self._prop_sync_timer.setInterval(100)
             self._prop_sync_timer.timeout.connect(self._flush_prop_sync)
-        self._prop_sync_timer.start()
+        # 이미 대기 중이면 재시작하지 않음 → 연속 편집 시 100ms 마다 계속 흘려보냄(throttle)
+        if not self._prop_sync_timer.isActive():
+            self._prop_sync_timer.start()
 
     # 자체 동기화 경로가 따로 있는 타입은 prop 동기화에서 제외:
     #   image_cards(첨부) / dimensions(서브보드). 채팅(nodes)은 sync_props 로 크기/옵션만 동기화

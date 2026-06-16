@@ -689,6 +689,9 @@ class ResizeHandle(QFrame):
                 proxy.prepareGeometryChange()
             if hasattr(self.parent_widget, 'reposition_ports'):
                 self.parent_widget.reposition_ports()
+            # 드래그 중에도 크기 변경을 동기화(전송은 prop_sync throttle 이 제어) → 상대 실시간 반영
+            if hasattr(self.parent_widget, 'on_modified') and self.parent_widget.on_modified:
+                self.parent_widget.on_modified()
             event.accept()
 
     def mouseReleaseEvent(self, event):
