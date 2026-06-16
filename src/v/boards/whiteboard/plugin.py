@@ -455,6 +455,18 @@ class WhiteBoardPlugin(
                     data = w.sync_props()
                 else:
                     continue
+            # dedupe: 동기화 대상 필드가 안 바뀌었으면 전송 생략(예: 채팅 입력만 타이핑한 경우)
+            try:
+                import json as _json
+                key = _json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
+            except Exception:
+                key = None
+            if key is not None:
+                if not hasattr(self, '_last_prop_sent'):
+                    self._last_prop_sent = {}
+                if self._last_prop_sent.get(nid) == key:
+                    continue
+                self._last_prop_sent[nid] = key
             try:
                 # 전체 노드 데이터 전송 → 수신측은 apply_sync_data(제자리) 또는 재생성(범용)
                 self._send_op("node_prop", nid, {"data": data})

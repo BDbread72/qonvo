@@ -167,60 +167,9 @@ class MaterializationMixin:
         if proxy is None:
             return
         node = proxy.widget()
-        if row.get("width") and row.get("height"):
-            node.resize(int(row["width"]), int(row["height"]))
-        node.user_message = row.get("user_message")
-        node.user_files = row.get("user_files", [])
-        node.ai_response = row.get("ai_response")
-        saved_model = row.get("model", "")
-        if saved_model:
-            idx = node.model_combo.findData(saved_model)
-            if idx >= 0:
-                node.model_combo.setCurrentIndex(idx)
-        saved_opts = row.get("node_options", {})
-        if saved_opts:
-            node.node_options = saved_opts
-            if "aspect_ratio" in saved_opts:
-                idx = node.ratio_combo.findText(saved_opts["aspect_ratio"])
-                if idx >= 0:
-                    node.ratio_combo.setCurrentIndex(idx)
-            if "image_size" in saved_opts:
-                idx = node.size_combo.findText(saved_opts["image_size"])
-                if idx >= 0:
-                    node.size_combo.setCurrentIndex(idx)
-            if "image_quality" in saved_opts:
-                idx = node.quality_combo.findText(saved_opts["image_quality"])
-                if idx >= 0:
-                    node.quality_combo.setCurrentIndex(idx)
-            if "background" in saved_opts:
-                idx = node.bg_combo.findText(saved_opts["background"])
-                if idx >= 0:
-                    node.bg_combo.setCurrentIndex(idx)
-            if "temperature" in saved_opts:
-                node.temp_spin.setValue(saved_opts["temperature"])
-            if "top_p" in saved_opts:
-                node.top_p_spin.setValue(saved_opts["top_p"])
-            if "max_output_tokens" in saved_opts:
-                node.max_tokens_spin.setValue(saved_opts["max_output_tokens"])
-            if "google_search" in saved_opts:
-                node.chk_google_search.setChecked(saved_opts["google_search"])
-            if "image_search" in saved_opts:
-                node.chk_image_search.setChecked(saved_opts["image_search"])
-        node.pinned = row.get("pinned", False)
-        node.btn_pin.setChecked(node.pinned)
-        node.ai_image_paths = row.get("ai_image_paths", [])
-        node.thought_signatures = row.get("thought_signatures", [])
-        node.tokens_in = row.get("tokens_in", 0)
-        node.tokens_out = row.get("tokens_out", 0)
-        node.notify_on_complete = row.get("notify_on_complete", False)
-        node.btn_notify.setChecked(node.notify_on_complete)
-        node.preferred_options_enabled = row.get("preferred_options_enabled", False)
-        node.preferred_options_count = row.get("preferred_options_count", 3)
-        node.btn_pref_toggle.setChecked(node.preferred_options_enabled)
-        node.pref_count_spin.setValue(node.preferred_options_count)
-        node.pref_count_spin.setEnabled(node.preferred_options_enabled)
-        if row.get("opts_panel_visible", False):
-            node.btn_opts_toggle.setChecked(True)
+        # 위젯 필드(크기/옵션/내용/히스토리) 복원 — sync(apply_sync_data)와 동일 코드(단일 진실원)
+        node.restore_state(row)
+        # 플러그인 레벨(포트 토폴로지/콜백)은 여기서:
         node.on_toggle_meta = self._toggle_meta_ports
         if row.get("meta_ports_enabled", False):
             node.meta_ports_enabled = True
@@ -229,19 +178,6 @@ class MaterializationMixin:
         for port_def in row.get("extra_input_defs", []):
             self._add_chat_input_port(node, port_def["type"], port_def.get("name"))
 
-        node._history = row.get("history", [])
-        if not node._history and row.get("ai_response"):
-            node._history = [{
-                "user": row.get("user_message", ""),
-                "files": row.get("user_files", []),
-                "response": row.get("ai_response", ""),
-                "images": row.get("ai_image_paths", []),
-                "tokens_in": row.get("tokens_in", 0),
-                "tokens_out": row.get("tokens_out", 0),
-                "model": row.get("model", ""),
-            }]
-        node._archive_path = row.get("archive_path")
-        node._archived_count = row.get("archived_count", 0)
         if node._history:
             last = node._history[-1]
             candidates = last.get("preferred_candidates", [])

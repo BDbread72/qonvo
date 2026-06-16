@@ -1806,35 +1806,49 @@ class ChatNodeWidget(QWidget, BaseNode):
             d["archived_count"] = self._archived_count
         return d
 
+    # 동기화에서 제외할 키: 내용/히스토리(=chat_append·AI 경로) + 포트 토폴로지(구조)
+    _SYNC_EXCLUDE_KEYS = {
+        "user_message", "user_files", "ai_response", "ai_image_paths",
+        "thought_signatures", "history", "sent", "tokens_in", "tokens_out",
+        "archive_path", "archived_count", "extra_input_defs", "meta_ports_enabled",
+    }
+
     def sync_props(self) -> dict:
-        """서버모드 동기화용 — 크기/옵션만(내용·히스토리 제외; 그건 chat_append/AI 경로로 동기화)."""
-        return {
-            "type": "chat_node", "id": self.node_id,
-            "width": self.width(), "height": self.height(),
-            "model": self.model_combo.currentData(),
-            "node_options": self.node_options,
-            "pinned": self.pinned,
-            "notify_on_complete": self.notify_on_complete,
-            "preferred_options_enabled": self.preferred_options_enabled,
-            "preferred_options_count": self.preferred_options_count,
-        }
+        """서버모드 동기화용 데이터 — get_data 에서 내용/포트 키만 제외(=설정/크기 전부).
+
+        get_data 에 새 설정 필드가 추가되면 자동으로 포함된다(따로 손볼 필요 없음).
+        """
+        return {k: v for k, v in self.get_data().items()
+                if k not in self._SYNC_EXCLUDE_KEYS}
 
     def apply_sync_data(self, data: dict):
-        """원격 크기/옵션 변경을 제자리 반영(_materialize_chat_node 의 옵션 복원과 동일).
+        """원격 변경을 제자리 반영. load 와 동일한 restore_state 를 재사용(단일 진실원).
 
-        시그널은 막지 않는다 → 콤보/버튼 시각이 갱신되게. op 에코는 _applying_remote_op 가 차단.
-        내용(user_message/ai_response/history)은 건드리지 않음.
+        data 에 있는 키만 적용 → sync_props 는 내용 키를 안 보내므로 내용은 안 건드림.
+        op 에코는 _applying_remote_op 가 차단.
         """
-        w, h = data.get("width"), data.get("height")
-        if w and h and (self.width() != int(w) or self.height() != int(h)):
-            self.resize(int(w), int(h))
-        model = data.get("model")
-        if model:
-            idx = self.model_combo.findData(model)
-            if idx >= 0 and idx != self.model_combo.currentIndex():
+        self.restore_state(data)
+
+    def restore_state(self, row: dict):
+        """row 에 존재하는 위젯 필드만 복원(부분 dict 안전). load·sync 공용.
+
+        포트(meta/extra_input)·preferred 후보 콜백은 플러그인 레벨이라 여기서 다루지 않고
+        _materialize_chat_node 가 이 호출 뒤에 처리한다.
+        """
+        if row.get("width") and row.get("height"):
+            self.resize(int(row["width"]), int(row["height"]))
+        if "user_message" in row:
+            self.user_message = row["user_message"]
+        if "user_files" in row:
+            self.user_files = row.get("user_files") or []
+        if "ai_response" in row:
+            self.ai_response = row["ai_response"]
+        if row.get("model"):
+            idx = self.model_combo.findData(row["model"])
+            if idx >= 0:
                 self.model_combo.setCurrentIndex(idx)
-        opts = data.get("node_options")
-        if isinstance(opts, dict):
+        if "node_options" in row and isinstance(row["node_options"], dict):
+            opts = row["node_options"]
             self.node_options = opts
             for key, combo in (("aspect_ratio", getattr(self, 'ratio_combo', None)),
                                ("image_size", getattr(self, 'size_combo', None)),
@@ -1856,18 +1870,44 @@ class ChatNodeWidget(QWidget, BaseNode):
                              ("image_search", getattr(self, 'chk_image_search', None))):
                 if chk is not None and key in opts:
                     chk.setChecked(bool(opts[key]))
-        if "pinned" in data:
-            self.pinned = bool(data["pinned"])
+        if "pinned" in row:
+            self.pinned = bool(row["pinned"])
             self.btn_pin.setChecked(self.pinned)
-        if "notify_on_complete" in data:
-            self.notify_on_complete = bool(data["notify_on_complete"])
+        if "ai_image_paths" in row:
+            self.ai_image_paths = row.get("ai_image_paths") or []
+        if "thought_signatures" in row:
+            self.thought_signatures = row.get("thought_signatures") or []
+        if "tokens_in" in row:
+            self.tokens_in = row.get("tokens_in", 0)
+        if "tokens_out" in row:
+            self.tokens_out = row.get("tokens_out", 0)
+        if "notify_on_complete" in row:
+            self.notify_on_complete = bool(row["notify_on_complete"])
             self.btn_notify.setChecked(self.notify_on_complete)
-        if "preferred_options_enabled" in data:
-            self.preferred_options_enabled = bool(data["preferred_options_enabled"])
+        if "preferred_options_enabled" in row:
+            self.preferred_options_enabled = bool(row["preferred_options_enabled"])
             self.btn_pref_toggle.setChecked(self.preferred_options_enabled)
-        if "preferred_options_count" in data:
-            self.preferred_options_count = int(data["preferred_options_count"])
+        if "preferred_options_count" in row:
+            self.preferred_options_count = int(row["preferred_options_count"])
             self.pref_count_spin.setValue(self.preferred_options_count)
+        self.pref_count_spin.setEnabled(self.preferred_options_enabled)
+        if row.get("opts_panel_visible", False):
+            self.btn_opts_toggle.setChecked(True)
+        if "history" in row:
+            self._history = row.get("history") or []
+            if not self._history and row.get("ai_response"):
+                self._history = [{
+                    "user": row.get("user_message", ""),
+                    "files": row.get("user_files", []),
+                    "response": row.get("ai_response", ""),
+                    "images": row.get("ai_image_paths", []),
+                    "tokens_in": row.get("tokens_in", 0),
+                    "tokens_out": row.get("tokens_out", 0),
+                    "model": row.get("model", ""),
+                }]
+        if "archive_path" in row:
+            self._archive_path = row.get("archive_path")
+            self._archived_count = row.get("archived_count", 0)
 
     def cleanup_temp_files(self):
         """Clean up temp files created by this node."""
