@@ -1806,6 +1806,69 @@ class ChatNodeWidget(QWidget, BaseNode):
             d["archived_count"] = self._archived_count
         return d
 
+    def sync_props(self) -> dict:
+        """서버모드 동기화용 — 크기/옵션만(내용·히스토리 제외; 그건 chat_append/AI 경로로 동기화)."""
+        return {
+            "type": "chat_node", "id": self.node_id,
+            "width": self.width(), "height": self.height(),
+            "model": self.model_combo.currentData(),
+            "node_options": self.node_options,
+            "pinned": self.pinned,
+            "notify_on_complete": self.notify_on_complete,
+            "preferred_options_enabled": self.preferred_options_enabled,
+            "preferred_options_count": self.preferred_options_count,
+        }
+
+    def apply_sync_data(self, data: dict):
+        """원격 크기/옵션 변경을 제자리 반영(_materialize_chat_node 의 옵션 복원과 동일).
+
+        시그널은 막지 않는다 → 콤보/버튼 시각이 갱신되게. op 에코는 _applying_remote_op 가 차단.
+        내용(user_message/ai_response/history)은 건드리지 않음.
+        """
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self.width() != int(w) or self.height() != int(h)):
+            self.resize(int(w), int(h))
+        model = data.get("model")
+        if model:
+            idx = self.model_combo.findData(model)
+            if idx >= 0 and idx != self.model_combo.currentIndex():
+                self.model_combo.setCurrentIndex(idx)
+        opts = data.get("node_options")
+        if isinstance(opts, dict):
+            self.node_options = opts
+            for key, combo in (("aspect_ratio", getattr(self, 'ratio_combo', None)),
+                               ("image_size", getattr(self, 'size_combo', None)),
+                               ("image_quality", getattr(self, 'quality_combo', None)),
+                               ("background", getattr(self, 'bg_combo', None))):
+                if combo is not None and key in opts:
+                    i = combo.findText(opts[key])
+                    if i >= 0:
+                        combo.setCurrentIndex(i)
+            for key, spin in (("temperature", getattr(self, 'temp_spin', None)),
+                              ("top_p", getattr(self, 'top_p_spin', None)),
+                              ("max_output_tokens", getattr(self, 'max_tokens_spin', None))):
+                if spin is not None and key in opts:
+                    try:
+                        spin.setValue(opts[key])
+                    except Exception:
+                        pass
+            for key, chk in (("google_search", getattr(self, 'chk_google_search', None)),
+                             ("image_search", getattr(self, 'chk_image_search', None))):
+                if chk is not None and key in opts:
+                    chk.setChecked(bool(opts[key]))
+        if "pinned" in data:
+            self.pinned = bool(data["pinned"])
+            self.btn_pin.setChecked(self.pinned)
+        if "notify_on_complete" in data:
+            self.notify_on_complete = bool(data["notify_on_complete"])
+            self.btn_notify.setChecked(self.notify_on_complete)
+        if "preferred_options_enabled" in data:
+            self.preferred_options_enabled = bool(data["preferred_options_enabled"])
+            self.btn_pref_toggle.setChecked(self.preferred_options_enabled)
+        if "preferred_options_count" in data:
+            self.preferred_options_count = int(data["preferred_options_count"])
+            self.pref_count_spin.setValue(self.preferred_options_count)
+
     def cleanup_temp_files(self):
         """Clean up temp files created by this node."""
         from v.temp_file_manager import TempFileManager

@@ -1115,6 +1115,7 @@ class MainWindow(QMainWindow):
         prof = _profile.get_profile()
         self._host_username = (prof["username"] if prof else "") or "호스트"
         name = os.path.splitext(os.path.basename(self._current_filepath))[0]
+        self._host_board_name = name   # 호스팅 종료 시 이 이름으로 로컬 저장(편집 영속)
         data = self.current_plugin.collect_data()
 
         self.setWindowTitle("Qonvo — 호스팅 준비 중…")
@@ -1574,7 +1575,30 @@ class MainWindow(QMainWindow):
         if getattr(self, '_chat_dock', None) is not None:
             self._chat_dock.hide()
 
+    def _persist_host_board(self):
+        """내가 호스트였다면, 세션 중 편집된 라이브 보드를 원본 .qonvo 로 저장한다.
+
+        호스트의 plugin 은 임베드 서버와 동기화된 현재 상태를 그대로 들고 있으므로
+        collect_data() 가 최신본이다. 종료 시 _reset_to_welcome 가 보드를 폐기하기 전에
+        호출해야 편집이 유실되지 않는다(= '다시 열어보면 저장 안 됨' 버그 수정).
+        """
+        name = getattr(self, "_host_board_name", "")
+        if not name or self.current_plugin is None or not hasattr(self.current_plugin, "collect_data"):
+            return
+        try:
+            from v.board import BoardManager
+            data = self.current_plugin.collect_data()
+            BoardManager.save(name, data)   # 동기 저장(종료 중이라 블로킹 허용)
+            self.statusBar().showMessage(f"'{name}' 보드 저장됨", 4000)
+        except Exception as e:
+            QMessageBox.warning(self, "저장", f"호스팅 보드 저장 실패: {e}")
+        finally:
+            self._host_board_name = ""
+
     def _disconnect_from_server(self):
+        # 호스트면 라이브 보드를 먼저 로컬 저장(폐기 전에)
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            self._persist_host_board()
         if hasattr(self, '_server_client') and self._server_client:
             if self.current_plugin and hasattr(self.current_plugin, 'detach_server_client'):
                 self.current_plugin.detach_server_client()
@@ -1632,6 +1656,8 @@ class MainWindow(QMainWindow):
 
     def _on_server_disconnected(self, reason: str):
         from PyQt6.QtWidgets import QMessageBox
+        if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():
+            self._persist_host_board()   # 호스트면 라이브 보드 로컬 저장(폐기 전)
         if self.current_plugin and hasattr(self.current_plugin, 'detach_server_client'):
             self.current_plugin.detach_server_client()
         if getattr(self, "_embedded_host", None) and self._embedded_host.is_running():

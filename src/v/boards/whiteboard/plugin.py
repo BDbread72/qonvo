@@ -431,8 +431,8 @@ class WhiteBoardPlugin(
         self._prop_sync_timer.start()
 
     # 자체 동기화 경로가 따로 있는 타입은 prop 동기화에서 제외:
-    #   nodes(채팅=chat_append) / image_cards(첨부) / dimensions(서브보드)
-    _PROP_SYNC_EXCLUDE = {"nodes", "image_cards", "dimensions"}
+    #   image_cards(첨부) / dimensions(서브보드). 채팅(nodes)은 sync_props 로 크기/옵션만 동기화
+    _PROP_SYNC_EXCLUDE = {"image_cards", "dimensions"}
 
     def _flush_prop_sync(self):
         if not getattr(self, 'server_mode', False):
@@ -448,6 +448,13 @@ class WhiteBoardPlugin(
             category, _nid, data = res
             if category in self._PROP_SYNC_EXCLUDE:
                 continue
+            if category == "nodes":
+                # 채팅 노드는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로)
+                w = owner.widget() if hasattr(owner, 'widget') else owner
+                if hasattr(w, 'sync_props'):
+                    data = w.sync_props()
+                else:
+                    continue
             try:
                 # 전체 노드 데이터 전송 → 수신측은 apply_sync_data(제자리) 또는 재생성(범용)
                 self._send_op("node_prop", nid, {"data": data})

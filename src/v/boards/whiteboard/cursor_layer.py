@@ -102,25 +102,37 @@ class _BubbleItem(QGraphicsItem):
         self.alpha = 1.0
         self._bw = float(min(240, self._fm.horizontalAdvance(self._text)) + 18)
         self._bh = float(self._fm.height() + 10)
+        self._below = 0.0   # 이 말풍선 아래에 쌓인 말풍선들의 총 높이(스택용)
+
+    def set_below(self, below: float):
+        if below != self._below:
+            self.prepareGeometryChange()
+            self._below = below
+            self.update()
+
+    def stack_height(self) -> float:
+        return self._bh + 5   # 한 칸(말풍선 + 간격)
 
     def shape(self):
         return QPainterPath()
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-2, -self._bh - 12, self._bw + 4, self._bh + 22)
+        top = -(self._below + self._bh + 12)
+        return QRectF(-2, top, self._bw + 4, self._below + self._bh + 22)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)
         bw, bh = self._bw, self._bh
-        by = -bh - 8
+        by = -self._below - bh - 8   # 아래에 쌓인 만큼 위로 올림
         color = QColor(self._color); color.setAlphaF(0.92 * self.alpha)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(color)
         path = QPainterPath()
         path.addRoundedRect(QRectF(0, by, bw, bh), 8, 8)
         p.drawPath(path)
-        p.drawPolygon(QPolygonF([
-            QPointF(10, by + bh), QPointF(22, by + bh), QPointF(13, by + bh + 7)]))
+        if self._below <= 0.01:   # 맨 아래(커서에 가장 가까운) 말풍선만 꼬리 표시
+            p.drawPolygon(QPolygonF([
+                QPointF(10, by + bh), QPointF(22, by + bh), QPointF(13, by + bh + 7)]))
         tc = QColor("#ffffff"); tc.setAlphaF(self.alpha)
         p.setFont(_BFONT)
         p.setPen(tc)
@@ -161,15 +173,30 @@ class CursorLayer(QObject):
         else:
             c = self._cursors.get(user)
             pos = list(c["cur"]) if c else (list(self._self_pos) if self._self_pos else [0.0, 0.0])
-        old = self._bubbles.pop(user, None)
-        if old:
-            self._scene.removeItem(old["item"])
         item = _BubbleItem(text, QColor(color or "#888"))
-        item.setPos(pos[0], pos[1])
         self._scene.addItem(item)
-        self._bubbles[user] = {"t0": time.monotonic(), "item": item}
+        # 연속 입력 시 이전 말풍선이 위로 쌓이도록(교체 X) — 유저별 스택 리스트
+        lst = self._bubbles.setdefault(user, [])
+        lst.append({"t0": time.monotonic(), "item": item, "pos": pos})
+        while len(lst) > 5:   # 너무 많이 쌓이지 않게(오래된 것부터 제거)
+            old = lst.pop(0)
+            self._scene.removeItem(old["item"])
+        self._restack(user)
         if not self._timer.isActive():
             self._timer.start()
+
+    def _restack(self, user: str):
+        """유저의 말풍선들을 커서 위로 세로 스택(최신=맨 아래, 이전=위로)."""
+        lst = self._bubbles.get(user) or []
+        if not lst:
+            return
+        base = lst[-1]["pos"]   # 최신 말풍선의 기준 위치에 정렬
+        below = 0.0
+        for entry in reversed(lst):   # 최신(맨 아래)부터
+            it = entry["item"]
+            it.setPos(base[0], base[1])
+            it.set_below(below)
+            below += it.stack_height()
 
     def update_from_presence(self, users: list, exclude_user: str = ""):
         if self._scene is None:
@@ -252,9 +279,10 @@ class CursorLayer(QObject):
             self._scene.removeItem(c["selitem"])
 
     def _remove_bubble(self, user):
-        b = self._bubbles.pop(user, None)
-        if b and self._scene is not None:
-            self._scene.removeItem(b["item"])
+        lst = self._bubbles.pop(user, None)
+        if lst and self._scene is not None:
+            for entry in lst:
+                self._scene.removeItem(entry["item"])
 
     def _tick(self):
         moving = False
@@ -269,13 +297,24 @@ class CursorLayer(QObject):
             moving = True
         now = time.monotonic()
         for user in list(self._bubbles.keys()):
-            b = self._bubbles[user]
-            age = now - b["t0"]
-            if age >= _BUBBLE_TTL:
-                self._remove_bubble(user)
-                continue
-            if age >= _BUBBLE_TTL - _BUBBLE_FADE:
-                b["item"].alpha = max(0.0, (_BUBBLE_TTL - age) / _BUBBLE_FADE)
-                b["item"].update()
+            lst = self._bubbles[user]
+            kept = []
+            removed = False
+            for entry in lst:
+                age = now - entry["t0"]
+                if age >= _BUBBLE_TTL:
+                    self._scene.removeItem(entry["item"])
+                    removed = True
+                    continue
+                if age >= _BUBBLE_TTL - _BUBBLE_FADE:
+                    entry["item"].alpha = max(0.0, (_BUBBLE_TTL - age) / _BUBBLE_FADE)
+                    entry["item"].update()
+                kept.append(entry)
+            if removed:
+                if kept:
+                    self._bubbles[user] = kept
+                    self._restack(user)
+                else:
+                    del self._bubbles[user]
         if not moving and not self._bubbles:
             self._timer.stop()

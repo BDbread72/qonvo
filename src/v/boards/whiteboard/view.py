@@ -653,6 +653,10 @@ class WhiteboardView(QGraphicsView):
         if not (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
                 and hasattr(self.plugin, 'report_cursor')):
             return
+        # 자리비움(다른 앱으로 alt-tab)이면 위치를 갱신하지 않음 — 다른 앱 위의 마우스가
+        # 보드 좌표로 잘못 전송돼 커서가 엉뚱하게 움직이는 것을 방지(마지막 위치 유지)
+        if self._cursor_state() == "away":
+            return
         try:
             if self.radial_menu and getattr(self, '_original_scene_pos', None) is not None:
                 # 방사형 메뉴 중엔 워프된 실제 커서 말고 원래 위치를 보고
