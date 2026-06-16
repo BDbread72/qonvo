@@ -394,10 +394,24 @@ class _Bubble(QWidget):
     def leaveEvent(self, e):
         self._actions.hide()
 
-    def add_image_slot(self, file_id: str, on_click: Callable[[str], None]) -> _ClickImage:
+    def add_image_slot(self, file_id: str, on_click: Callable[[str], None],
+                       dims=None) -> _ClickImage:
         lbl = _ClickImage()
         lbl.setText("이미지 불러오는 중…")
-        lbl.setStyleSheet("color:#aaa;background:transparent;font-size:11px;")
+        lbl.setStyleSheet("color:#aaa;background:#2a2a2a;border-radius:6px;font-size:11px;")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 메타데이터의 원본 크기로 최종 표시 크기를 미리 예약 → 로드돼도 레이아웃이 안 밀림
+        # (이미지가 0 높이→실제 높이로 커지며 위 메시지를 밀어 스크롤이 튀던 문제 해결)
+        if dims:
+            w, h = dims
+            try:
+                w, h = int(w or 0), int(h or 0)
+            except Exception:
+                w = h = 0
+            if w > 0 and h > 0:
+                dw = min(_IMG_MAX, w)
+                dh = max(1, round(h * (dw / w)))
+                lbl.setFixedSize(dw, dh)
         lbl.clicked.connect(lambda fid=file_id: on_click(fid))
         self._bv.addWidget(lbl)
         self._img_slots[file_id] = lbl
@@ -463,6 +477,13 @@ class _ChatView(QScrollArea):
     def scroll_bottom(self):
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
             self.verticalScrollBar().maximum()))
+
+    def restore_scroll(self, prev_val: int, to_bottom: bool):
+        """렌더 후 스크롤 복원: to_bottom 이면 맨 아래, 아니면 이전 위치 유지."""
+        def _do():
+            sb = self.verticalScrollBar()
+            sb.setValue(sb.maximum() if to_bottom else min(prev_val, sb.maximum()))
+        QTimer.singleShot(0, _do)
 
 
 class _AddPeopleDialog(QDialog):
@@ -930,6 +951,9 @@ class PeopleWindow(QDialog):
         ids = [p.get("id") for p in posts]
         if ids == self._rendered_ids:
             return                      # 변화 없으면 다시 그리지 않음(깜빡임 방지)
+        # 첫 렌더(_rendered_ids is None: 채널전환/스레드/전송 직후)면 맨 아래로,
+        # 폴링 갱신이면 현재 스크롤 위치를 유지 → 히스토리 읽는 중 새 메시지에 안 튐
+        self._force_scroll_bottom = (self._rendered_ids is None)
         self._rendered_ids = ids
         self._cur_posts = posts
         self._render()
@@ -947,7 +971,8 @@ class PeopleWindow(QDialog):
             if not fid:
                 continue
             if str(f.get("mime_type", "")).startswith("image/"):
-                slot = bubble.add_image_slot(fid, self._open_image)
+                slot = bubble.add_image_slot(fid, self._open_image,
+                                             dims=(f.get("width"), f.get("height")))
                 slot.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
                 slot.customContextMenuRequested.connect(
                     lambda pos, ff=fid, ss=slot: self._image_menu(ff, ss, pos))
@@ -1077,6 +1102,8 @@ class PeopleWindow(QDialog):
 
     def _render_channel(self):
         """메인 타임라인 — 루트 메시지만. 답글 있으면 'N개의 답글' 푸터."""
+        _sb = self._chat.verticalScrollBar()
+        _prev = _sb.value(); _bottom = _prev >= _sb.maximum() - 4
         self._chat.clear()
         replies_by_root: dict = {}
         for p in self._cur_posts:
@@ -1092,7 +1119,8 @@ class PeopleWindow(QDialog):
                 rid = p.get("id", "")
                 bubble.add_thread_footer(len(kids), lambda _=None, r=rid: self._open_thread(r))
             self._chat.add_bubble(bubble)
-        self._chat.scroll_bottom()
+        self._chat.restore_scroll(_prev, _bottom or getattr(self, '_force_scroll_bottom', True))
+        self._force_scroll_bottom = False
 
     def _render_thread(self):
         """스레드 뷰 — 루트 + 그 답글들(채팅 속 채팅)."""
@@ -1100,13 +1128,16 @@ class PeopleWindow(QDialog):
         root = by_id.get(self._thread_root)
         if root is None:
             self._close_thread(); return
+        _sb = self._chat.verticalScrollBar()
+        _prev = _sb.value(); _bottom = _prev >= _sb.maximum() - 4
         self._chat.clear()
         self._chat.add_bubble(self._make_bubble(root))
         replies = [p for p in self._cur_posts if p.get("root_id") == self._thread_root]
         self._chat.add_divider(f"{len(replies)}개의 답글")
         for p in replies:
             self._chat.add_bubble(self._make_bubble(p))
-        self._chat.scroll_bottom()
+        self._chat.restore_scroll(_prev, _bottom or getattr(self, '_force_scroll_bottom', True))
+        self._force_scroll_bottom = False
 
     # ---- 스레드 전환 ----------------------------------------------------
     def _open_thread(self, root_id: str):
@@ -1132,11 +1163,19 @@ class PeopleWindow(QDialog):
         self._open_thread(post.get("root_id") or post.get("id", ""))
 
     def _set_slot_image(self, slot: "_ClickImage", img: QImage):
+        # 맨 아래(최신 보는 중)면 이미지 로드 후에도 맨 아래로 유지 → 위로 튀지 않음
+        sb = self._chat.verticalScrollBar()
+        at_bottom = sb.value() >= sb.maximum() - 4
         slot._full = img
         pm = QPixmap.fromImage(img)
         if pm.width() > _IMG_MAX:
             pm = pm.scaledToWidth(_IMG_MAX, Qt.TransformationMode.SmoothTransformation)
+        slot.setText("")
+        slot.setStyleSheet("background:transparent;")
+        slot.setFixedSize(pm.width(), pm.height())   # 예약 크기와 실제 일치 보장
         slot.setPixmap(pm)
+        if at_bottom:
+            QTimer.singleShot(0, lambda: sb.setValue(sb.maximum()))
 
     def _fetch_file(self, fid: str):
         if fid in self._file_cache or fid in self._fetching:
