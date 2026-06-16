@@ -437,45 +437,65 @@ class WhiteBoardPlugin(
     #   image_cards(첨부) / dimensions(서브보드). 채팅(nodes)은 sync_props 로 크기/옵션만 동기화
     _PROP_SYNC_EXCLUDE = {"image_cards", "dimensions"}
 
+    def _sync_node_if_changed(self, nid):
+        """노드 하나를 직렬화 → 동기화 대상 필드가 바뀌었으면 node_prop 전송.
+
+        위치(x/y)는 node_move 가 담당하므로 dedupe 키에서 제외 → 이동만으론 prop 재전송/재생성 안 함.
+        """
+        owner = self._owner_by_id(nid)
+        if owner is None:
+            return
+        # 통합 직렬화: get_data/to_dict/인라인 모두 처리 → 전 타입 커버
+        res = self._categorize_selected_item(owner)
+        if not res:
+            return
+        category, _nid, data = res
+        if category in self._PROP_SYNC_EXCLUDE:
+            return
+        if category == "nodes":
+            # 채팅 노드는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로)
+            w = owner.widget() if hasattr(owner, 'widget') else owner
+            if hasattr(w, 'sync_props'):
+                data = w.sync_props()
+            else:
+                return
+        try:
+            import json as _json
+            key = _json.dumps({k: v for k, v in data.items() if k not in ('x', 'y')},
+                              sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            key = None
+        if key is not None:
+            if not hasattr(self, '_last_prop_sent'):
+                self._last_prop_sent = {}
+            if self._last_prop_sent.get(nid) == key:
+                return                       # 변경 없음 → 전송 생략
+            self._last_prop_sent[nid] = key
+        try:
+            self._send_op("node_prop", nid, {"data": data})
+        except Exception:
+            pass
+
     def _flush_prop_sync(self):
+        """이벤트 기반(편집 즉시) 동기화 — 응답성용."""
         if not getattr(self, 'server_mode', False):
             return
         for nid in list(getattr(self, '_prop_sync_pending', ())):
-            owner = self._owner_by_id(nid)
-            if owner is None:
-                continue
-            # 통합 직렬화(_categorize_selected_item): get_data/to_dict/인라인 모두 처리 → 전 타입 커버
-            res = self._categorize_selected_item(owner)
-            if not res:
-                continue
-            category, _nid, data = res
-            if category in self._PROP_SYNC_EXCLUDE:
-                continue
-            if category == "nodes":
-                # 채팅 노드는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로)
-                w = owner.widget() if hasattr(owner, 'widget') else owner
-                if hasattr(w, 'sync_props'):
-                    data = w.sync_props()
-                else:
-                    continue
-            # dedupe: 동기화 대상 필드가 안 바뀌었으면 전송 생략(예: 채팅 입력만 타이핑한 경우)
-            try:
-                import json as _json
-                key = _json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
-            except Exception:
-                key = None
-            if key is not None:
-                if not hasattr(self, '_last_prop_sent'):
-                    self._last_prop_sent = {}
-                if self._last_prop_sent.get(nid) == key:
-                    continue
-                self._last_prop_sent[nid] = key
-            try:
-                # 전체 노드 데이터 전송 → 수신측은 apply_sync_data(제자리) 또는 재생성(범용)
-                self._send_op("node_prop", nid, {"data": data})
-            except Exception:
-                pass
+            self._sync_node_if_changed(nid)
         self._prop_sync_pending.clear()
+
+    def _periodic_prop_sync(self):
+        """주기적 자동 동기화 — 머티리얼라이즈된 모든 노드를 스캔해 변경분만 전송.
+
+        on_modified 가 안 잡는 변경(콤보/체크박스 부수효과 등)도 주기마다 자동으로 따라잡는다.
+        dedupe 덕분에 안 바뀐 노드는 전송 0(네트워크 부담 적음)."""
+        if not getattr(self, 'server_mode', False) or self._applying_remote_op:
+            return
+        try:
+            for nid in list(self.app.nodes.keys()):
+                self._sync_node_if_changed(nid)
+        except Exception:
+            pass
 
     def _notify_modified(self):
         if self._batch_loading:

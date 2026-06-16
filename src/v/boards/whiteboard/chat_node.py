@@ -1774,7 +1774,9 @@ class ChatNodeWidget(QWidget, BaseNode):
         except Exception:
             return []
 
-    def get_data(self):
+    def get_data(self, _light: bool = False):
+        # _light=True: 무거운 deepcopy(history/extra_input_defs) 생략 — sync_props 처럼
+        # 내용을 어차피 버리는 경우의 주기 스캔 비용 절감. 저장/직렬화는 기본(False)로 전체.
         d = {
             "type": "chat_node",
             "id": self.node_id,
@@ -1794,12 +1796,12 @@ class ChatNodeWidget(QWidget, BaseNode):
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "notify_on_complete": self.notify_on_complete,
-            "extra_input_defs": copy.deepcopy(self.extra_input_defs),
+            "extra_input_defs": [] if _light else copy.deepcopy(self.extra_input_defs),
             "preferred_options_enabled": self.preferred_options_enabled,
             "preferred_options_count": self.preferred_options_count,
             "opts_panel_visible": self.btn_opts_toggle.isChecked(),
             "meta_ports_enabled": self.meta_ports_enabled,
-            "history": copy.deepcopy(self._history),
+            "history": [] if _light else copy.deepcopy(self._history),
         }
         if self._archive_path:
             d["archive_path"] = self._archive_path
@@ -1818,7 +1820,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         get_data 에 새 설정 필드가 추가되면 자동으로 포함된다(따로 손볼 필요 없음).
         """
-        return {k: v for k, v in self.get_data().items()
+        return {k: v for k, v in self.get_data(_light=True).items()
                 if k not in self._SYNC_EXCLUDE_KEYS}
 
     def apply_sync_data(self, data: dict):

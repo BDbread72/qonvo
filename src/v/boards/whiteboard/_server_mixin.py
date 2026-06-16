@@ -62,6 +62,13 @@ class ServerMixin:
         self._cursor_layer = CursorLayer(self.view)
         if self.view is not None:
             self.view._cursor_layer = self._cursor_layer
+        # 주기적 자동 동기화 — 이벤트가 안 잡힌 변경도 주기마다 자동 감지해 전송(견고)
+        from PyQt6.QtCore import QTimer
+        if getattr(self, '_periodic_sync_timer', None) is None:
+            self._periodic_sync_timer = QTimer(self.view if self.view is not None else None)
+            self._periodic_sync_timer.setInterval(700)
+            self._periodic_sync_timer.timeout.connect(self._periodic_prop_sync)
+        self._periodic_sync_timer.start()
 
     def detach_server_client(self):
         if self._server_client:
@@ -74,6 +81,8 @@ class ServerMixin:
                 self._server_client.chat_received.disconnect(self._on_chat_bubble)
             except Exception:
                 pass
+        if getattr(self, '_periodic_sync_timer', None) is not None:
+            self._periodic_sync_timer.stop()
         if getattr(self, '_cursor_layer', None) is not None:
             self._cursor_layer.clear()
             self._cursor_layer.deleteLater()  # 오버레이 위젯 정리
