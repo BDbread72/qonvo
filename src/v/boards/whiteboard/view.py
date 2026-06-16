@@ -72,6 +72,14 @@ class WhiteboardView(QGraphicsView):
         self.setMouseTracking(True)  # 마우스 이동 항상 추적
         self.setAcceptDrops(True)  # 외부 파일 드래그 앤 드롭
         self._last_report_pos = None   # 라이브 커서 마지막 보고 위치(상태만 바뀔 때 재사용)
+        self._last_poll_xy = None
+        # 라이브 커서 폴링: mouseMoveEvent 는 빈 캔버스에서만 오므로(노드 위에선 위젯이 먹음)
+        # 전역 커서를 주기적으로 읽어 보고 → 노드 위에 있어도 상대 화면에서 커서가 따라옴
+        from PyQt6.QtCore import QTimer
+        self._cursor_poll_timer = QTimer(self)
+        self._cursor_poll_timer.setInterval(120)
+        self._cursor_poll_timer.timeout.connect(self._poll_report_cursor)
+        self._cursor_poll_timer.start()
         # 앱 비활성(다른 창으로 alt-tab) → 커서 'away' 표시
         try:
             from PyQt6.QtWidgets import QApplication
@@ -639,6 +647,32 @@ class WhiteboardView(QGraphicsView):
                     self.plugin.report_cursor(p[0], p[1], self._cursor_state())
                 except Exception:
                     pass
+
+    def _poll_report_cursor(self):
+        """전역 커서를 주기적으로 보고(노드 위에서도 동작 — mouseMoveEvent 사각지대 보완)."""
+        if not (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
+                and hasattr(self.plugin, 'report_cursor')):
+            return
+        try:
+            if self.radial_menu and getattr(self, '_original_scene_pos', None) is not None:
+                # 방사형 메뉴 중엔 워프된 실제 커서 말고 원래 위치를 보고
+                sx, sy = self._original_scene_pos.x(), self._original_scene_pos.y()
+            else:
+                from PyQt6.QtGui import QCursor
+                vp = self.viewport()
+                pos = vp.mapFromGlobal(QCursor.pos())
+                if not vp.rect().contains(pos):
+                    return  # 뷰 밖이면 위치 보고 안 함(마지막 위치 유지)
+                sp = self.mapToScene(pos)
+                sx, sy = sp.x(), sp.y()
+                self._last_report_pos = (sx, sy)
+            last = self._last_poll_xy
+            if last is not None and abs(last[0] - sx) < 0.5 and abs(last[1] - sy) < 0.5:
+                return  # 안 움직였으면 스킵(주기 ping 이 어차피 재전송)
+            self._last_poll_xy = (sx, sy)
+            self.plugin.report_cursor(sx, sy, self._cursor_state())
+        except Exception:
+            pass
 
     def mouseMoveEvent(self, event: QMouseEvent):
         # 라이브 커서: 서버모드면 보드 좌표를 서버에 보고(전송 throttle 은 클라가 처리)
