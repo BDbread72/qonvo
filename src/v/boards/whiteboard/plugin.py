@@ -430,17 +430,29 @@ class WhiteBoardPlugin(
             self._prop_sync_timer.timeout.connect(self._flush_prop_sync)
         self._prop_sync_timer.start()
 
+    # 자체 동기화 경로가 따로 있는 타입은 prop 동기화에서 제외:
+    #   nodes(채팅=chat_append) / image_cards(첨부) / dimensions(서브보드)
+    _PROP_SYNC_EXCLUDE = {"nodes", "image_cards", "dimensions"}
+
     def _flush_prop_sync(self):
         if not getattr(self, 'server_mode', False):
             return
         for nid in list(getattr(self, '_prop_sync_pending', ())):
-            node = self.app.nodes.get(nid)
-            # apply_sync_data 가 있는(=제자리 갱신 가능한) 텍스트성 노드만 전송
-            if node is not None and hasattr(node, 'apply_sync_data') and hasattr(node, 'get_data'):
-                try:
-                    self._send_op("node_prop", nid, {"data": node.get_data()})
-                except Exception:
-                    pass
+            owner = self._owner_by_id(nid)
+            if owner is None:
+                continue
+            # 통합 직렬화(_categorize_selected_item): get_data/to_dict/인라인 모두 처리 → 전 타입 커버
+            res = self._categorize_selected_item(owner)
+            if not res:
+                continue
+            category, _nid, data = res
+            if category in self._PROP_SYNC_EXCLUDE:
+                continue
+            try:
+                # 전체 노드 데이터 전송 → 수신측은 apply_sync_data(제자리) 또는 재생성(범용)
+                self._send_op("node_prop", nid, {"data": data})
+            except Exception:
+                pass
         self._prop_sync_pending.clear()
 
     def _notify_modified(self):

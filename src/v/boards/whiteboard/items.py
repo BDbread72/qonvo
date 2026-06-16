@@ -780,6 +780,21 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
                  font_size=self._font_size, rotation=self.rotation())
         return d
 
+    def apply_sync_data(self, data):
+        """원격 편집을 제자리 반영(서버모드 협업)."""
+        text = data.get("text", "")
+        if self.toPlainText() != text:
+            self.setPlainText(text)
+        fs = data.get("font_size")
+        if fs and int(fs) != self._font_size:
+            self._font_size = int(fs)
+            font = self.font()
+            font.setPointSize(self._font_size)
+            self.setFont(font)
+        rot = data.get("rotation")
+        if rot is not None and rot != self.rotation():
+            self.setRotation(rot)
+
 
 class ImageCardItem(SceneItemMixin, QGraphicsItem):
     """이미지 카드 아이템 - 보드에 이미지를 배치"""

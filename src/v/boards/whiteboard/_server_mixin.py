@@ -439,7 +439,8 @@ class ServerMixin:
         node = self.app.nodes.get(node_id)
         if node is None:
             return
-        # 신규: 전체 노드 데이터를 제자리 적용(텍스트/제목/색상 등 위젯 갱신)
+        # 신규: 전체 노드 데이터를 제자리 적용(텍스트/제목/색상 등 위젯 갱신).
+        # apply_sync_data 가 있으면 제자리 갱신(부드러움), 없으면 데이터로 재생성(범용).
         full = data.get("data")
         if isinstance(full, dict):
             if hasattr(node, "apply_sync_data"):
@@ -447,6 +448,8 @@ class ServerMixin:
                     node.apply_sync_data(full)
                 except Exception:
                     pass
+            else:
+                self._recreate_node_from_data(node_id, full)
             return
         # 레거시: 단일 key/value
         key = data.get("key", "")
@@ -454,6 +457,53 @@ class ServerMixin:
         if key and hasattr(node, key):
             try:
                 setattr(node, key, value)
+            except Exception:
+                pass
+
+    def _recreate_node_from_data(self, node_id, data: dict):
+        """범용 폴백: apply_sync_data 가 없는 노드를 데이터로 제자리 재생성 + 엣지 재연결.
+
+        원격 op 적용 중(_applying_remote_op=True)이라 내부 op 전송은 _send_op 가 차단한다.
+        """
+        from PyQt6.QtWidgets import QGraphicsProxyWidget
+        owner = self._owner_by_id(node_id)
+        if owner is None:
+            return
+        target_widget = owner.widget() if isinstance(owner, QGraphicsProxyWidget) else owner
+        category = self._node_category(target_widget)
+        # 이 노드에 연결된 엣지 메타 저장(포트 이름 기준)
+        saved_edges = []
+        for edge in list(self._edges):
+            try:
+                s = self._owner_node_id(edge.source_port.parent_proxy)
+                t = self._owner_node_id(edge.target_port.parent_proxy)
+            except Exception:
+                continue
+            if s == node_id or t == node_id:
+                saved_edges.append({
+                    "source_node_id": s, "target_node_id": t,
+                    "source_port_name": edge.source_port.port_name,
+                    "target_port_name": edge.target_port.port_name,
+                })
+        # 옛 노드 삭제
+        if isinstance(owner, QGraphicsProxyWidget):
+            self.delete_proxy_item(owner)
+        else:
+            reg = {"texts": self.text_items, "group_frames": self.group_frame_items,
+                   "image_cards": self.image_card_items,
+                   "dimensions": self.dimension_items}.get(category)
+            if reg is None:
+                return
+            self._delete_scene_item(owner, reg)
+        # 데이터로 재생성
+        try:
+            self._materialize_single(category, int(node_id), data)
+        except Exception:
+            return
+        # 엣지 재연결
+        for e in saved_edges:
+            try:
+                self._restore_edge(e)
             except Exception:
                 pass
 
