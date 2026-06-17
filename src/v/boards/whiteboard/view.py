@@ -793,11 +793,18 @@ class WhiteboardView(QGraphicsView):
         if ci is None:
             return
         text = ci.text().strip()
-        ci.hide()
-        self.setFocus()
-        self._report_cursor_state()   # 입력 종료
         if text and self.plugin is not None and hasattr(self.plugin, 'send_chat_message'):
             self.plugin.send_chat_message(text)
+        # 설정: 연속 채팅 유지 — Enter 후에도 입력창을 닫지 않고 계속 입력(Esc 로 닫기).
+        from v.settings import get_setting
+        if get_setting("chat_stay_open", False):
+            ci.clear()
+            ci.setFocus()              # 창 유지 + 포커스 유지(연속 입력)
+            # 커서 상태는 '입력 중' 그대로 유지
+        else:
+            ci.hide()
+            self.setFocus()
+            self._report_cursor_state()   # 입력 종료
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent

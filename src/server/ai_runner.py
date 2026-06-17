@@ -18,7 +18,8 @@ def build_router(config: dict):
     from v.provider import GeminiProvider
     from v.model_plugin import PluginRegistry, ProviderRouter
 
-    keys = list(config.get("ai", {}).get("gemini_keys") or [])
+    ai_cfg = config.get("ai", {}) or {}
+    keys = list(ai_cfg.get("gemini_keys") or [])
     if not keys:
         # 데스크톱 앱에 저장된 키로 폴백
         try:
@@ -32,6 +33,22 @@ def build_router(config: dict):
         registry.load_all()
     except Exception:
         pass
+
+    # config.toml 의 provider 키로 플러그인 강제 활성화(settings 무관).
+    # 서버는 머신종속 암호화 settings 를 못 쓰므로 평문 키를 여기서 직접 주입한다.
+    for plugin_id, cfg_key in (("openai_plugin", "openai_keys"), ("anthropic_plugin", "anthropic_keys")):
+        plugin_keys = list(ai_cfg.get(cfg_key) or [])
+        if not plugin_keys:
+            continue
+        try:
+            if registry.force_enable(plugin_id, plugin_keys):
+                from v.logger import get_logger
+                get_logger("qonvo.server").info(
+                    f"[ai] {plugin_id} 플러그인 활성화 ({len(plugin_keys)} key)"
+                )
+        except Exception:
+            pass
+
     return ProviderRouter(gemini_provider=gemini)
 
 

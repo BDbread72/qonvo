@@ -187,6 +187,70 @@ class PluginRegistry:
                         "models": {},
                     }
 
+    def force_enable(self, plugin_id: str, api_keys: list) -> bool:
+        """settings(enabled_plugins/plugin_api_keys) 무관하게 plugin_id 를 주어진 키로
+        강제 로드·등록한다. 헤드리스 서버용 — 머신종속 암호화 settings 를 못 쓰는 환경에서
+        config.toml 의 평문 키로 OpenAI/Anthropic 등을 활성화하는 경로.
+        성공 시 True. 이미 로드돼 있으면 키만 재설정한다."""
+        if not api_keys:
+            return False
+
+        # 이미 인스턴스가 있으면 키만 갱신
+        existing = self._plugins.get(plugin_id)
+        if existing is not None:
+            try:
+                existing.configure(api_keys=list(api_keys))
+                for mid in existing.MODELS:
+                    self._model_to_plugin[mid] = plugin_id
+                return True
+            except Exception:
+                return False
+
+        dirs = []
+        user_dir = get_plugins_dir()
+        if user_dir.exists():
+            dirs.append(user_dir)
+        bundled = _get_bundled_plugins_dir()
+        if bundled:
+            dirs.append(bundled)
+
+        for plugins_dir in dirs:
+            py_file = plugins_dir / f"{plugin_id}.py"
+            if not py_file.exists():
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    f"qonvo_plugin_{plugin_id}", py_file
+                )
+                if not spec or not spec.loader:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                if not hasattr(module, "PLUGIN_CLASS"):
+                    continue
+                plugin_cls = module.PLUGIN_CLASS
+                if not (isinstance(plugin_cls, type) and issubclass(plugin_cls, ModelPlugin)):
+                    continue
+                inst = plugin_cls()
+                inst.configure(api_keys=list(api_keys))
+                self._plugins[plugin_id] = inst
+                self._discovered[plugin_id] = {
+                    "name": getattr(plugin_cls, "NAME", plugin_id),
+                    "version": getattr(plugin_cls, "VERSION", "1.0"),
+                    "description": getattr(plugin_cls, "DESCRIPTION", ""),
+                    "models": dict(getattr(plugin_cls, "MODELS", {})),
+                }
+                for mid in inst.MODELS:
+                    self._model_to_plugin[mid] = plugin_id
+                return True
+            except Exception as e:
+                from v.logger import get_logger
+                get_logger("qonvo.plugin").warning(
+                    f"force_enable failed [{plugin_id}]: {e}"
+                )
+                return False
+        return False
+
     def get_plugin_for_model(self, model_id: str) -> ModelPlugin | None:
         """모델 ID에 해당하는 플러그인 인스턴스 반환"""
         pid = self._model_to_plugin.get(model_id)

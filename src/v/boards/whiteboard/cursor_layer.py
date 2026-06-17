@@ -38,7 +38,7 @@ _BFONT = QFont(); _BFONT.setPointSize(9)
 class _CursorItem(QGraphicsItem):
     """화면 픽셀 고정 크기 커서 글리프 + 이름표. setPos = 보드 좌표(scene)."""
 
-    def __init__(self):
+    def __init__(self, scale: float = 1.0, opacity: float = 1.0):
         super().__init__()
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.setZValue(_Z_CURSOR)
@@ -46,6 +46,8 @@ class _CursorItem(QGraphicsItem):
         self._color = QColor("#888")
         self._name = ""
         self._state = ""
+        self._scale = max(0.1, float(scale))
+        self._opacity = max(0.0, min(1.0, float(opacity)))
         self._fm = QFontMetrics(_FONT)
         self._lw = 0.0
         self._lh = float(self._fm.height() + 4)
@@ -59,6 +61,15 @@ class _CursorItem(QGraphicsItem):
         self._recalc()
         self.update()
 
+    def set_style(self, scale: float, opacity: float):
+        scale = max(0.1, float(scale))
+        opacity = max(0.0, min(1.0, float(opacity)))
+        if scale == self._scale and opacity == self._opacity:
+            return
+        self.prepareGeometryChange()
+        self._scale, self._opacity = scale, opacity
+        self.update()
+
     def _recalc(self):
         st = _STATE_LABEL.get(self._state, "")
         label = f"{self._name}  {st}" if st else self._name
@@ -69,10 +80,14 @@ class _CursorItem(QGraphicsItem):
         return QPainterPath()   # 클릭 안 잡힘(장식용)
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-2, -2, 18 + self._lw, 20 + self._lh)
+        s = self._scale
+        return QRectF(-2 * s, -2 * s, (18 + self._lw) * s, (20 + self._lh) * s)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)
+        p.setOpacity(self._opacity)
+        if self._scale != 1.0:
+            p.scale(self._scale, self._scale)
         p.setPen(QColor(255, 255, 255, 230))
         p.setBrush(self._color)
         p.drawPolygon(_ARROW)
@@ -91,7 +106,7 @@ class _CursorItem(QGraphicsItem):
 class _BubbleItem(QGraphicsItem):
     """커서 위 말풍선(채팅). 화면 픽셀 고정. setPos = 커서 보드 좌표(scene)."""
 
-    def __init__(self, text: str, color: QColor):
+    def __init__(self, text: str, color: QColor, scale: float = 1.0, opacity: float = 1.0):
         super().__init__()
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
         self.setZValue(_Z_BUBBLE)
@@ -99,6 +114,8 @@ class _BubbleItem(QGraphicsItem):
         self._fm = QFontMetrics(_BFONT)
         self._text = text[:200]
         self._color = QColor(color)
+        self._scale = max(0.1, float(scale))
+        self._opacity = max(0.0, min(1.0, float(opacity)))
         self.alpha = 1.0
         self._bw = float(min(240, self._fm.horizontalAdvance(self._text)) + 18)
         self._bh = float(self._fm.height() + 10)
@@ -117,11 +134,16 @@ class _BubbleItem(QGraphicsItem):
         return QPainterPath()
 
     def boundingRect(self) -> QRectF:
+        s = self._scale
         top = -(self._below + self._bh + 12)
-        return QRectF(-2, top, self._bw + 4, self._below + self._bh + 22)
+        return QRectF(-2 * s, top * s, (self._bw + 4) * s, (self._below + self._bh + 22) * s)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)
+        if self._opacity != 1.0:
+            p.setOpacity(self._opacity)
+        if self._scale != 1.0:
+            p.scale(self._scale, self._scale)
         bw, bh = self._bw, self._bh
         by = -self._below - bh - 8   # 아래에 쌓인 만큼 위로 올림
         color = QColor(self._color); color.setAlphaF(0.92 * self.alpha)
@@ -173,7 +195,10 @@ class CursorLayer(QObject):
         else:
             c = self._cursors.get(user)
             pos = list(c["cur"]) if c else (list(self._self_pos) if self._self_pos else [0.0, 0.0])
-        item = _BubbleItem(text, QColor(color or "#888"))
+        from v.settings import get_setting
+        bscale = float(get_setting("cursor_scale", 1.0) or 1.0)
+        bopacity = float(get_setting("cursor_opacity", 1.0) or 1.0)
+        item = _BubbleItem(text, QColor(color or "#888"), bscale, bopacity)
         self._scene.addItem(item)
         # 연속 입력 시 이전 말풍선이 위로 쌓이도록(교체 X) — 유저별 스택 리스트
         lst = self._bubbles.setdefault(user, [])
@@ -203,6 +228,14 @@ class CursorLayer(QObject):
             self._scene = self._view.scene()
         if self._scene is None:
             return
+        from v.settings import get_setting
+        if not get_setting("cursor_show", True):
+            # 설정: 다른 사용자 커서 숨김 — 기존 원격 커서 제거
+            for nm in list(self._cursors.keys()):
+                self._remove_cursor(nm)
+            return
+        scale = float(get_setting("cursor_scale", 1.0) or 1.0)
+        opacity = float(get_setting("cursor_opacity", 1.0) or 1.0)
         seen = set()
         for u in users:
             name = u.get("user", "")
@@ -219,7 +252,7 @@ class CursorLayer(QObject):
             color = QColor(u.get("color", "#888"))
             c = self._cursors.get(name)
             if c is None:
-                item = _CursorItem()
+                item = _CursorItem(scale, opacity)
                 item.set_label(name, st, color)
                 item.setPos(tx, ty)
                 self._scene.addItem(item)
@@ -231,6 +264,7 @@ class CursorLayer(QObject):
                 c["color"] = color
                 c["state"] = st
                 c["item"].set_label(name, st, color)
+                c["item"].set_style(scale, opacity)
             self._apply_select(c, sel)
         for name in list(self._cursors.keys()):
             if name not in seen:

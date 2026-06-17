@@ -73,7 +73,15 @@ upnp_lease = 3600
 [ai]
 # 비우면 데스크톱 앱의 저장된 Gemini 키(%APPDATA%/Qonvo/settings.json)를 사용.
 gemini_keys = []
+# OpenAI(GPT/DALL-E/GPT Image) · Anthropic(Claude) 키. 값이 있으면 settings 무관하게
+# 해당 플러그인을 강제 활성화한다(서버는 머신종속 암호화 settings를 못 쓰므로 여기에 평문 저장).
+openai_keys = []
+anthropic_keys = []
 default_model = "gemini-2.5-flash"
+
+[chat]
+# 라이브 채팅(커서 말풍선)을 boards/<id>/chat.log (jsonl) 에 누적 기록할지 여부.
+log = true
 
 # 로컬 계정. 비밀번호는 평문 금지 — `python -m server adduser <name>` 로 추가하면
 # users.json 에 pbkdf2 해시로 저장됩니다. 아래 [users] 는 레벨 오버라이드 용도.
@@ -105,7 +113,13 @@ _DEFAULTS: Dict[str, Any] = {
     },
     "access": {"whitelist": False},
     "network": {"upnp": True, "public_host": "", "upnp_lease": 3600},
-    "ai": {"gemini_keys": [], "default_model": "gemini-2.5-flash"},
+    "ai": {
+        "gemini_keys": [],
+        "openai_keys": [],
+        "anthropic_keys": [],
+        "default_model": "gemini-2.5-flash",
+    },
+    "chat": {"log": True},
     "users": {},
     "oauth": {
         "mattermost": {

@@ -479,11 +479,27 @@ class _ChatView(QScrollArea):
             self.verticalScrollBar().maximum()))
 
     def restore_scroll(self, prev_val: int, to_bottom: bool):
-        """렌더 후 스크롤 복원: to_bottom 이면 맨 아래, 아니면 이전 위치 유지."""
-        def _do():
-            sb = self.verticalScrollBar()
-            sb.setValue(sb.maximum() if to_bottom else min(prev_val, sb.maximum()))
-        QTimer.singleShot(0, _do)
+        """렌더 후 스크롤 복원: to_bottom 이면 맨 아래, 아니면 이전 위치 유지.
+
+        새 버블 추가 후 콘텐츠 높이(maximum)는 레이아웃이 확정돼야 갱신된다.
+        singleShot(0) 한 번만 읽으면 옛 maximum 에 멈춰 진짜 바닥에 못 닿는다
+        → range 변경을 잠시 구독해 높이가 커지는 순간마다 바닥으로 다시 붙인다."""
+        sb = self.verticalScrollBar()
+        if to_bottom:
+            def _to_max(*_):
+                sb.setValue(sb.maximum())
+            sb.rangeChanged.connect(_to_max)
+            QTimer.singleShot(0, _to_max)
+
+            def _stop():
+                _to_max()
+                try:
+                    sb.rangeChanged.disconnect(_to_max)
+                except Exception:
+                    pass
+            QTimer.singleShot(150, _stop)
+        else:
+            QTimer.singleShot(0, lambda: sb.setValue(min(prev_val, sb.maximum())))
 
 
 class _AddPeopleDialog(QDialog):
@@ -808,7 +824,8 @@ class PeopleWindow(QDialog):
             except Exception:
                 return
             if post.get("channel_id") == self._cur_channel:
-                self._rendered_ids = None
+                # 스마트 스크롤: 내가 바닥을 보고 있으면 새 메시지로 따라 내려가고,
+                # 위로 히스토리를 읽는 중이면 위치를 유지한다(_on_posts 의 _bottom 판정).
                 self._load_posts()
             elif (data.get("channel_type") == "D" and post.get("user_id") != self._me_id
                   and "__" in data.get("channel_name", "")):

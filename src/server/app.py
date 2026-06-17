@@ -53,6 +53,7 @@ class QonvoServer:
         self.name = srv.get("name", "Qonvo Server")
         self.motd = srv.get("motd", "")
         self.default_model = config.get("ai", {}).get("default_model", "gemini-2.5-flash")
+        self.chat_log_enabled = bool(config.get("chat", {}).get("log", True))
 
         net = config.get("network", {})
         self.upnp_enabled = bool(net.get("upnp", True))
@@ -274,14 +275,30 @@ class QonvoServer:
         await self.registry.broadcast(board_id, {"type": "presence", "users": users})
 
     async def _handle_chat(self, sess: Session, data: dict) -> None:
-        """보드 채팅 메시지를 멤버 전원에게 브로드캐스트한다."""
+        """보드 채팅 메시지를 멤버 전원에게 브로드캐스트하고(설정 시) 로그에 기록한다."""
         text = (data.get("text") or "").strip()
         if not text or not sess.board_id:
             return
+        text = text[:2000]
+        ts = int(time.time() * 1000)
         await self.registry.broadcast(sess.board_id, {
             "type": "chat", "user": sess.username, "color": sess.color,
-            "text": text[:2000], "ts": int(time.time() * 1000),
+            "text": text, "ts": ts,
         })
+        if self.chat_log_enabled:
+            self._append_chat_log(sess.board_id, sess.username, text, ts)
+
+    def _append_chat_log(self, board_id: str, user: str, text: str, ts: int) -> None:
+        """라이브 채팅을 boards/<id>/chat.log (jsonl) 에 한 줄씩 누적한다."""
+        try:
+            from .config import get_boards_dir
+            d = get_boards_dir() / safe_board_id(board_id)
+            d.mkdir(parents=True, exist_ok=True)
+            with open(d / "chat.log", "a", encoding="utf-8") as f:
+                f.write(json.dumps(
+                    {"ts": ts, "user": user, "text": text}, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning("chat log write failed (board=%s): %s", board_id, e)
 
     async def _handle_auth(self, sess: Session, data: dict) -> None:
         username = (data.get("user") or "").strip()

@@ -1,6 +1,6 @@
 """서버↔보드 브라우저 UI (마인크래프트 멀티플레이 스타일).
 
-- ServerListDialog: 저장된 서버 목록(상태 핑·접속자수) + 추가/수정/삭제/접속
+- ServerBrowserWidget: 저장된 서버 목록(상태 핑·접속자수) + 추가/수정/삭제/접속 (메인 임베드 화면)
 - ServerEntryDialog: 서버 한 개 추가/수정 (이름/주소/포트/wss/인증방식 ID·PW|merri)
 - ServerBoardListDialog: 접속한 서버의 보드 목록(노드수) + 새 보드/열기
 
@@ -15,9 +15,9 @@ import urllib.request
 from typing import Optional
 from urllib.parse import quote
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton, QLabel,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QCheckBox,
     QInputDialog, QMessageBox,
 )
@@ -66,20 +66,31 @@ def _http_base(host: str, port: int, secure: bool) -> str:
 
 
 # ---- 상태 핑 스레드 -----------------------------------------------------
+# 정리 중인(종료 대기) 핑 스레드를 위젯 수명과 무관하게 살려두는 키프얼라이브.
+# (메인 스레드를 wait() 로 막지 않고도 GC 로 인한 "QThread destroyed while running" 방지)
+_LIVE_PINGS: set = set()
+
+
 class _PingThread(QThread):
-    """각 서버의 /health 를 병렬 조회해 상태를 보고한다."""
+    """각 서버의 /health 를 조회해 상태를 보고한다(취소 가능)."""
     result = pyqtSignal(int, bool, str, int, bool)  # idx, online, name, online_count, merri
 
     def __init__(self, servers: list):
         super().__init__()
         self._servers = servers
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         for i, s in enumerate(self._servers):
+            if self._cancelled:
+                return
             online, name, count, merri = False, s.get("name", ""), 0, False
             try:
                 base = _http_base(s.get("host", ""), int(s.get("port", 9700)), s.get("secure", False))
-                with urllib.request.urlopen(base + "/", timeout=5) as r:
+                with urllib.request.urlopen(base + "/", timeout=4) as r:
                     data = json.loads(r.read().decode("utf-8"))
                 online = True
                 name = data.get("name", name)
@@ -87,28 +98,50 @@ class _PingThread(QThread):
                 merri = bool(data.get("auth", {}).get("merri", False))
             except Exception:
                 pass
+            if self._cancelled:
+                return
             self.result.emit(i, online, name, count, merri)
 
 
-class ServerListDialog(QDialog):
-    """저장된 서버 목록 + 접속."""
+class ServerBrowserWidget(QWidget):
+    """마인크래프트 멀티플레이식 서버 목록 화면 (메인 중앙에 임베드).
 
-    def __init__(self, parent=None):
+    저장된 서버 목록(상태 핑·접속자수) + 추가/수정/삭제 + 접속을 한 화면에서 제공한다.
+
+    시그널:
+      connect_requested(dict): 접속할 서버 정보 — host/port/username/password/secure/name/merri
+      back_requested():        뒤로가기(welcome 으로 복귀)
+    """
+    connect_requested = pyqtSignal(dict)
+    back_requested = pyqtSignal()
+
+    def __init__(self, parent=None, show_back: bool = True):
         super().__init__(parent)
-        self.setWindowTitle("서버 목록")
-        self.setMinimumSize(460, 420)
-        self.setModal(True)
-        self.setStyleSheet(f"QDialog {{ background-color: {Theme.BG_PRIMARY}; }}")
+        self.setStyleSheet(f"background-color: {Theme.BG_PRIMARY};")
         self._servers = _load_servers()
-        self._selected: Optional[dict] = None
         self._ping: Optional[_PingThread] = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(10)
 
-        title = QLabel("서버 선택")
-        title.setStyleSheet(f"color: {Theme.TEXT_PRIMARY}; font-size: 16px; font-weight: bold;")
-        layout.addWidget(title)
+        # 헤더: 뒤로 + 타이틀
+        header = QHBoxLayout()
+        if show_back:
+            back = QPushButton("←  뒤로")
+            back.setCursor(Qt.CursorShape.PointingHandCursor)
+            back.setStyleSheet(
+                "QPushButton { background: transparent; color: #aaa; border: none;"
+                " font-size: 14px; padding: 4px 0; text-align: left; }"
+                "QPushButton:hover { color: #fff; }")
+            back.clicked.connect(self._on_back)
+            header.addWidget(back)
+            header.addSpacing(16)
+        title = QLabel("서버 목록")
+        title.setStyleSheet(f"color: {Theme.TEXT_PRIMARY}; font-size: 18px; font-weight: bold;")
+        header.addWidget(title)
+        header.addStretch()
+        layout.addLayout(header)
 
         # merri 프로필 바 (Steam 프로필 같은 1회 로그인 신원)
         prow = QHBoxLayout()
@@ -134,7 +167,8 @@ class ServerListDialog(QDialog):
         layout.addWidget(self._list, 1)
 
         row = QHBoxLayout()
-        for text, fn in (("+ 추가", self._on_add), ("수정", self._on_edit), ("삭제", self._on_remove)):
+        for text, fn in (("+ 추가", self._on_add), ("수정", self._on_edit),
+                         ("삭제", self._on_remove), ("\U0001F504 새로고침", self._on_refresh)):
             b = QPushButton(text)
             b.setStyleSheet("padding: 7px 14px;")
             b.clicked.connect(fn)
@@ -205,7 +239,14 @@ class ServerListDialog(QDialog):
         if self._servers:
             self._list.setCurrentRow(0)
 
+    def _on_refresh(self):
+        """서버 목록을 다시 읽고 상태(온라인/접속자수)를 재조회한다."""
+        self._servers = _load_servers()
+        self._refresh_list()
+        self._start_ping()
+
     def _start_ping(self):
+        self._stop_ping()
         if not self._servers:
             return
         self._ping = _PingThread(self._servers)
@@ -291,19 +332,27 @@ class ServerListDialog(QDialog):
             username = prof["username"]
             password = prof["token"]
         else:
-            # ID/PW 서버: 저장된 자격이 없으면 입력 요청.
+            # ID/PW 서버: 저장된 자격이 없으면 입력 요청 후 항목에 기억(다음부턴 안 물음).
+            newly = False
             if not username:
                 username, ok = QInputDialog.getText(self, "로그인", "사용자 이름:")
                 if not ok or not username.strip():
                     return
                 username = username.strip()
+                newly = True
             if not password:
                 password, ok = QInputDialog.getText(
                     self, "로그인", "비밀번호:", QLineEdit.EchoMode.Password)
                 if not ok:
                     return
+                newly = True
+            if newly:
+                cur["username"] = username
+                if password:
+                    cur["password_enc"] = _enc(password)
+                _save_servers(self._servers)
 
-        self._selected = {
+        info = {
             "host": cur.get("host", ""),
             "port": int(cur.get("port", 9700)),
             "username": username,
@@ -312,10 +361,41 @@ class ServerListDialog(QDialog):
             "name": cur.get("name", ""),
             "merri": merri,
         }
-        self.accept()
+        self._stop_ping()
+        self.connect_requested.emit(info)
 
-    def get_selected(self) -> Optional[dict]:
-        return self._selected
+    # ---- 네비게이션 / 정리 ---------------------------------------------
+    def _on_back(self):
+        self._stop_ping()
+        self.back_requested.emit()
+
+    def _stop_ping(self):
+        """진행 중 핑을 비차단으로 중단한다(메인 스레드를 wait 로 막지 않음).
+
+        취소 플래그를 세우고 결과 시그널을 끊은 뒤, 스레드가 스스로 끝나면 정리한다.
+        끝날 때까지 _LIVE_PINGS 가 참조를 들고 있어 GC 크래시를 막는다."""
+        p = self._ping
+        self._ping = None
+        if p is None:
+            return
+        try:
+            p.cancel()
+        except Exception:
+            pass
+        try:
+            p.result.disconnect(self._on_ping)
+        except Exception:
+            pass
+        _LIVE_PINGS.add(p)
+        p.finished.connect(lambda: (_LIVE_PINGS.discard(p), p.deleteLater()))
+        if p.isFinished():
+            _LIVE_PINGS.discard(p)
+            p.deleteLater()
+
+    def hideEvent(self, a0):
+        # 화면 전환(setCentralWidget)으로 가려질 때 핑 스레드 정리
+        self._stop_ping()
+        super().hideEvent(a0)
 
 
 class ServerEntryDialog(QDialog):
@@ -325,6 +405,7 @@ class ServerEntryDialog(QDialog):
         super().__init__(parent)
         self._editing = entry is not None
         e = entry or {}
+        self._entry = e   # 기존 항목(기억된 username/password_enc 등) 보존용
         self.setWindowTitle("서버 수정" if self._editing else "서버 추가")
         self.setMinimumWidth(420)
         self.setModal(True)
@@ -343,27 +424,13 @@ class ServerEntryDialog(QDialog):
         self._secure = QCheckBox("Secure (wss / TLS)"); self._secure.setChecked(bool(e.get("secure", False)))
         self._secure.setStyleSheet("color:#bbb;font-size:12px;")
 
-        self._user = QLineEdit(e.get("username", "")); self._user.setStyleSheet(_INPUT_STYLE)
-        self._user.setPlaceholderText("username (merri 서버는 비워두세요)")
-        self._pass = QLineEdit(); self._pass.setStyleSheet(_INPUT_STYLE)
-        self._pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self._pass.setPlaceholderText("password (선택)")
-        if e.get("password_enc"):
-            try:
-                self._pass.setText(_dec(e["password_enc"]))
-            except Exception:
-                pass
-        self._remember = QCheckBox("비밀번호 저장"); self._remember.setChecked(bool(e.get("password_enc")))
-        self._remember.setStyleSheet("color:#bbb;font-size:12px;")
-
         for lbl, w in (("이름", self._name), ("주소", self._host), ("포트", self._port),
-                       ("", self._secure),
-                       ("사용자", self._user), ("비밀번호", self._pass), ("", self._remember)):
+                       ("", self._secure)):
             l = QLabel(lbl); l.setStyleSheet(_LABEL_STYLE)
             form.addRow(l, w)
         layout.addLayout(form)
 
-        hint = QLabel("인증 방식(merri / ID·PW)은 접속 시 서버에서 자동으로 받아옵니다.")
+        hint = QLabel("로그인(비밀번호 또는 merri)은 접속할 때 서버 방식에 맞춰 물어봅니다.")
         hint.setStyleSheet("color:#888;font-size:11px;"); hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -391,10 +458,11 @@ class ServerEntryDialog(QDialog):
             "host": host,
             "port": port,
             "secure": self._secure.isChecked() or host.lower().startswith(("wss://", "https://")),
-            "username": self._user.text().strip(),
         }
-        if self._remember.isChecked() and self._pass.text():
-            entry["password_enc"] = _enc(self._pass.text())
+        # 이전에 접속하며 기억해 둔 로그인 정보(username/password_enc)는 보존한다.
+        for k in ("username", "password_enc"):
+            if self._entry.get(k):
+                entry[k] = self._entry[k]
         self.result_entry = entry
         self.accept()
 

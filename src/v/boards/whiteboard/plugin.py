@@ -445,19 +445,19 @@ class WhiteBoardPlugin(
         owner = self._owner_by_id(nid)
         if owner is None:
             return
-        # 통합 직렬화: get_data/to_dict/인라인 모두 처리 → 전 타입 커버
-        res = self._categorize_selected_item(owner)
-        if not res:
-            return
-        category, _nid, data = res
-        if category in self._PROP_SYNC_EXCLUDE:
-            return
-        if category == "nodes":
-            # 채팅 노드는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로)
-            w = owner.widget() if hasattr(owner, 'widget') else owner
-            if hasattr(w, 'sync_props'):
-                data = w.sync_props()
-            else:
+        w = owner.widget() if hasattr(owner, 'widget') else owner
+        # 채팅 노드(nodes)는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로).
+        # sync_props 가 가벼우므로 전체 직렬화(get_data, 히스토리 통째)를 건너뛴다.
+        # ★ 주기 동기화가 매 틱 모든 채팅 노드를 풀 직렬화하던 비용 제거(렉 원인).
+        if hasattr(w, 'sync_props'):
+            data = w.sync_props()
+        else:
+            # 그 외 타입: 통합 직렬화로 전 타입 커버
+            res = self._categorize_selected_item(owner)
+            if not res:
+                return
+            category, _nid, data = res
+            if category in self._PROP_SYNC_EXCLUDE:
                 return
         try:
             import json as _json

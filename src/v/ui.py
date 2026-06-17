@@ -517,6 +517,12 @@ class MainWindow(QMainWindow):
         btn_open.clicked.connect(self._load_board)
         left_layout.addWidget(btn_open)
 
+        btn_server = QPushButton("  \U0001F5A7   서버 접속")
+        btn_server.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_server.setStyleSheet(action_style)
+        btn_server.clicked.connect(self._show_server_browser)
+        left_layout.addWidget(btn_server)
+
         left_layout.addStretch()
         root.addWidget(left)
 
@@ -1000,14 +1006,22 @@ class MainWindow(QMainWindow):
         self._run_board_task(t("menu.import_folder"), task, on_done)
 
     def _connect_to_server(self):
-        # 서버 브라우저(마크식): 서버 목록 → 접속 → 보드 목록 → 열기
-        from v.boards.whiteboard.server_browser import ServerListDialog, ServerBoardListDialog
+        # 메뉴/툴바에서 호출 — 마크식 서버 목록 화면으로 전환
+        self._show_server_browser()
+
+    def _show_server_browser(self):
+        """welcome 좌측 '서버 접속' → 중앙을 서버 목록 화면으로 전환(마인크래프트식)."""
+        from v.boards.whiteboard.server_browser import ServerBrowserWidget
+        w = ServerBrowserWidget(self, show_back=True)
+        w.back_requested.connect(self._show_welcome)
+        w.connect_requested.connect(self._connect_with_info)
+        self.setCentralWidget(w)
+
+    def _connect_with_info(self, info):
+        # 서버 목록에서 선택한 서버로 실제 접속(보드 목록 → 열기)
+        from v.boards.whiteboard.server_browser import ServerBoardListDialog
         from v.boards.whiteboard.server_client import ServerClient
 
-        dlg = ServerListDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        info = dlg.get_selected()
         if not info:
             return
 
