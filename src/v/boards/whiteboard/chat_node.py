@@ -1391,6 +1391,9 @@ class ChatNodeWidget(QWidget, BaseNode):
                 context = "\n\n---\n\n".join(extra_texts)
                 send_msg = f"{context}\n\n---\n\n{msg}" if msg else context
             send_files = list(files) + extra_files
+            # 빈 입력은 큐에도 넣지 않는다(빈 채팅 실행/체인 방지).
+            if not (send_msg and send_msg.strip()) and not send_files and not prompt_entries:
+                return
             self._send_queue.append({
                 "msg": msg, "files": list(files),
                 "model": model, "node_options": node_options,
