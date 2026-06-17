@@ -782,9 +782,15 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
 
     def apply_sync_data(self, data):
         """원격 편집을 제자리 반영(서버모드 협업)."""
+        # 편집 중(포커스)이면 원격 텍스트를 적용하지 않는다(커서 튐/되돌림 방지).
         text = data.get("text", "")
-        if self.toPlainText() != text:
+        if not self.hasFocus() and self.toPlainText() != text:
+            doc = self.document()
+            if doc is not None:
+                doc.blockSignals(True)   # setPlainText → contentsChanged 에코 차단
             self.setPlainText(text)
+            if doc is not None:
+                doc.blockSignals(False)
         fs = data.get("font_size")
         if fs and int(fs) != self._font_size:
             self._font_size = int(fs)

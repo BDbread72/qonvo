@@ -176,7 +176,7 @@ class MarkdownNodeWidget(QWidget, BaseNode):
     def apply_sync_data(self, data):
         """원격 편집을 제자리 반영(현재 보기 모드 유지, 시그널 차단)."""
         md = data.get("markdown")
-        if md is not None and md != self._raw_md:
+        if md is not None and md != self._raw_md and not self.text_area.hasFocus():
             self._raw_md = md
             self.text_area.blockSignals(True)
             if self._preview_mode:

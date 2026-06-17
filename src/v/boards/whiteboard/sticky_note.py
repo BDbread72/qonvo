@@ -181,13 +181,14 @@ class StickyNoteWidget(QWidget, BaseNode):
 
     def apply_sync_data(self, data):
         """원격 편집을 제자리 반영(시그널 차단 → 에코 방지)."""
+        # 내가 편집 중(포커스)인 칸엔 원격 텍스트를 적용하지 않는다(커서 튐/되돌림 방지).
         title = data.get("title", "")
-        if self.title_edit.text() != title:
+        if not self.title_edit.hasFocus() and self.title_edit.text() != title:
             self.title_edit.blockSignals(True)
             self.title_edit.setText(title)
             self.title_edit.blockSignals(False)
         body = data.get("body", "")
-        if self.body_edit.toPlainText() != body:
+        if not self.body_edit.hasFocus() and self.body_edit.toPlainText() != body:
             self.body_edit.blockSignals(True)
             self.body_edit.setPlainText(body)
             self.body_edit.blockSignals(False)
