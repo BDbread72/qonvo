@@ -738,7 +738,9 @@ class WhiteBoardPlugin(
         existing_edges = list(output_port_to_check.edges) if (
             output_port_to_check and hasattr(output_port_to_check, 'edges')) else []
 
-        if output_port_to_check and not output_port_to_check.edges:
+        # 텍스트 채팅은 다음 노드를 '자동 생성'하지 않는다(한 번 채팅에 노드가 줄줄이
+        # 생기던 동작 제거 — 사용자 요청). 이미지 생성 결과만 이미지 카드를 만들어 표시.
+        if output_port_to_check and not output_port_to_check.edges and images:
             from .chat_node import ChatNodeWidget
             if isinstance(node, ChatNodeWidget) and node.proxy:
                 self._auto_create_next_node(node, images)
