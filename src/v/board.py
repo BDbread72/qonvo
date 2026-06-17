@@ -342,6 +342,53 @@ class BoardManager:
         return [(f.stem, f.stat().st_mtime) for f in files]
 
     @staticmethod
+    def delete_board(name: str) -> bool:
+        """보드 .qonvo 파일과 보드별 임시 첨부 디렉토리를 삭제한다."""
+        import shutil
+        boards_dir = BoardManager.get_boards_dir()
+        fp = boards_dir / f"{name}.qonvo"
+        with BoardManager._io_lock:
+            try:
+                if not fp.exists():
+                    return False
+                fp.unlink()
+            except Exception as e:
+                logger.error(f"[DELETE] {name}: {e}")
+                return False
+            try:
+                temp_dir = boards_dir / '.temp' / name
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+        logger.info(f"[DELETE] board removed: {name}")
+        return True
+
+    @staticmethod
+    def rename_board(old: str, new: str) -> bool:
+        """보드 파일명을 변경한다(대상이 이미 있으면 실패). 임시 디렉토리도 함께 이동."""
+        boards_dir = BoardManager.get_boards_dir()
+        src = boards_dir / f"{old}.qonvo"
+        dst = boards_dir / f"{new}.qonvo"
+        with BoardManager._io_lock:
+            if not src.exists() or dst.exists():
+                return False
+            try:
+                src.rename(dst)
+            except Exception as e:
+                logger.error(f"[RENAME] {old}->{new}: {e}")
+                return False
+            try:
+                old_temp = boards_dir / '.temp' / old
+                new_temp = boards_dir / '.temp' / new
+                if old_temp.exists() and not new_temp.exists():
+                    old_temp.rename(new_temp)
+            except Exception:
+                pass
+        logger.info(f"[RENAME] board {old} -> {new}")
+        return True
+
+    @staticmethod
     def save(name: str, data: Dict[str, Any]) -> str:
         boards_dir = BoardManager.get_boards_dir()
         filepath = boards_dir / f"{name}.qonvo"

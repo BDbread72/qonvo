@@ -523,68 +523,199 @@ class MainWindow(QMainWindow):
         btn_server.clicked.connect(self._show_server_browser)
         left_layout.addWidget(btn_server)
 
+        btn_folder = QPushButton("  \U0001F4C1   보드 폴더 열기")
+        btn_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_folder.setStyleSheet(action_style)
+        btn_folder.clicked.connect(self._open_boards_folder)
+        left_layout.addWidget(btn_folder)
+
         left_layout.addStretch()
         root.addWidget(left)
 
+        from PyQt6.QtWidgets import QScrollArea, QLineEdit, QFrame
+
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(40, 60, 40, 40)
+        right_layout.setContentsMargins(40, 50, 40, 28)
+        right_layout.setSpacing(12)
 
-        recent_label = QLabel(t("welcome.recent_boards"))
-        recent_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #eee; margin-bottom: 16px;")
-        right_layout.addWidget(recent_label)
+        header = QHBoxLayout()
+        hdr = QLabel("내 보드")
+        hdr.setStyleSheet("font-size: 18px; font-weight: bold; color: #eee;")
+        header.addWidget(hdr)
+        header.addStretch()
+        self._welcome_count = QLabel("")
+        self._welcome_count.setStyleSheet(f"font-size: 12px; color: {Theme.TEXT_TERTIARY};")
+        header.addWidget(self._welcome_count)
+        right_layout.addLayout(header)
 
-        boards = BoardManager.list_boards_with_mtime()
-        now = time.time()
-        today = datetime.date.today()
+        self._welcome_search = QLineEdit()
+        self._welcome_search.setPlaceholderText("보드 검색…")
+        self._welcome_search.setClearButtonEnabled(True)
+        self._welcome_search.setStyleSheet(
+            "QLineEdit { background:#2d2d2d; color:#ddd; border:1px solid #444;"
+            " border-radius:8px; padding:8px 12px; font-size:13px; }")
+        self._welcome_search.textChanged.connect(self._refresh_welcome_boards)
+        right_layout.addWidget(self._welcome_search)
 
-        if boards:
-            for name, mtime in boards[:get_recent_boards_count()]:
-                dt = datetime.datetime.fromtimestamp(mtime)
-                d = dt.date()
-                if d == today:
-                    when = t("welcome.today")
-                elif d == today - datetime.timedelta(days=1):
-                    when = t("welcome.yesterday")
-                else:
-                    days = (today - d).days
-                    when = t("welcome.days_ago").format(days)
-                time_str = dt.strftime("%H:%M")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+            "QScrollBar:vertical { background:transparent; width:8px; }"
+            "QScrollBar::handle:vertical { background:#444; border-radius:4px; min-height:30px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }")
+        list_container = QWidget()
+        list_container.setStyleSheet("background:transparent;")
+        self._welcome_list_layout = QVBoxLayout(list_container)
+        self._welcome_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._welcome_list_layout.setSpacing(3)
+        self._welcome_list_layout.addStretch()
+        scroll.setWidget(list_container)
+        right_layout.addWidget(scroll, 1)
 
-                row = QWidget()
-                row.setCursor(Qt.CursorShape.PointingHandCursor)
-                row_layout = QHBoxLayout(row)
-                row_layout.setContentsMargins(12, 10, 12, 10)
+        hint = QLabel("클릭하면 열기 · 우클릭으로 이름 변경/삭제")
+        hint.setStyleSheet(f"font-size: 11px; color: {Theme.TEXT_TERTIARY};")
+        right_layout.addWidget(hint)
 
-                name_label = QLabel(name)
-                name_label.setStyleSheet("font-size: 14px; color: #ddd;")
-                row_layout.addWidget(name_label)
-
-                row_layout.addStretch()
-
-                date_label = QLabel(f"{when}  {time_str}")
-                date_label.setStyleSheet(f"font-size: 12px; color: {Theme.TEXT_TERTIARY};")
-                row_layout.addWidget(date_label)
-
-                row.setStyleSheet(f"""
-                    QWidget {{
-                        border-radius: 6px;
-                    }}
-                    QWidget:hover {{
-                        background-color: {Theme.BG_HOVER};
-                    }}
-                """)
-                row.mousePressEvent = lambda e, n=name: self._load_board_by_name(n)
-                right_layout.addWidget(row)
-        else:
-            empty = QLabel(t("welcome.instructions"))
-            empty.setStyleSheet(f"font-size: 13px; color: {Theme.TEXT_TERTIARY};")
-            right_layout.addWidget(empty)
-
-        right_layout.addStretch()
         root.addWidget(right, 1)
-
         self.setCentralWidget(welcome)
+        self._refresh_welcome_boards("")
+
+    # ---- welcome 보드 목록(검색·관리) ----------------------------------
+    def _refresh_welcome_boards(self, filter_text: str = ""):
+        """welcome 보드 목록을 (검색어로 필터해) 다시 그린다."""
+        lay = getattr(self, "_welcome_list_layout", None)
+        if lay is None:
+            return
+        import datetime
+        from v.board import BoardManager
+        try:
+            while lay.count() > 1:   # 끝의 stretch 는 남김
+                it = lay.takeAt(0)
+                w = it.widget()
+                if w:
+                    w.deleteLater()
+        except RuntimeError:
+            return   # welcome 가 이미 교체됨
+        boards = BoardManager.list_boards_with_mtime()
+        ft = (filter_text or "").strip().lower()
+        if ft:
+            boards = [(n, m) for (n, m) in boards if ft in n.lower()]
+        if getattr(self, "_welcome_count", None):
+            self._welcome_count.setText(f"{len(boards)}개")
+        if not boards:
+            msg = "검색 결과가 없습니다." if ft else "보드가 없습니다. 왼쪽에서 새 보드를 만들어 보세요."
+            empty = QLabel(msg)
+            empty.setStyleSheet(f"font-size: 13px; color: {Theme.TEXT_TERTIARY}; padding: 8px;")
+            lay.insertWidget(0, empty)
+            return
+        today = datetime.date.today()
+        for name, mtime in boards:
+            lay.insertWidget(lay.count() - 1, self._make_welcome_board_row(name, mtime, today))
+
+    def _make_welcome_board_row(self, name, mtime, today):
+        import datetime
+        dt = datetime.datetime.fromtimestamp(mtime)
+        d = dt.date()
+        if d == today:
+            when = t("welcome.today")
+        elif d == today - datetime.timedelta(days=1):
+            when = t("welcome.yesterday")
+        else:
+            when = t("welcome.days_ago").format((today - d).days)
+        time_str = dt.strftime("%H:%M")
+
+        row = QWidget()
+        row.setCursor(Qt.CursorShape.PointingHandCursor)
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(12, 10, 12, 10)
+        name_label = QLabel(name)
+        name_label.setStyleSheet("font-size: 14px; color: #ddd; background: transparent;")
+        rl.addWidget(name_label)
+        rl.addStretch()
+        date_label = QLabel(f"{when}  {time_str}")
+        date_label.setStyleSheet(f"font-size: 12px; color: {Theme.TEXT_TERTIARY}; background: transparent;")
+        rl.addWidget(date_label)
+        row.setStyleSheet(
+            f"QWidget {{ border-radius:6px; }} QWidget:hover {{ background-color:{Theme.BG_HOVER}; }}")
+        row.mousePressEvent = lambda e, n=name: self._on_welcome_row_click(e, n)
+        return row
+
+    def _on_welcome_row_click(self, e, name):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._load_board_by_name(name)
+        elif e.button() == Qt.MouseButton.RightButton:
+            self._welcome_board_menu(name, e.globalPosition().toPoint())
+
+    def _welcome_board_menu(self, name, global_pos):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#2d2d2d; color:#ddd; border:1px solid #444; }"
+            "QMenu::item { padding:6px 22px; }"
+            "QMenu::item:selected { background:#0d6efd; }")
+        a_open = menu.addAction("열기")
+        a_rename = menu.addAction("이름 변경")
+        a_reveal = menu.addAction("폴더에서 보기")
+        menu.addSeparator()
+        a_del = menu.addAction("삭제")
+        act = menu.exec(global_pos)
+        if act == a_open:
+            self._load_board_by_name(name)
+        elif act == a_rename:
+            self._rename_board_ui(name)
+        elif act == a_reveal:
+            self._reveal_board(name)
+        elif act == a_del:
+            self._delete_board_ui(name)
+
+    def _rename_board_ui(self, name):
+        import re
+        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        from v.board import BoardManager
+        new, ok = QInputDialog.getText(self, "이름 변경", "새 이름:", text=name)
+        if not ok:
+            return
+        new = (new or "").strip()
+        if not new or new == name:
+            return
+        if re.search(r'[\\/:*?"<>|]', new):
+            QMessageBox.warning(self, "이름 변경", "파일명에 쓸 수 없는 문자가 있습니다.")
+            return
+        if BoardManager.rename_board(name, new):
+            self._refresh_welcome_boards(self._welcome_search.text())
+            if hasattr(self, "_refresh_recent_boards"):
+                self._refresh_recent_boards()
+        else:
+            QMessageBox.warning(self, "이름 변경", "변경할 수 없습니다(같은 이름이 이미 있거나 파일 오류).")
+
+    def _delete_board_ui(self, name):
+        from PyQt6.QtWidgets import QMessageBox
+        from v.board import BoardManager
+        if QMessageBox.question(
+                self, "보드 삭제",
+                f"'{name}' 보드를 삭제할까요?\n되돌릴 수 없습니다.") != QMessageBox.StandardButton.Yes:
+            return
+        if BoardManager.delete_board(name):
+            self._refresh_welcome_boards(self._welcome_search.text())
+            if hasattr(self, "_refresh_recent_boards"):
+                self._refresh_recent_boards()
+        else:
+            QMessageBox.warning(self, "보드 삭제", "삭제할 수 없습니다.")
+
+    def _reveal_board(self, name):
+        import os, subprocess
+        from v.board import BoardManager
+        fp = BoardManager.get_boards_dir() / f"{name}.qonvo"
+        try:
+            if os.name == 'nt' and fp.exists():
+                subprocess.Popen(['explorer', '/select,', os.path.normpath(str(fp))])
+            else:
+                self._open_boards_folder()
+        except Exception:
+            self._open_boards_folder()
 
     def _check_default_board(self):
         """해당 버전 첫 실행이면 default_qonvo URL에서 보드 다운로드"""
@@ -794,6 +925,18 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "_presence", None):
                 self._presence.stop()
+        except Exception:
+            pass
+
+        # 서버 연결·주기 sync 타이머·ping QThread 정리 (종료 지연/QThread 경고 방지)
+        try:
+            if self.current_plugin and hasattr(self.current_plugin, "detach_server_client"):
+                self.current_plugin.detach_server_client()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_server_client", None):
+                self._server_client.disconnect_from_server()
         except Exception:
             pass
 
