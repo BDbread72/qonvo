@@ -439,10 +439,12 @@ class ServerEntryDialog(QDialog):
 
         btns = QHBoxLayout()
         c = QPushButton("취소"); c.clicked.connect(self.reject); btns.addWidget(c)
+        c.setAutoDefault(False); c.setDefault(False)   # Enter 가 취소로 가지 않게
         btns.addStretch()
         ok = QPushButton("저장"); ok.setStyleSheet(
             "padding:7px 22px;background-color:#0d6efd;color:white;font-weight:bold;border-radius:6px;")
         ok.clicked.connect(self._on_save); btns.addWidget(ok)
+        ok.setDefault(True); ok.setAutoDefault(True)   # Enter = 저장
         layout.addLayout(btns)
 
     def _on_save(self):
@@ -496,10 +498,12 @@ class ServerBoardListDialog(QDialog):
         row = QHBoxLayout()
         nb = QPushButton("+ 새 보드"); nb.setStyleSheet("padding:7px 14px;")
         nb.clicked.connect(self._on_new); row.addWidget(nb)
+        nb.setAutoDefault(False); nb.setDefault(False)
         row.addStretch()
         ob = QPushButton("열기"); ob.setStyleSheet(
             "padding:7px 22px;background-color:#0d6efd;color:white;font-weight:bold;border-radius:6px;")
         ob.clicked.connect(self._on_open); row.addWidget(ob)
+        ob.setDefault(True); ob.setAutoDefault(True)   # Enter = 열기
         layout.addLayout(row)
 
         self._load_boards()

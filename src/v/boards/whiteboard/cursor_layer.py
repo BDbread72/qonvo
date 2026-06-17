@@ -81,7 +81,9 @@ class _CursorItem(QGraphicsItem):
 
     def boundingRect(self) -> QRectF:
         s = self._scale
-        return QRectF(-2 * s, -2 * s, (18 + self._lw) * s, (20 + self._lh) * s)
+        m = 4.0  # 안티앨리어싱/빠른 이동 여유 — 뷰가 DontAdjustForAntialiasing 라 잔상 방지용으로 직접 확보
+        return QRectF(-2 * s - m, -2 * s - m,
+                      (18 + self._lw) * s + 2 * m, (20 + self._lh) * s + 2 * m)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)
@@ -135,8 +137,10 @@ class _BubbleItem(QGraphicsItem):
 
     def boundingRect(self) -> QRectF:
         s = self._scale
+        m = 4.0  # 안티앨리어싱/빠른 이동 여유 (잔상 방지)
         top = -(self._below + self._bh + 12)
-        return QRectF(-2 * s, top * s, (self._bw + 4) * s, (self._below + self._bh + 22) * s)
+        return QRectF(-2 * s - m, top * s - m,
+                      (self._bw + 4) * s + 2 * m, (self._below + self._bh + 22) * s + 2 * m)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)

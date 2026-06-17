@@ -732,13 +732,19 @@ class WhiteBoardPlugin(
         elif hasattr(node, 'output_port') and node.output_port is not None:
             output_port_to_check = node.output_port
 
+        # 자동 다음노드 생성으로 새 엣지가 붙기 '전'의 엣지만 트리거 대상으로 스냅샷한다.
+        # (스냅샷 안 하면 방금 만든 다음 노드를 이번 완료 사이클에서 즉시 실행 →
+        #  빈 채팅이 다음 노드를 무한 생성·실행하며 서버를 터뜨림)
+        existing_edges = list(output_port_to_check.edges) if (
+            output_port_to_check and hasattr(output_port_to_check, 'edges')) else []
+
         if output_port_to_check and not output_port_to_check.edges:
             from .chat_node import ChatNodeWidget
             if isinstance(node, ChatNodeWidget) and node.proxy:
                 self._auto_create_next_node(node, images)
 
-        if output_port_to_check and hasattr(output_port_to_check, 'edges'):
-            for edge in list(output_port_to_check.edges):
+        if output_port_to_check:
+            for edge in existing_edges:
                 if edge.source_port is not output_port_to_check:
                     continue
                 target_port = edge.target_port

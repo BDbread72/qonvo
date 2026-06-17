@@ -119,6 +119,7 @@ class SettingsDialog(QDialog):
         btn_cancel = QPushButton(t("button.cancel"))
         btn_cancel.setStyleSheet("padding: 9px 22px; border-radius: 6px;")
         btn_cancel.clicked.connect(self.reject)
+        btn_cancel.setAutoDefault(False); btn_cancel.setDefault(False)
         btn_layout.addWidget(btn_cancel)
         btn_layout.addStretch()
         btn_save = QPushButton(t("button.save"))
@@ -126,6 +127,7 @@ class SettingsDialog(QDialog):
             "padding: 9px 24px; background-color: #0d6efd;"
             " font-weight: bold; border-radius: 6px;")
         btn_save.clicked.connect(self._save)
+        btn_save.setDefault(True); btn_save.setAutoDefault(True)   # Enter = 저장
         btn_layout.addWidget(btn_save)
         outer.addWidget(btn_bar)
 

@@ -1416,6 +1416,12 @@ class ChatNodeWidget(QWidget, BaseNode):
             send_msg = f"{context}\n\n---\n\n{msg}" if msg else context
         send_files = list(files) + extra_files
 
+        # 빈 입력(메시지·파일·프롬프트 전부 없음)이면 실행하지 않는다.
+        # 빈 채팅이 자동 다음노드 생성/체인을 유발해 무한 실행되는 것을 막는 가드.
+        if not (send_msg and send_msg.strip()) and not send_files and not prompt_entries:
+            self._running = False
+            return
+
         self._history.append({
             "user": msg,
             "files": list(files),
