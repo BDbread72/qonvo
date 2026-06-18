@@ -236,7 +236,8 @@ tr:hover td{background:#23262b}
   <p class="muted">Operator 계정으로 로그인하세요.</p>
   <div class="row" style="margin-top:12px"><input id="u" placeholder="사용자" style="flex:1"></div>
   <div class="row" style="margin-top:8px"><input id="p" type="password" placeholder="비밀번호" style="flex:1" onkeydown="if(event.key==='Enter')login()"></div>
-  <div class="row" style="margin-top:12px"><button class="pri" onclick="login()">로그인</button></div>
+  <div class="row" style="margin-top:12px"><button class="pri" onclick="login()">로그인</button>
+    <button id="merribtn" class="hide" onclick="merriLogin()">merri로 로그인</button></div>
   <div id="err" style="margin-top:8px"></div>
 </div>
 
@@ -303,6 +304,24 @@ async function ren(id){ const n=prompt('새 이름:',id); if(!n||n===id)return; 
 async function ua(action,user){ if((action==='ban'||action==='kick')&&!confirm(`${user} ${action}?`))return; await api('user',{action,user}); load(); }
 async function say(){ const m=$('#say').value.trim(); if(!m)return; await api('say',{msg:m}); $('#say').value=''; }
 async function adduser(){ const u=$('#nu').value.trim(); if(!u)return; await api('user',{action:'adduser',user:u,pass:$('#np').value,level:+$('#nl').value}); $('#nu').value='';$('#np').value=''; load(); }
-if(TOK){ show(); load(); }
+function merriLogin(){ location.href='/oauth/mattermost/login?redirect=admin'; }
+async function init(){
+  // merri 로그인 콜백으로 토큰을 들고 돌아온 경우 자동 로그인
+  const q = new URLSearchParams(location.search);
+  if(q.get('token') && q.get('user')){
+    try{
+      const r = await fetch('/admin/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({user:q.get('user'),pass:q.get('token')})});
+      const d = await r.json();
+      history.replaceState({},'',location.pathname);   // URL 에서 토큰 제거
+      if(r.ok){ TOK=d.token; sessionStorage.setItem('qadmin',TOK); show(); load(); return; }
+      $('#err').textContent=d.error||'merri 로그인 실패 (Operator 권한 필요)';
+    }catch(e){ history.replaceState({},'',location.pathname); $('#err').textContent='merri 로그인 오류'; }
+  }
+  // 서버가 merri 인증을 광고하면 버튼 노출
+  try{ const h=await (await fetch('/')).json(); if(h.auth&&h.auth.merri) $('#merribtn').classList.remove('hide'); }catch(e){}
+  if(TOK){ show(); load(); }
+}
+init();
 </script>
 </div></body></html>"""

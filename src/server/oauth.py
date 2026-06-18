@@ -60,8 +60,10 @@ class MattermostOAuth:
         now = time.time()
         # 클라(데스크톱) 프로필 로그인: loopback 콜백으로 결과를 돌려준다.
         loopback = request.query.get("redirect", "")
-        if loopback and not loopback.startswith(("http://127.0.0.1:", "http://localhost:")):
-            loopback = ""  # 로컬 루프백만 허용(보안)
+        # "admin" = 관리자 페이지 자동로그인(동일 출처). 그 외엔 로컬 루프백만 허용(보안).
+        if loopback != "admin" and loopback and not loopback.startswith(
+                ("http://127.0.0.1:", "http://localhost:")):
+            loopback = ""
         params = {
             "client_id": self.client_id,
             "response_type": "code",
@@ -89,6 +91,13 @@ class MattermostOAuth:
 
         if self.allowed_domain and not email.lower().endswith("@" + self.allowed_domain):
             return web.Response(text=f"Email domain not allowed: {email}", status=403)
+
+        # 관리자 페이지 자동 로그인: 1회용 qonvo 토큰을 발급해 /admin 으로 되돌린다(동일 출처).
+        # 실제 Operator 여부는 /admin/api/login 의 authenticate(레벨 오버라이드 포함)가 판단.
+        if loopback == "admin":
+            from urllib.parse import quote
+            token = self._auth.tokens.issue(username, self.default_level, now)
+            raise web.HTTPFound(f"/admin?token={quote(token)}&user={quote(username)}")
 
         # 데스크톱 프로필 로그인: merri 토큰 + merri 주소를 loopback 으로 돌려준다.
         # (People 패널이 merri API 를 직접 호출하려면 base_url 이 필요)
