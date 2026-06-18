@@ -58,6 +58,7 @@ class QonvoServer:
         net = config.get("network", {})
         self.upnp_enabled = bool(net.get("upnp", True))
         self.public_host = net.get("public_host", "") or ""
+        self.public_url = (net.get("public_url", "") or "").rstrip("/")
         self.upnp_lease = int(net.get("upnp_lease", 3600))
         self._upnp = None
         self._upnp_task = None
@@ -89,7 +90,8 @@ class QonvoServer:
         # OAuth 콜백은 공개 주소여야 한다(브라우저가 redirect 됨). public_host 우선.
         _oauth_host = self.public_host or "localhost"
         public_url = f"http://{_oauth_host}:{self.port}"
-        self._oauth = MattermostOAuth(config, self.auth, public_url)
+        # admin_base: 리버스 프록시 뒤 외부 https 주소(있으면 관리자/merri 착지를 이리로)
+        self._oauth = MattermostOAuth(config, self.auth, public_url, admin_base=self.public_url)
         self._oauth.register(self._app)
 
         # Operator 전용 웹 관리자 페이지 (/admin)

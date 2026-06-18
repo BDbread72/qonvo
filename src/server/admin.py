@@ -94,9 +94,13 @@ class AdminPanel:
         user = (data.get("user") or "").strip()
         pw = data.get("pass") or ""
         ok, level, _ = self.s.auth.authenticate(user, pw, time.time())
-        if not ok or level < auth_mod.OPERATOR:
+        if not ok:
             self._record_fail(ip)
-            return web.json_response({"error": "로그인 실패 (Operator만 가능)"}, status=401)
+            return web.json_response({"error": "아이디 또는 비밀번호가 올바르지 않습니다"}, status=401)
+        if level < auth_mod.OPERATOR:
+            # 자격은 맞지만 권한 부족 — 실패 카운트엔 넣지 않음
+            return web.json_response(
+                {"error": f"'{user}' 계정은 Operator 권한이 없습니다 (콘솔/관리자에서 op 필요)"}, status=403)
         self._fails.pop(ip, None)
         tok = secrets.token_urlsafe(32)
         self._sessions[tok] = (user, time.time() + _SESSION_TTL)

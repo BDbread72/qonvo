@@ -67,6 +67,9 @@ whitelist = false
 upnp = true
 # 클라이언트에게 안내할 접속 주소(도메인/DDNS). 비우면 공인 IP 자동 감지.
 public_host = ""
+# 리버스 프록시(nginx 등) 뒤에서 외부 https 주소가 따로 있으면 지정.
+# 예) "https://qonvo.4myway.uk" — 관리자 페이지/merri 로그인 착지를 이 주소로 보낸다.
+public_url = ""
 # UPnP 임대 시간(초). 서버가 주기적으로 갱신한다.
 upnp_lease = 3600
 
@@ -112,7 +115,7 @@ _DEFAULTS: Dict[str, Any] = {
         "allow_guests": False,
     },
     "access": {"whitelist": False},
-    "network": {"upnp": True, "public_host": "", "upnp_lease": 3600},
+    "network": {"upnp": True, "public_host": "", "public_url": "", "upnp_lease": 3600},
     "ai": {
         "gemini_keys": [],
         "openai_keys": [],

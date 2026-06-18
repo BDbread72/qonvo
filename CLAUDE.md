@@ -27,7 +27,7 @@ python -m server seed_board <file.qonvo> <board_id>   # 로컬 .qonvo → 서버
 
 # Run tests (standalone scripts, not pytest)
 python tests/test_improvements.py
-python tests/test_server.py        # 서버 E2E: auth/join/op브로드캐스트/delta/권한/영속화 (9 checks)
+python tests/test_server.py        # 서버 E2E: auth/join/op전타입/delta경계/presence·chat/권한/ban/영속화 (23 checks, hermetic — upnp=False)
 
 # Syntax check a single file
 python -m py_compile src/v/boards/whiteboard/plugin.py

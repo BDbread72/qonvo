@@ -27,7 +27,7 @@ from aiohttp import web
 class MattermostOAuth:
     """Mattermost OAuth2 핸들러 묶음."""
 
-    def __init__(self, config: dict, authenticator, public_url: str):
+    def __init__(self, config: dict, authenticator, public_url: str, admin_base: str = ""):
         mm = config.get("oauth", {}).get("mattermost", {})
         self.enabled = bool(mm.get("enabled"))
         self.base_url = (mm.get("base_url") or "").rstrip("/")
@@ -37,6 +37,8 @@ class MattermostOAuth:
         self.allowed_domain = (mm.get("allowed_email_domain") or "").lower().strip()
         self._auth = authenticator
         self._redirect_uri = f"{public_url.rstrip('/')}/oauth/mattermost/callback"
+        # 리버스 프록시 뒤 외부 https 주소(있으면 관리자 로그인 착지를 이리로). 없으면 상대경로.
+        self._admin_base = (admin_base or "").rstrip("/")
         self._states: Dict[str, dict] = {}  # state -> {exp, loopback}
 
     def register(self, app: web.Application) -> None:
@@ -97,7 +99,9 @@ class MattermostOAuth:
         if loopback == "admin":
             from urllib.parse import quote
             token = self._auth.tokens.issue(username, self.default_level, now)
-            raise web.HTTPFound(f"/admin?token={quote(token)}&user={quote(username)}")
+            # 외부 https 주소가 설정돼 있으면 그리로(포트 없는 깔끔한 주소), 없으면 상대경로
+            raise web.HTTPFound(
+                f"{self._admin_base}/admin?token={quote(token)}&user={quote(username)}")
 
         # 데스크톱 프로필 로그인: merri 토큰 + merri 주소를 loopback 으로 돌려준다.
         # (People 패널이 merri API 를 직접 호출하려면 base_url 이 필요)
