@@ -526,15 +526,43 @@ class QonvoServer:
             logger.info("UPnP unavailable; falling back to direct/manual. host=%s", self.connect_host)
 
     async def _upnp_renew_loop(self) -> None:
-        """임대 만료 전에 주기적으로 매핑을 갱신한다."""
-        interval = max(60, int(self.upnp_lease * 0.7)) if self.upnp_lease else 1800
+        """임대 갱신 + 자가복구.
+
+        기존엔 시작 때 캐시한 컨트롤 URL로만, 임대*0.7(~42분)마다 갱신해서
+        라우터가 한 번 껌뻑이면(재부팅·UPnP 테이블 초기화) 매핑이 사라진 뒤 영영 복구
+        못 했다(=외부 접속 자꾸 끊김). 이제 ①최소 10분마다 재확인 ②갱신 실패 시
+        다시 발견(re-discover)해 재오픈 → 외부 의존성 없이 UPnP 만으로 스스로 복구한다.
+        """
+        base = max(60, int(self.upnp_lease * 0.7)) if self.upnp_lease else 1800
+        interval = min(base, 600)   # 드리프트를 빨리 잡도록 최소 10분 간격
         try:
             while True:
                 await asyncio.sleep(interval)
-                if self._upnp:
-                    await self.loop.run_in_executor(None, self._upnp.add_mapping)
+                if not self._upnp:
+                    continue
+                ok = await self.loop.run_in_executor(None, self._upnp.add_mapping)
+                if ok:
+                    continue
+                # 캐시된 IGD 컨트롤 URL이 무효일 수 있음 → 새로 발견 후 재오픈
+                logger.warning("UPnP renew failed; re-discovering IGD…")
+
+                def _rediscover():
+                    from .upnp import UpnpManager
+                    m = UpnpManager(self.port, description=self.name, lease=self.upnp_lease)
+                    if m.discover() and m.add_mapping():
+                        return m
+                    return None
+
+                fresh = await self.loop.run_in_executor(None, _rediscover)
+                if fresh:
+                    self._upnp = fresh
+                    logger.info("UPnP re-established after re-discovery")
+                else:
+                    logger.warning("UPnP re-discovery failed; retrying next cycle")
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.warning("UPnP renew loop error: %s", e)
 
     async def stop(self) -> None:
         if getattr(self, "_autosave_task", None):
