@@ -354,3 +354,34 @@ class BoardManager:
         with self._lock:
             for b in self._boards.values():
                 b.save_snapshot()
+
+    def delete(self, board_id: str) -> bool:
+        """보드를 캐시에서 내리고 디스크 디렉토리(snapshot/oplog/attachments)를 삭제한다."""
+        import shutil
+        bid = safe_board_id(board_id)
+        with self._lock:
+            self._boards.pop(bid, None)
+        d = get_boards_dir() / bid
+        if not d.exists():
+            return False
+        shutil.rmtree(d, ignore_errors=True)
+        return not d.exists()
+
+    def rename(self, old_id: str, new_id: str) -> bool:
+        """보드 디렉토리명을 바꾼다(대상이 이미 있으면 실패). 캐시는 비워 새로 로드되게 한다."""
+        o = safe_board_id(old_id)
+        n = safe_board_id(new_id)
+        if not n or o == n:
+            return False
+        src = get_boards_dir() / o
+        dst = get_boards_dir() / n
+        if not src.exists() or dst.exists():
+            return False
+        with self._lock:
+            self._boards.pop(o, None)
+            self._boards.pop(n, None)
+        try:
+            src.rename(dst)
+        except Exception:
+            return False
+        return True

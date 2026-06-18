@@ -92,6 +92,11 @@ class QonvoServer:
         self._oauth = MattermostOAuth(config, self.auth, public_url)
         self._oauth.register(self._app)
 
+        # Operator 전용 웹 관리자 페이지 (/admin)
+        from .admin import AdminPanel
+        self.admin = AdminPanel(self)
+        self.admin.register(self._app)
+
     # ---- 인프라 ---------------------------------------------------------
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -480,6 +485,17 @@ class QonvoServer:
     def online_users(self):
         return [(s.username, LEVEL_NAMES.get(s.level, "?"), s.board_id)
                 for s in self.registry.all_sessions() if s.authed]
+
+    def set_user_level(self, username: str, level: int) -> None:
+        """사용자 레벨 변경: 접속 중 세션 즉시 반영 + 로컬 계정이면 users.json 영속화."""
+        s = self.registry.find_user(username)
+        if s:
+            s.level = level
+        from .auth import _load_users, _save_users
+        data = _load_users()
+        if username in data:
+            data[username]["level"] = int(level)
+            _save_users(data)
 
     # ---- 수명주기 -------------------------------------------------------
     async def start(self) -> None:
