@@ -12,7 +12,11 @@
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import os
 import secrets
 import time
 
@@ -20,17 +24,36 @@ from aiohttp import web
 
 from . import auth as auth_mod
 from .board_store import list_boards, safe_board_id
+from .config import get_server_dir
 
-_SESSION_TTL = 1800      # 세션 수명(초) — 사용 시마다 연장
-_MAX_FAILS = 6           # IP 당 연속 로그인 실패 허용
-_LOCK_SECS = 300         # 초과 시 차단 시간(초)
+_SESSION_TTL = 12 * 3600   # 세션 수명(초) — 서명 토큰에 만료시각 내장
+_MAX_FAILS = 6             # IP 당 연속 로그인 실패 허용
+_LOCK_SECS = 300           # 초과 시 차단 시간(초)
+
+
+def _admin_secret() -> bytes:
+    """관리자 세션 서명용 비밀키. 서버 재시작에도 세션이 살아남도록 파일에 영속."""
+    p = get_server_dir() / "admin_secret"
+    try:
+        if p.exists():
+            return p.read_bytes()
+        s = secrets.token_bytes(32)
+        p.write_bytes(s)
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
+        return s
+    except Exception:
+        # 파일 못 쓰면 휘발성(재시작 시 재로그인) — 최소한 동작은 함
+        return secrets.token_bytes(32)
 
 
 class AdminPanel:
     def __init__(self, server):
         self.s = server
-        self._sessions: dict = {}   # token -> (username, expiry)
-        self._fails: dict = {}      # ip -> (count, until)
+        self._secret = _admin_secret()   # 서명 토큰 키(영속)
+        self._fails: dict = {}           # ip -> (count, until)
 
     def register(self, app: web.Application) -> None:
         app.router.add_get("/admin", self._page)
@@ -62,18 +85,31 @@ class AdminPanel:
         a = req.headers.get("Authorization", "")
         return a[7:].strip() if a.startswith("Bearer ") else ""
 
+    def _make_token(self, user: str) -> str:
+        """HMAC 서명 토큰(payload.sig). 만료시각 내장 → 서버 재시작에도 유효."""
+        payload = base64.urlsafe_b64encode(
+            json.dumps({"u": user, "exp": int(time.time()) + _SESSION_TTL}).encode()
+        ).decode().rstrip("=")
+        sig = hmac.new(self._secret, payload.encode(), hashlib.sha256).hexdigest()
+        return f"{payload}.{sig}"
+
     def _check(self, req: web.Request):
-        """유효 세션이면 username 반환(만료 연장), 아니면 None."""
+        """서명 토큰 검증(무상태) → username, 아니면 None."""
         tok = self._bearer(req)
-        ent = self._sessions.get(tok)
-        if not ent:
+        if "." not in tok:
             return None
-        username, expiry = ent
-        if time.time() > expiry:
-            self._sessions.pop(tok, None)
+        payload, _, sig = tok.rpartition(".")
+        expected = hmac.new(self._secret, payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
             return None
-        self._sessions[tok] = (username, time.time() + _SESSION_TTL)
-        return username
+        try:
+            pad = "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload + pad))
+        except Exception:
+            return None
+        if time.time() > data.get("exp", 0):
+            return None
+        return data.get("u")
 
     def _require(self, req: web.Request) -> str:
         u = self._check(req)
@@ -102,12 +138,10 @@ class AdminPanel:
             return web.json_response(
                 {"error": f"'{user}' 계정은 Operator 권한이 없습니다 (콘솔/관리자에서 op 필요)"}, status=403)
         self._fails.pop(ip, None)
-        tok = secrets.token_urlsafe(32)
-        self._sessions[tok] = (user, time.time() + _SESSION_TTL)
-        return web.json_response({"token": tok, "user": user})
+        return web.json_response({"token": self._make_token(user), "user": user})
 
     async def _logout(self, req: web.Request) -> web.Response:
-        self._sessions.pop(self._bearer(req), None)
+        # 무상태 토큰이라 서버 보관분 없음 — 클라가 저장소를 비우면 끝
         return web.json_response({"ok": True})
 
     async def _state(self, req: web.Request) -> web.Response:
@@ -262,7 +296,7 @@ tr:hover td{background:#23262b}
 </div>
 
 <script>
-let TOK = sessionStorage.getItem('qadmin')||'';
+let TOK = localStorage.getItem('qadmin')||'';
 const $ = s=>document.querySelector(s);
 function H(){return {'Authorization':'Bearer '+TOK,'Content-Type':'application/json'}}
 async function api(path, body){
@@ -278,10 +312,10 @@ async function login(){
       body:JSON.stringify({user:$('#u').value,pass:$('#p').value})});
     const d = await r.json();
     if(!r.ok){ $('#err').textContent=d.error||'실패'; return; }
-    TOK=d.token; sessionStorage.setItem('qadmin',TOK); show(); load();
+    TOK=d.token; localStorage.setItem('qadmin',TOK); show(); load();
   }catch(e){ $('#err').textContent='연결 오류'; }
 }
-function logout(){ if(TOK) api('logout',{}).catch(()=>{}); TOK=''; sessionStorage.removeItem('qadmin');
+function logout(){ if(TOK) api('logout',{}).catch(()=>{}); TOK=''; localStorage.removeItem('qadmin');
   $('#app').classList.add('hide'); $('#login').classList.remove('hide'); }
 function show(){ $('#login').classList.add('hide'); $('#app').classList.remove('hide'); }
 function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -318,7 +352,7 @@ async function init(){
         body:JSON.stringify({user:q.get('user'),pass:q.get('token')})});
       const d = await r.json();
       history.replaceState({},'',location.pathname);   // URL 에서 토큰 제거
-      if(r.ok){ TOK=d.token; sessionStorage.setItem('qadmin',TOK); show(); load(); return; }
+      if(r.ok){ TOK=d.token; localStorage.setItem('qadmin',TOK); show(); load(); return; }
       $('#err').textContent=d.error||'merri 로그인 실패 (Operator 권한 필요)';
     }catch(e){ history.replaceState({},'',location.pathname); $('#err').textContent='merri 로그인 오류'; }
   }

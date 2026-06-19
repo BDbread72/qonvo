@@ -316,6 +316,11 @@ class ServerMixin:
         if node and isinstance(node, ChatNodeWidget):
             text = result.get("text", "")
             images = result.get("images", [])
+            err = result.get("error")
+            # 결과가 비어있고 에러가 있으면 빈 '완료' 대신 에러를 표시(원인 보이게).
+            if err and not text and not images:
+                node.set_response(f"⚠️ 오류: {err}", done=True)
+                return
             tokens_in = result.get("tokens_in", 0)
             tokens_out = result.get("tokens_out", 0)
             if tokens_in or tokens_out:

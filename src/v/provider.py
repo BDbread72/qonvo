@@ -15,7 +15,6 @@ from google.genai import types
 # 모델 정의 (ID → 표시 이름)
 MODELS = {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
-    "gemini-3-pro-preview": "Gemini 3.0 Pro",
     "gemini-3-flash-preview": "Gemini 3.0 Flash",
     "gemini-2.5-pro": "Gemini 2.5 Pro",
     "gemini-2.5-flash": "Gemini 2.5 Flash",

@@ -433,6 +433,7 @@ class QonvoServer:
                 "images": result.get("images", []),
                 "tokens_in": result.get("tokens_in", 0),
                 "tokens_out": result.get("tokens_out", 0),
+                "error": result.get("error"),
             }},
         )
         if result.get("error"):
