@@ -490,15 +490,12 @@ class QonvoServer:
                 for s in self.registry.all_sessions() if s.authed]
 
     def set_user_level(self, username: str, level: int) -> None:
-        """사용자 레벨 변경: 접속 중 세션 즉시 반영 + 로컬 계정이면 users.json 영속화."""
+        """사용자 레벨 변경: 접속 중 세션 즉시 반영 + roles.json 에 영속(merri 포함 모든 인증방식)."""
         s = self.registry.find_user(username)
         if s:
             s.level = level
-        from .auth import _load_users, _save_users
-        data = _load_users()
-        if username in data:
-            data[username]["level"] = int(level)
-            _save_users(data)
+        from . import auth as _a
+        _a.set_role(username, int(level))
 
     # ---- 수명주기 -------------------------------------------------------
     async def start(self) -> None:

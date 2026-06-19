@@ -156,6 +156,45 @@ def is_whitelisted(username: str) -> bool:
     return username in _load_names(_wl_path())
 
 
+# ---- 역할(레벨) 오버라이드 — username 기준, 핫 적용(merri 포함 모든 인증방식) ----
+def _roles_path() -> Path:
+    return get_server_dir() / "roles.json"
+
+
+def list_roles() -> Dict[str, int]:
+    p = _roles_path()
+    if not p.exists():
+        return {}
+    try:
+        v = json.loads(p.read_text(encoding="utf-8"))
+        return {str(k): int(x) for k, x in v.items()} if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def get_role(username: str) -> Optional[int]:
+    return list_roles().get(username)
+
+
+def set_role(username: str, level: int) -> None:
+    with _lock:
+        roles = list_roles()
+        roles[username] = int(level)
+        tmp = _roles_path().with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(roles, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, _roles_path())
+
+
+def clear_role(username: str) -> None:
+    with _lock:
+        roles = list_roles()
+        if username in roles:
+            del roles[username]
+            tmp = _roles_path().with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(roles, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, _roles_path())
+
+
 class TokenStore:
     """OAuth 등으로 발급한 1회성 로그인 토큰 저장소 (메모리, TTL)."""
 
@@ -198,7 +237,10 @@ class Authenticator:
         return bool(self._config["server"].get("allow_guests", False))
 
     def _level_override(self, username: str) -> Optional[int]:
-        """config.toml [users] 의 레벨 오버라이드를 반환한다."""
+        """레벨 오버라이드: roles.json(관리자 페이지에서 부여, 즉시·영속) 우선 → config.toml [users]."""
+        r = get_role(username)
+        if r is not None:
+            return r
         ov = self._config.get("users", {}).get(username)
         if isinstance(ov, int):
             return ov

@@ -159,24 +159,37 @@ class AdminPanel:
                 online = 0
             boards.append({"id": bid, "nodes": nodes, "attachments": atts, "online": online})
 
-        levels = auth_mod.list_users()
+        roles = auth_mod.list_roles()       # username -> level (핫 오버라이드, merri 포함)
+        local = auth_mod.list_users()       # users.json (로컬 id/pw 계정)
         banned = set(auth_mod.list_banned())
+        wl = set(auth_mod.list_whitelist())
         online_names = set()
         try:
             online_names = {u[0] for u in self.s.online_users()}
         except Exception:
             pass
-        users = [{"name": n, "level": lv, "online": n in online_names, "banned": n in banned}
-                 for n, lv in sorted(levels.items())]
-        # users.json 에 없는 접속자(게스트/merri)도 노출
-        for n in sorted(online_names):
-            if n not in levels:
-                users.append({"name": n, "level": None, "online": True, "banned": n in banned})
+        names = set(roles) | set(local) | banned | wl | online_names
+
+        def eff_level(n):
+            if n in roles:
+                return roles[n]
+            if n in local:
+                return local[n]
+            return None
+
+        users = [{
+            "name": n,
+            "level": eff_level(n),
+            "online": n in online_names,
+            "banned": n in banned,
+            "whitelisted": n in wl,
+            "local": n in local,
+        } for n in sorted(names)]
 
         return web.json_response({
             "server": self.s.name,
             "online": len(online_names),
-            "whitelist": auth_mod.list_whitelist(),
+            "whitelist_mode": bool(self.s.auth.whitelist_enabled),
             "boards": boards,
             "users": users,
         })
@@ -210,6 +223,8 @@ class AdminPanel:
             self.s.set_user_level(user, auth_mod.OPERATOR)
         elif action == "deop":
             self.s.set_user_level(user, auth_mod.MEMBER)
+        elif action == "setrole":
+            self.s.set_user_level(user, int(data.get("level", auth_mod.MEMBER)))
         elif action == "ban":
             auth_mod.ban_user(user)
             await self.s.kick_user(user)
@@ -217,10 +232,15 @@ class AdminPanel:
             auth_mod.pardon_user(user)
         elif action == "kick":
             await self.s.kick_user(user)
+        elif action == "whitelist":
+            auth_mod.add_whitelist(user)
+        elif action == "unwhitelist":
+            auth_mod.remove_whitelist(user)
         elif action == "adduser":
             auth_mod.add_user(user, data.get("pass") or "", int(data.get("level", auth_mod.MEMBER)))
         elif action == "remove":
             auth_mod.remove_user(user)
+            auth_mod.clear_role(user)
         else:
             return web.json_response({"error": "알 수 없는 동작"}, status=400)
         return web.json_response({"ok": True})
@@ -285,11 +305,20 @@ tr:hover td{background:#23262b}
 
   <div class="card"><h2>보드</h2><table id="boards"><thead><tr><th>ID</th><th>노드</th><th>첨부</th><th>접속</th><th></th></tr></thead><tbody></tbody></table></div>
 
-  <div class="card"><h2>공지 / 사용자 추가</h2>
+  <div class="card"><h2>공지</h2>
     <div class="row"><input id="say" placeholder="전체 공지 메시지" style="flex:1"><button class="sm pri" onclick="say()">공지</button></div>
-    <div class="row" style="margin-top:10px"><input id="nu" placeholder="새 사용자" style="width:140px"><input id="np" type="password" placeholder="비밀번호" style="width:140px">
-      <select id="nl"><option value="1">Member</option><option value="2">Operator</option><option value="0">Visitor</option></select>
-      <button class="sm" onclick="adduser()">계정 추가</button></div>
+  </div>
+
+  <div class="card"><h2>사용자 권한 (merri 사용자명 기준)</h2>
+    <div class="muted" style="margin-bottom:8px">merri 사용자명을 입력해 권한을 주거나 화이트리스트에 추가하세요. 접속한 적 없는 사용자도 미리 지정할 수 있습니다.</div>
+    <div class="row"><input id="ru" placeholder="merri 사용자명" style="width:200px">
+      <select id="rl"><option value="2">Operator</option><option value="1">Member</option><option value="0">Visitor</option></select>
+      <button class="sm pri" onclick="setrole()">권한 적용</button>
+      <button class="sm" onclick="wl()">화이트리스트 추가</button></div>
+    <details style="margin-top:12px"><summary class="muted" style="cursor:pointer">로컬 계정(ID/PW) 추가 — 선택(merri 안 쓸 때)</summary>
+      <div class="row" style="margin-top:8px"><input id="nu" placeholder="아이디" style="width:140px"><input id="np" type="password" placeholder="비밀번호" style="width:140px">
+        <select id="nl"><option value="1">Member</option><option value="2">Operator</option><option value="0">Visitor</option></select>
+        <button class="sm" onclick="adduser()">계정 추가</button></div></details>
   </div>
 
   <div class="card"><h2>사용자</h2><table id="users"><thead><tr><th>이름</th><th>레벨</th><th>상태</th><th></th></tr></thead><tbody></tbody></table></div>
@@ -321,16 +350,19 @@ function show(){ $('#login').classList.add('hide'); $('#app').classList.remove('
 function esc(s){return (s+'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 async function load(){
   let d; try{ d=await api('state'); }catch(e){ return; }
-  $('#srv').textContent=d.server; $('#stat').textContent=`접속 ${d.online}명 · 보드 ${d.boards.length}개`;
+  $('#srv').textContent=d.server; $('#stat').textContent=`접속 ${d.online}명 · 보드 ${d.boards.length}개`+(d.whitelist_mode?' · 화이트리스트 ON':'');
   $('#boards tbody').innerHTML = d.boards.map(b=>`<tr><td>${esc(b.id)}</td><td>${b.nodes}</td><td>${b.attachments}</td><td>${b.online}</td>
     <td class="row"><button class="sm" onclick="ren('${esc(b.id)}')">이름변경</button><button class="sm danger" onclick="delb('${esc(b.id)}')">삭제</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>보드 없음</td></tr>';
   const LV={0:'Visitor',1:'Member',2:'Operator'};
   $('#users tbody').innerHTML = d.users.map(u=>{
     const lvl = u.level==null?'-':(LV[u.level]||u.level);
     const op = u.level===2;
-    const tags = (op?'<span class="pill op">OP</span> ':'')+(u.online?'<span class="pill on">접속</span> ':'')+(u.banned?'<span class="pill ban">BAN</span>':'');
+    const tags = (op?'<span class="pill op">OP</span> ':'')+(u.online?'<span class="pill on">접속</span> ':'')
+      +(u.whitelisted?'<span class="pill">WL</span> ':'')+(u.banned?'<span class="pill ban">BAN</span>':'');
     const n = esc(u.name);
     let act = `<button class="sm" onclick="ua('${op?'deop':'op'}','${n}')">${op?'deop':'op'}</button>`;
+    act += u.whitelisted? `<button class="sm" onclick="ua('unwhitelist','${n}')">WL해제</button>`
+                        : `<button class="sm" onclick="ua('whitelist','${n}')">WL추가</button>`;
     act += u.banned? `<button class="sm" onclick="ua('pardon','${n}')">밴해제</button>`
                    : `<button class="sm danger" onclick="ua('ban','${n}')">밴</button>`;
     act += `<button class="sm" onclick="ua('kick','${n}')">kick</button>`;
@@ -342,6 +374,8 @@ async function ren(id){ const n=prompt('새 이름:',id); if(!n||n===id)return; 
 async function ua(action,user){ if((action==='ban'||action==='kick')&&!confirm(`${user} ${action}?`))return; await api('user',{action,user}); load(); }
 async function say(){ const m=$('#say').value.trim(); if(!m)return; await api('say',{msg:m}); $('#say').value=''; }
 async function adduser(){ const u=$('#nu').value.trim(); if(!u)return; await api('user',{action:'adduser',user:u,pass:$('#np').value,level:+$('#nl').value}); $('#nu').value='';$('#np').value=''; load(); }
+async function setrole(){ const u=$('#ru').value.trim(); if(!u)return; await api('user',{action:'setrole',user:u,level:+$('#rl').value}); $('#ru').value=''; load(); }
+async function wl(){ const u=$('#ru').value.trim(); if(!u)return; await api('user',{action:'whitelist',user:u}); load(); }
 function merriLogin(){ location.href='/oauth/mattermost/login?redirect=admin'; }
 async function init(){
   // merri 로그인 콜백으로 토큰을 들고 돌아온 경우 자동 로그인

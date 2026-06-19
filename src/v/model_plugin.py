@@ -336,3 +336,44 @@ def get_all_model_options() -> Dict[str, Dict]:
     result = dict(MODEL_OPTIONS)
     result.update(PluginRegistry.instance().get_all_plugin_model_options())
     return result
+
+
+# ── 모델 타입/메타데이터 (단일 진실원천) ──
+# 모델의 "타입"(텍스트/이미지)·provider 를 한 곳에서 판별한다. 과거엔 표시이름 이모지와
+# MODEL_OPTIONS 키 유무로 코드 곳곳에서 암묵 추론했음 — 그 흩어진 추론을 여기로 통합.
+
+# 이미지 생성 모델임을 나타내는 옵션 키 (내장 Gemini/Imagen + OpenAI/Anthropic 플러그인 공통)
+_IMAGE_OPTION_KEYS = ("aspect_ratio", "image_size", "image_quality", "background")
+
+
+def is_image_model(model_id: str) -> bool:
+    """이미지 생성 모델 여부. 옵션 스키마에 이미지 전용 키가 있으면 이미지 모델."""
+    opts = get_all_model_options().get(model_id, {})
+    return any(k in opts for k in _IMAGE_OPTION_KEYS)
+
+
+def get_model_provider(model_id: str) -> str:
+    """모델의 provider 표시명 (Gemini / Anthropic / OpenAI …). 검색·그룹핑용."""
+    from v.provider import MODELS as _BUILTIN
+    if model_id in _BUILTIN:
+        return "Gemini"
+    reg = PluginRegistry.instance()
+    pid = reg._model_to_plugin.get(model_id)
+    if pid:
+        meta = reg._discovered.get(pid) or {}
+        return meta.get("name", pid)
+    return ""
+
+
+def get_all_model_meta() -> Dict[str, Dict]:
+    """모든 모델의 통합 메타 {model_id: {name, provider, modality}}.
+    모델 피커(명령 팔레트)와 옵션 위젯 표시 분기의 단일 데이터 소스."""
+    names = get_all_models()
+    meta: Dict[str, Dict] = {}
+    for mid, disp in names.items():
+        meta[mid] = {
+            "name": disp,
+            "provider": get_model_provider(mid),
+            "modality": "image" if is_image_model(mid) else "text",
+        }
+    return meta
