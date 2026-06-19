@@ -28,6 +28,7 @@ from q import t
 from v.model_plugin import get_all_models, get_all_model_ids, get_all_model_options
 from v.theme import Theme
 from .base_node import BaseNode
+from .model_picker import ModelSelectorButton
 from .widgets import DraggableHeader, ResizeHandle, InputDialog
 
 
@@ -580,7 +581,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         model_label.setStyleSheet(f"color: {Theme.TEXT_TERTIARY}; font-size: 11px;")
         model_layout.addWidget(model_label)
 
-        self.model_combo = QComboBox()
+        # 모델 선택 — 명령 팔레트(검색 중심) 피커. 헤더엔 현재 모델만, 클릭하면 검색 팝업.
+        self.model_combo = ModelSelectorButton()
         _all_models = get_all_models()
         _all_model_ids = get_all_model_ids()
         for model_id in _all_model_ids:
@@ -592,28 +594,6 @@ class ChatNodeWidget(QWidget, BaseNode):
                 self.model_combo.setCurrentIndex(_all_model_ids.index(default_model))
         except Exception:
             pass
-        self.model_combo.setMaxVisibleItems(15)
-        self.model_combo.setStyleSheet(
-            f"""
-            QComboBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 6px; padding: 6px 12px; padding-right: 28px;
-                min-width: 150px; font-size: 12px;
-            }}
-            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; background-color: {Theme.BG_HOVER}; }}
-            QComboBox:focus {{ border-color: {Theme.ACCENT_PRIMARY}; }}
-            QComboBox::drop-down {{ border: none; width: 24px; }}
-            QComboBox::down-arrow {{
-                image: none; border-left: 5px solid transparent;
-                border-right: 5px solid transparent; border-top: 6px solid {Theme.TEXT_SECONDARY};
-                margin-right: 8px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                selection-background-color: {Theme.ACCENT_PRIMARY};
-            }}
-            """
-        )
         model_layout.addWidget(self.model_combo)
 
         # aspect ratio combo (shown only for image models)
