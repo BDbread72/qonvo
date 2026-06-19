@@ -40,6 +40,8 @@ class MattermostOAuth:
         # 리버스 프록시 뒤 외부 https 주소(있으면 관리자 로그인 착지를 이리로). 없으면 상대경로.
         self._admin_base = (admin_base or "").rstrip("/")
         self._states: Dict[str, dict] = {}  # state -> {exp, loopback}
+        # 관리자 페이지에서 Mattermost 전체 사용자 검색에 쓸 관리자 본인 토큰(로그인 시 저장)
+        self.admin_mm_tokens: Dict[str, str] = {}  # username -> mattermost access_token
 
     def register(self, app: web.Application) -> None:
         """라우트를 등록한다(비활성 시 안내만)."""
@@ -98,6 +100,8 @@ class MattermostOAuth:
         # 실제 Operator 여부는 /admin/api/login 의 authenticate(레벨 오버라이드 포함)가 판단.
         if loopback == "admin":
             from urllib.parse import quote
+            # 관리자 페이지의 Mattermost 전체 검색에 쓰도록 본인 토큰 보관
+            self.admin_mm_tokens[username] = access_token
             token = self._auth.tokens.issue(username, self.default_level, now)
             # 외부 https 주소가 설정돼 있으면 그리로(포트 없는 깔끔한 주소), 없으면 상대경로
             raise web.HTTPFound(
@@ -114,6 +118,28 @@ class MattermostOAuth:
         # 구버전: 1회용 qonvo 토큰을 화면에 표시(붙여넣기)
         token = self._auth.tokens.issue(username, self.default_level, now)
         return web.Response(text=self._success_page(username, token), content_type="text/html")
+
+    async def search_users(self, token: str, term: str, limit: int = 20):
+        """Mattermost 전체 사용자 검색. username 리스트 반환. 토큰 무효/오류 시 None."""
+        if not (self.enabled and self.base_url and token and term):
+            return []
+        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": ua}) as sess:
+                async with sess.post(
+                    f"{self.base_url}/api/v4/users/search",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"term": term, "limit": int(limit), "allow_inactive": False},
+                ) as r:
+                    if r.status == 401:
+                        return None   # 토큰 만료/무효
+                    if r.status != 200:
+                        return []
+                    data = await r.json()
+            return [u.get("username", "") for u in data if u.get("username")]
+        except Exception:
+            return None
 
     async def validate_token(self, merri_token: str):
         """merri 토큰을 chat 서버에 검증하고 (username, email) 반환. 실패 시 None."""

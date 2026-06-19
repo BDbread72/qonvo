@@ -62,6 +62,29 @@ _IMAGE_GEN_OPTIONS = {
     "top_p": _COMMON_GEN_OPTIONS["top_p"],
 }
 
+# 고급 텍스트 생성 옵션 (stop / seed / JSON 모드) — 텍스트 모델 공통.
+# provider 의 _advanced_config_kwargs() 가 GenerateContentConfig 로 변환한다.
+_ADVANCED_TEXT_OPTIONS = {
+    "stop_sequences": {
+        "type": "string_list",
+        "label": "Stop",
+        "default": [],
+        "placeholder": "쉼표로 구분",
+    },
+    "seed": {
+        "type": "int",
+        "label": "Seed",
+        "min": -1,
+        "max": 2147483647,
+        "default": -1,  # -1 = 미지정(랜덤)
+    },
+    "json_mode": {
+        "type": "bool",
+        "label": "JSON",
+        "default": False,
+    },
+}
+
 _IMAGEN_ASPECT_RATIO_OPTION = {
     "aspect_ratio": {
         "type": "choice",
@@ -117,6 +140,7 @@ MODEL_OPTIONS = {
             "default": "HIGH",
         },
         **_COMMON_GEN_OPTIONS,
+        **_ADVANCED_TEXT_OPTIONS,
     },
     "gemini-3-pro-preview": {
         "thinking_level": {
@@ -126,6 +150,7 @@ MODEL_OPTIONS = {
             "default": "HIGH",
         },
         **_COMMON_GEN_OPTIONS,
+        **_ADVANCED_TEXT_OPTIONS,
     },
     "gemini-3-flash-preview": {
         "thinking_level": {
@@ -135,6 +160,7 @@ MODEL_OPTIONS = {
             "default": "HIGH",
         },
         **_COMMON_GEN_OPTIONS,
+        **_ADVANCED_TEXT_OPTIONS,
     },
     "gemini-2.5-pro": {
         "thinking_budget": {
@@ -145,6 +171,7 @@ MODEL_OPTIONS = {
             "default": 2804,
         },
         **_COMMON_GEN_OPTIONS,
+        **_ADVANCED_TEXT_OPTIONS,
     },
     "gemini-2.5-flash": {
         "thinking_budget": {
@@ -155,6 +182,7 @@ MODEL_OPTIONS = {
             "default": 0,
         },
         **_COMMON_GEN_OPTIONS,
+        **_ADVANCED_TEXT_OPTIONS,
     },
     "gemini-3.1-flash-image-preview": {
         "thinking_level": {
@@ -289,6 +317,24 @@ class GeminiProvider:
         if self._clients[key_index] is None:
             self._clients[key_index] = genai.Client(api_key=self._api_keys[key_index])
         return self._clients[key_index]
+
+    def _advanced_config_kwargs(self, options: dict) -> dict:
+        """노드 옵션(stop_sequences / seed / json_mode)을 GenerateContentConfig 키워드로 변환.
+        미지정(빈 리스트 / seed<0 / json_mode False)은 제외해 기본 동작을 건드리지 않는다."""
+        kwargs = {}
+        stop = options.get("stop_sequences")
+        if stop:
+            if isinstance(stop, str):
+                stop = [s.strip() for s in stop.split(",") if s.strip()]
+            stop = [s for s in stop if s]
+            if stop:
+                kwargs["stop_sequences"] = stop
+        seed = options.get("seed")
+        if seed is not None and isinstance(seed, int) and seed >= 0:
+            kwargs["seed"] = seed
+        if options.get("json_mode"):
+            kwargs["response_mime_type"] = "application/json"
+        return kwargs
 
     def _get_safety_settings(self) -> list:
         """공통 안전 설정 (모두 BLOCK_NONE)"""
@@ -568,6 +614,7 @@ class GeminiProvider:
             top_p=options.get("top_p"),
             max_output_tokens=options.get("max_output_tokens"),
             safety_settings=self._get_safety_settings(),
+            **self._advanced_config_kwargs(options),
         )
 
         if stream:
@@ -604,6 +651,7 @@ class GeminiProvider:
             top_p=options.get("top_p"),
             max_output_tokens=options.get("max_output_tokens"),
             safety_settings=self._get_safety_settings(),
+            **self._advanced_config_kwargs(options),
         )
 
         if stream:
@@ -640,6 +688,7 @@ class GeminiProvider:
             top_p=options.get("top_p"),
             max_output_tokens=options.get("max_output_tokens"),
             safety_settings=self._get_safety_settings(),
+            **self._advanced_config_kwargs(options),
         )
 
         if stream:
@@ -676,6 +725,7 @@ class GeminiProvider:
             top_p=options.get("top_p"),
             max_output_tokens=options.get("max_output_tokens"),
             safety_settings=self._get_safety_settings(),
+            **self._advanced_config_kwargs(options),
         )
 
         if stream:

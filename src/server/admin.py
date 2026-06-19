@@ -64,6 +64,7 @@ class AdminPanel:
         app.router.add_post("/admin/api/board/rename", self._board_rename)
         app.router.add_post("/admin/api/user", self._user_action)
         app.router.add_post("/admin/api/say", self._say)
+        app.router.add_get("/admin/api/mm/search", self._mm_search)
 
     # ---- 인증 헬퍼 ------------------------------------------------------
     @staticmethod
@@ -247,6 +248,40 @@ class AdminPanel:
             await self.s.say(f"[Server] {msg}")
         return web.json_response({"ok": True})
 
+    async def _mm_search(self, req: web.Request) -> web.Response:
+        """Mattermost 전체 사용자 검색(관리자 본인 토큰 사용) + 현재 권한/상태 주석."""
+        admin_user = self._require(req)
+        q = (req.query.get("q") or "").strip()
+        if not q:
+            return web.json_response({"users": []})
+        oauth = getattr(self.s, "_oauth", None)
+        tok = getattr(oauth, "admin_mm_tokens", {}).get(admin_user) if oauth else None
+        if not tok:
+            return web.json_response(
+                {"error": "Mattermost로 다시 로그인하면 전체 검색이 됩니다.", "need_login": True},
+                status=409)
+        names = await oauth.search_users(tok, q)
+        if names is None:
+            oauth.admin_mm_tokens.pop(admin_user, None)
+            return web.json_response(
+                {"error": "Mattermost 세션 만료 — 다시 로그인하세요.", "need_login": True}, status=409)
+        roles = auth_mod.list_roles()
+        banned = set(auth_mod.list_banned())
+        wl = set(auth_mod.list_whitelist())
+        online = set()
+        try:
+            online = {u[0] for u in self.s.online_users()}
+        except Exception:
+            pass
+        users = [{
+            "name": n,
+            "level": roles.get(n),
+            "banned": n in banned,
+            "whitelisted": n in wl,
+            "online": n in online,
+        } for n in names]
+        return web.json_response({"users": users})
+
     async def _page(self, req: web.Request) -> web.Response:
         return web.Response(text=_HTML, content_type="text/html")
 
@@ -303,19 +338,14 @@ tr:hover td{background:#23262b}
     <div class="row"><input id="say" placeholder="전체 공지 메시지" style="flex:1"><button class="sm pri" onclick="say()">공지</button></div>
   </div>
 
-  <div class="card"><h2>사용자 권한 (Mattermost 사용자명)</h2>
-    <div class="muted" style="margin-bottom:8px">Mattermost 사용자명을 입력해 권한을 주거나 화이트리스트에 추가하세요. 접속한 적 없는 사용자도 미리 지정할 수 있습니다.</div>
-    <div class="row"><input id="ru" placeholder="Mattermost 사용자명" style="width:200px">
-      <select id="rl"><option value="2">Operator</option><option value="1">Member</option><option value="0">Visitor</option></select>
-      <button class="sm pri" onclick="setrole()">권한 적용</button>
-      <button class="sm" onclick="wl()">화이트리스트 추가</button></div>
+  <div class="card"><h2>Mattermost 사용자 검색</h2>
+    <div class="muted" style="margin-bottom:8px">Mattermost 전체에서 검색해 권한(Op/Member/Visitor)·화이트리스트·밴을 골라 적용하세요.</div>
+    <input id="mmq" placeholder="🔍 Mattermost 사용자 검색…" style="width:100%" oninput="mmSearch()">
+    <div id="mmres" style="margin-top:10px"></div>
   </div>
 
-  <div class="card">
-    <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
-      <h2 style="margin:0">사용자</h2>
-      <input id="usearch" placeholder="🔍 사용자 검색…" style="width:220px" oninput="renderUsers()">
-    </div>
+  <div class="card"><h2>권한 있는 사용자</h2>
+    <div class="muted" style="margin-bottom:8px">op·화이트리스트·밴이 적용됐거나 현재 접속 중인 사용자.</div>
     <table id="users"><thead><tr><th>이름</th><th>레벨</th><th>상태</th><th></th></tr></thead><tbody></tbody></table>
   </div>
 </div>
@@ -355,9 +385,7 @@ async function load(){
 const LV={0:'Visitor',1:'Member',2:'Operator'};
 let USERS=[];
 function renderUsers(){
-  const f=(($('#usearch')&&$('#usearch').value)||'').trim().toLowerCase();
-  const list=f? USERS.filter(u=>(u.name||'').toLowerCase().includes(f)) : USERS;
-  $('#users tbody').innerHTML = list.map(u=>{
+  $('#users tbody').innerHTML = USERS.map(u=>{
     const lvl = u.level==null?'-':(LV[u.level]||u.level);
     const op = u.level===2;
     const tags = (op?'<span class="pill op">OP</span> ':'')+(u.online?'<span class="pill on">접속</span> ':'')
@@ -370,14 +398,36 @@ function renderUsers(){
                    : `<button class="sm danger" onclick="ua('ban','${n}')">밴</button>`;
     act += `<button class="sm" onclick="ua('kick','${n}')">kick</button>`;
     return `<tr><td>${n}</td><td>${lvl}</td><td>${tags}</td><td class="row">${act}</td></tr>`;
-  }).join('')||`<tr><td colspan=4 class=muted>${f?'검색 결과 없음':'없음'}</td></tr>`;
+  }).join('')||'<tr><td colspan=4 class=muted>없음</td></tr>';
 }
 async function delb(id){ if(!confirm(`보드 '${id}' 삭제? 되돌릴 수 없습니다.`))return; await api('board/delete',{id}); load(); }
 async function ren(id){ const n=prompt('새 이름:',id); if(!n||n===id)return; const r=await api('board/rename',{id,new:n}); if(!r.ok)alert('이름변경 실패(중복/오류)'); load(); }
-async function ua(action,user){ if((action==='ban'||action==='kick')&&!confirm(`${user} ${action}?`))return; await api('user',{action,user}); load(); }
+function refresh(){ load(); if($('#mmq') && $('#mmq').value.trim()) doMmSearch(); }
+async function ua(action,user){ if((action==='ban'||action==='kick')&&!confirm(`${user} ${action}?`))return; await api('user',{action,user}); refresh(); }
+async function uar(user,level){ await api('user',{action:'setrole',user,level}); refresh(); }
 async function say(){ const m=$('#say').value.trim(); if(!m)return; await api('say',{msg:m}); $('#say').value=''; }
-async function setrole(){ const u=$('#ru').value.trim(); if(!u)return; await api('user',{action:'setrole',user:u,level:+$('#rl').value}); $('#ru').value=''; load(); }
-async function wl(){ const u=$('#ru').value.trim(); if(!u)return; await api('user',{action:'whitelist',user:u}); load(); }
+let mmTimer=null;
+function mmSearch(){ clearTimeout(mmTimer); mmTimer=setTimeout(doMmSearch, 300); }
+async function doMmSearch(){
+  const q=$('#mmq').value.trim();
+  if(!q){ $('#mmres').innerHTML=''; return; }
+  let d; try{ d=await api('mm/search?q='+encodeURIComponent(q)); }catch(e){ return; }
+  if(d.error){ $('#mmres').innerHTML=`<div class="muted">${esc(d.error)}`+(d.need_login?` <button class="sm" onclick="merriLogin()">Mattermost 로그인</button>`:'')+`</div>`; return; }
+  if(!d.users || !d.users.length){ $('#mmres').innerHTML='<div class="muted">결과 없음</div>'; return; }
+  $('#mmres').innerHTML = d.users.map(u=>{
+    const n=esc(u.name); const lvl=u.level==null?'':(LV[u.level]||u.level);
+    const tags=(u.level===2?'<span class="pill op">OP</span> ':'')+(u.online?'<span class="pill on">접속</span> ':'')+(u.whitelisted?'<span class="pill">WL</span> ':'')+(u.banned?'<span class="pill ban">BAN</span>':'');
+    return `<div class="row" style="justify-content:space-between;border-bottom:1px solid #2a2d31;padding:7px 2px">
+      <div>${n} <span class="muted">${lvl}</span> ${tags}</div>
+      <div class="row">
+        <button class="sm" onclick="uar('${n}',2)">Op</button>
+        <button class="sm" onclick="uar('${n}',1)">Member</button>
+        <button class="sm" onclick="uar('${n}',0)">Visitor</button>
+        ${u.whitelisted?`<button class="sm" onclick="ua('unwhitelist','${n}')">WL해제</button>`:`<button class="sm" onclick="ua('whitelist','${n}')">WL</button>`}
+        ${u.banned?`<button class="sm" onclick="ua('pardon','${n}')">밴해제</button>`:`<button class="sm danger" onclick="ua('ban','${n}')">밴</button>`}
+      </div></div>`;
+  }).join('');
+}
 function merriLogin(){ location.href='/oauth/mattermost/login?redirect=admin'; }
 async function init(){
   // merri 로그인 콜백으로 토큰을 들고 돌아온 경우 자동 로그인

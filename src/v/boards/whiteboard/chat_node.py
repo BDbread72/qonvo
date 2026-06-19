@@ -29,6 +29,7 @@ from v.model_plugin import get_all_models, get_all_model_ids, get_all_model_opti
 from v.theme import Theme
 from .base_node import BaseNode
 from .model_picker import ModelSelectorButton
+from .options_panel import OptionsPanel
 from .widgets import DraggableHeader, ResizeHandle, InputDialog
 
 
@@ -596,54 +597,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             pass
         model_layout.addWidget(self.model_combo)
 
-        # aspect ratio combo (shown only for image models)
-        self.ratio_combo = QComboBox()
-        self.ratio_combo.setFixedWidth(70)
-        self.ratio_combo.setStyleSheet(
-            f"""
-            QComboBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 4px 6px; font-size: 11px;
-            }}
-            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; }}
-            QComboBox::drop-down {{ border: none; width: 18px; }}
-            QComboBox::down-arrow {{
-                image: none; border-left: 4px solid transparent;
-                border-right: 4px solid transparent; border-top: 5px solid {Theme.TEXT_SECONDARY};
-                margin-right: 4px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
-                border: 1px solid #444; selection-background-color: {Theme.ACCENT_PRIMARY};
-            }}
-            """
-        )
-        self.ratio_combo.hide()
-        model_layout.addWidget(self.ratio_combo)
-
-        self.size_combo = QComboBox()
-        self.size_combo.setFixedWidth(60)
-        self.size_combo.setStyleSheet(
-            f"""
-            QComboBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 4px 6px; font-size: 11px;
-            }}
-            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; }}
-            QComboBox::drop-down {{ border: none; width: 18px; }}
-            QComboBox::down-arrow {{
-                image: none; border-left: 4px solid transparent;
-                border-right: 4px solid transparent; border-top: 5px solid {Theme.TEXT_SECONDARY};
-                margin-right: 4px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
-                border: 1px solid #444; selection-background-color: {Theme.ACCENT_PRIMARY};
-            }}
-            """
-        )
-        self.size_combo.hide()
-        model_layout.addWidget(self.size_combo)
+        # 모든 생성 옵션(비율/해상도/품질 포함)은 'G' 패널(OptionsPanel)에서 스키마 기반으로
+        # 렌더된다 — 모델바에 콤보를 박아 클러터를 만들지 않는다.
 
         # Generation options toggle button
         self.btn_opts_toggle = QPushButton("G")
@@ -679,134 +634,10 @@ class ChatNodeWidget(QWidget, BaseNode):
         model_layout.addStretch()
         layout.addWidget(model_bar)
 
-        # generation options panel (hidden by default)
-        self.opts_panel = QFrame()
-        self.opts_panel.setStyleSheet(f"QFrame {{ background-color: {Theme.BG_INPUT}; border: none; }}")
-        opts_layout = QHBoxLayout(self.opts_panel)
-        opts_layout.setContentsMargins(12, 4, 12, 4)
-        opts_layout.setSpacing(6)
-
-        t_label = QLabel("T:")
-        t_label.setStyleSheet(f"color: {Theme.TEXT_TERTIARY}; font-size: 10px;")
-        opts_layout.addWidget(t_label)
-
-        self.temp_spin = QDoubleSpinBox()
-        self.temp_spin.setRange(0.0, 2.0)
-        self.temp_spin.setSingleStep(0.05)
-        self.temp_spin.setDecimals(2)
-        self.temp_spin.setValue(1.0)
-        self.temp_spin.setFixedWidth(58)
-        self.temp_spin.setStyleSheet(f"""
-            QDoubleSpinBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 2px; font-size: 10px;
-            }}
-        """)
-        opts_layout.addWidget(self.temp_spin)
-
-        p_label = QLabel("P:")
-        p_label.setStyleSheet(f"color: {Theme.TEXT_TERTIARY}; font-size: 10px;")
-        opts_layout.addWidget(p_label)
-
-        self.top_p_spin = QDoubleSpinBox()
-        self.top_p_spin.setRange(0.0, 1.0)
-        self.top_p_spin.setSingleStep(0.05)
-        self.top_p_spin.setDecimals(2)
-        self.top_p_spin.setValue(0.95)
-        self.top_p_spin.setFixedWidth(58)
-        self.top_p_spin.setStyleSheet(f"""
-            QDoubleSpinBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 2px; font-size: 10px;
-            }}
-        """)
-        opts_layout.addWidget(self.top_p_spin)
-
-        max_label = QLabel("Max:")
-        max_label.setStyleSheet(f"color: {Theme.TEXT_TERTIARY}; font-size: 10px;")
-        opts_layout.addWidget(max_label)
-
-        self.max_tokens_spin = QSpinBox()
-        self.max_tokens_spin.setRange(1, 65536)
-        self.max_tokens_spin.setValue(8192)
-        self.max_tokens_spin.setFixedWidth(68)
-        self.max_tokens_spin.setStyleSheet(f"""
-            QSpinBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 2px; font-size: 10px;
-            }}
-        """)
-        opts_layout.addWidget(self.max_tokens_spin)
-
-        _chk_style = f"""
-            QCheckBox {{
-                color: {Theme.TEXT_SECONDARY}; font-size: 10px; spacing: 3px;
-            }}
-            QCheckBox::indicator {{
-                width: 13px; height: 13px; border-radius: 3px;
-                border: 1px solid #555; background-color: #333;
-            }}
-            QCheckBox::indicator:checked {{
-                background-color: {Theme.ACCENT_PRIMARY}; border-color: {Theme.ACCENT_PRIMARY};
-            }}
-        """
-        self.chk_google_search = QCheckBox("Search")
-        self.chk_google_search.setToolTip("Grounding with Google Search")
-        self.chk_google_search.setStyleSheet(_chk_style)
-        self.chk_google_search.hide()
-        opts_layout.addWidget(self.chk_google_search)
-
-        self.chk_image_search = QCheckBox("ImgSearch")
-        self.chk_image_search.setToolTip("Image Search")
-        self.chk_image_search.setStyleSheet(_chk_style)
-        self.chk_image_search.hide()
-        opts_layout.addWidget(self.chk_image_search)
-
-        _img_combo_style = f"""
-            QComboBox {{
-                background-color: #333; color: {Theme.TEXT_PRIMARY}; border: 1px solid #444;
-                border-radius: 4px; padding: 3px 6px; font-size: 10px;
-            }}
-            QComboBox:hover {{ border-color: {Theme.ACCENT_PRIMARY}; }}
-            QComboBox::drop-down {{ border: none; width: 16px; }}
-            QComboBox::down-arrow {{
-                image: none; border-left: 4px solid transparent;
-                border-right: 4px solid transparent; border-top: 5px solid {Theme.TEXT_SECONDARY};
-                margin-right: 4px;
-            }}
-            QComboBox QAbstractItemView {{
-                background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
-                border: 1px solid #444; selection-background-color: {Theme.ACCENT_PRIMARY};
-            }}
-        """
-        _img_lbl_style = f"color: {Theme.TEXT_SECONDARY}; font-size: 10px;"
-
-        self.quality_label = QLabel("Q")
-        self.quality_label.setStyleSheet(_img_lbl_style)
-        self.quality_label.setToolTip("Image Quality (low/medium/high — cost varies up to ~35×)")
-        self.quality_label.hide()
-        opts_layout.addWidget(self.quality_label)
-        self.quality_combo = QComboBox()
-        self.quality_combo.setFixedWidth(78)
-        self.quality_combo.setToolTip("Image Quality (low/medium/high — cost varies up to ~35×)")
-        self.quality_combo.setStyleSheet(_img_combo_style)
-        self.quality_combo.hide()
-        opts_layout.addWidget(self.quality_combo)
-
-        self.bg_label = QLabel("BG")
-        self.bg_label.setStyleSheet(_img_lbl_style)
-        self.bg_label.setToolTip("Background (auto / transparent / opaque)")
-        self.bg_label.hide()
-        opts_layout.addWidget(self.bg_label)
-        self.bg_combo = QComboBox()
-        self.bg_combo.setFixedWidth(92)
-        self.bg_combo.setToolTip("Background (auto / transparent / opaque)")
-        self.bg_combo.setStyleSheet(_img_combo_style)
-        self.bg_combo.hide()
-        opts_layout.addWidget(self.bg_combo)
-
-        opts_layout.addStretch()
-
+        # 생성 옵션 패널 — 스키마 기반(OptionsPanel). 현재 모델의 MODEL_OPTIONS 를 그대로
+        # 렌더하므로 thinking_level/budget 같은 옵션도 자동 노출되고, 새 옵션은 스키마 한 줄.
+        self.opts_panel = OptionsPanel()
+        self.opts_panel.changed.connect(self._on_opts_changed)
         self.opts_panel.hide()
         layout.addWidget(self.opts_panel)
 
@@ -1233,84 +1064,20 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._send(context, [])  # 큐잉 여부는 _send 내부에서 판단
 
     def _on_model_changed(self):
+        """모델 변경 시 옵션 패널을 그 모델의 스키마로 재구성한다(기본값 적용)."""
         model_id = self.model_combo.currentData()
         opts = get_all_model_options().get(model_id, {})
-        ar_spec = opts.get("aspect_ratio")
-        if ar_spec and "values" in ar_spec:
-            self.ratio_combo.blockSignals(True)
-            self.ratio_combo.clear()
-            self.ratio_combo.addItems(ar_spec["values"])
-            default_val = ar_spec.get("default", "")
-            idx = self.ratio_combo.findText(default_val)
-            if idx >= 0:
-                self.ratio_combo.setCurrentIndex(idx)
-            self.ratio_combo.blockSignals(False)
-            self.ratio_combo.show()
-        else:
-            self.ratio_combo.hide()
-        size_spec = opts.get("image_size")
-        if size_spec and "values" in size_spec:
-            self.size_combo.blockSignals(True)
-            self.size_combo.clear()
-            self.size_combo.addItems(size_spec["values"])
-            default_sz = size_spec.get("default", "")
-            idx = self.size_combo.findText(default_sz)
-            if idx >= 0:
-                self.size_combo.setCurrentIndex(idx)
-            self.size_combo.blockSignals(False)
-            self.size_combo.show()
-        else:
-            self.size_combo.hide()
-        quality_spec = opts.get("image_quality")
-        if quality_spec and "values" in quality_spec:
-            self.quality_combo.blockSignals(True)
-            self.quality_combo.clear()
-            self.quality_combo.addItems(quality_spec["values"])
-            default_q = quality_spec.get("default", "")
-            idx = self.quality_combo.findText(default_q)
-            if idx >= 0:
-                self.quality_combo.setCurrentIndex(idx)
-            self.quality_combo.blockSignals(False)
-            self.quality_combo.show()
-            self.quality_label.show()
-        else:
-            self.quality_combo.hide()
-            self.quality_label.hide()
-        bg_spec = opts.get("background")
-        if bg_spec and "values" in bg_spec:
-            self.bg_combo.blockSignals(True)
-            self.bg_combo.clear()
-            self.bg_combo.addItems(bg_spec["values"])
-            default_bg = bg_spec.get("default", "")
-            idx = self.bg_combo.findText(default_bg)
-            if idx >= 0:
-                self.bg_combo.setCurrentIndex(idx)
-            self.bg_combo.blockSignals(False)
-            self.bg_combo.show()
-            self.bg_label.show()
-        else:
-            self.bg_combo.hide()
-            self.bg_label.hide()
-        if "temperature" in opts:
-            self.temp_spin.setValue(opts["temperature"]["default"])
-        if "top_p" in opts:
-            self.top_p_spin.setValue(opts["top_p"]["default"])
-        if "max_output_tokens" in opts:
-            self.max_tokens_spin.setValue(opts["max_output_tokens"]["default"])
-            self.max_tokens_spin.show()
-        else:
-            self.max_tokens_spin.hide()
-        if "google_search" in opts:
-            self.chk_google_search.show()
-        else:
-            self.chk_google_search.setChecked(False)
-            self.chk_google_search.hide()
-        if "image_search" in opts:
-            self.chk_image_search.show()
-        else:
-            self.chk_image_search.setChecked(False)
-            self.chk_image_search.hide()
-        self._collect_node_options()
+        self.opts_panel.set_schema(opts)
+        # 옵션이 없는 모델이면 'G' 토글/패널을 닫아둔다.
+        if not self.opts_panel.has_options() and self.btn_opts_toggle.isChecked():
+            self.btn_opts_toggle.setChecked(False)
+            self.opts_panel.hide()
+        self.btn_opts_toggle.setEnabled(self.opts_panel.has_options())
+        if callable(self.on_modified):
+            self.on_modified(self.node_id)
+
+    def _on_opts_changed(self):
+        """옵션 패널 값 변경 → 보드 dirty 표시."""
         if callable(self.on_modified):
             self.on_modified(self.node_id)
 
@@ -1338,28 +1105,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._send(message, files or [])
 
     def _collect_node_options(self, model=None):
-        model = model or self.model_combo.currentData()
-        node_options = {}
-        opts = get_all_model_options().get(model, {})
-        if "aspect_ratio" in opts:
-            node_options["aspect_ratio"] = self.ratio_combo.currentText()
-        if "image_size" in opts:
-            node_options["image_size"] = self.size_combo.currentText()
-        if "image_quality" in opts:
-            node_options["image_quality"] = self.quality_combo.currentText()
-        if "background" in opts:
-            node_options["background"] = self.bg_combo.currentText()
-        if "temperature" in opts:
-            node_options["temperature"] = self.temp_spin.value()
-        if "top_p" in opts:
-            node_options["top_p"] = self.top_p_spin.value()
-        if "max_output_tokens" in opts:
-            node_options["max_output_tokens"] = self.max_tokens_spin.value()
-        if "google_search" in opts:
-            node_options["google_search"] = self.chk_google_search.isChecked()
-        if "image_search" in opts:
-            node_options["image_search"] = self.chk_image_search.isChecked()
-        return node_options
+        """현재 옵션 패널의 값(스키마 기반)을 그대로 반환. provider 로 흐를 node_options."""
+        return self.opts_panel.values()
 
     def _send(self, msg, files):
         if self._running:
