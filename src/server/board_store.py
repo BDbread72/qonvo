@@ -18,7 +18,26 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from v.logger import get_logger
+
 from .config import get_boards_dir
+
+logger = get_logger("qonvo.server.board")
+
+
+def _atomic_write_text(tmp: Path, dst: Path, text: str) -> None:
+    """tmp 에 쓰고 fsync 한 뒤 dst 로 원자적 교체(전원 손실에도 내구).
+
+    os.replace 만으로는 OS 버퍼에만 남아 전원 손실 시 0바이트/구버전이 될 수 있다.
+    fsync 로 디스크까지 내려쓴 뒤 교체한다. (스냅샷/oplog 압축처럼 드물게 호출되는
+    경로에서만 사용 — 매 op append 는 지연 때문에 fsync 안 함.)
+    """
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dst)
+
 
 # restore_data 가 사용하는 카테고리 키 (리스트 형태로 저장됨)
 _LIST_CATEGORIES = {
@@ -26,7 +45,7 @@ _LIST_CATEGORIES = {
     "markdown_nodes", "buttons", "checklists", "repository_nodes", "nixi_nodes",
     "ups_nodes", "rmv_nodes", "switch_nodes", "latch_nodes", "and_gates",
     "or_gates", "not_gates", "xor_gates", "bulb_nodes", "texts", "group_frames",
-    "image_cards", "dimensions", "edges", "functions_library",
+    "image_cards", "file_nodes", "dimensions", "edges", "functions_library",
 }
 
 # 보드 id 안전화 (경로 조작 방지)
@@ -104,7 +123,9 @@ class Board:
         return True
 
     def list_attachments(self) -> List[str]:
-        return sorted(f.name for f in self._attach_dir.iterdir() if f.is_file())
+        # 쓰다 만 .tmp 부분 파일은 제외(클라가 깨진 파일을 받지 않도록)
+        return sorted(f.name for f in self._attach_dir.iterdir()
+                      if f.is_file() and not f.name.endswith(".tmp"))
 
     def node_count(self) -> int:
         """보드의 노드 총수(엣지/라이브러리 제외)를 doc 에서 센다."""
@@ -132,8 +153,19 @@ class Board:
                 self.doc = payload.get("doc", {})
                 self.seq = int(payload.get("seq", 0))
                 snap_seq = self.seq
-            except Exception:
+            except Exception as e:
+                # 스냅샷 손상: 빈 보드로 덮어써서 영구 유실하지 말고 .corrupt 로 보존하고
+                # oplog 로 가능한 만큼 복구한다(아래에서 seq 0 부터 재생). 손상본을 비켜두면
+                # __init__ 이 복구된 doc 으로 새 스냅샷을 다시 쓴다.
                 self.doc, self.seq = {}, 0
+                try:
+                    corrupt = sp.with_suffix(".json.corrupt")
+                    os.replace(sp, corrupt)
+                    logger.warning(
+                        "snapshot corrupt for board %s: %s — preserved as %s, recovering from oplog",
+                        self.board_id, e, corrupt.name)
+                except Exception:
+                    logger.warning("snapshot corrupt for board %s: %s", self.board_id, e)
         op = self._oplog_path()
         if op.exists():
             try:
@@ -156,14 +188,13 @@ class Board:
         self.seq = max_seq
 
     def _write_snapshot(self) -> None:
-        """스냅샷 파일을 원자적으로 기록한다(dirty 무관)."""
+        """스냅샷 파일을 원자적으로(+fsync) 기록한다(dirty 무관)."""
         sp = self._snapshot_path()
         tmp = sp.with_suffix(".json.tmp")
-        tmp.write_text(
+        _atomic_write_text(
+            tmp, sp,
             json.dumps({"seq": self.seq, "doc": self.doc}, ensure_ascii=False),
-            encoding="utf-8",
         )
-        os.replace(tmp, sp)
 
     def save_snapshot(self) -> None:
         """현재 권위 문서를 원자적으로 저장하고 oplog 를 최근 것만 남긴다."""
@@ -176,14 +207,24 @@ class Board:
                 self._oplog = self._oplog[-_MAX_DELTA_OPS:]
                 opp = self._oplog_path()
                 otmp = opp.with_suffix(".jsonl.tmp")
-                otmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
-                                        for r in self._oplog), encoding="utf-8")
-                os.replace(otmp, opp)
+                _atomic_write_text(
+                    otmp, opp,
+                    "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self._oplog),
+                )
             self._dirty = False
 
-    def _append_oplog(self, record: dict) -> None:
+    def _append_oplog(self, records: List[dict]) -> None:
+        """op 레코드들을 oplog 에 한 번의 파일 핸들로 덧붙인다.
+
+        매 op append 에 fsync 는 하지 않는다(드래그 중 node_move 등 고빈도 op 가
+        루프 스레드에서 fsync 로 매번 멈추면 지연·핑 끊김 유발). 내구성은 주기적
+        스냅샷(_write_snapshot, fsync 포함)이 담보한다.
+        """
+        if not records:
+            return
         with open(self._oplog_path(), "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
     # ---- 동기화 ---------------------------------------------------------
     def snapshot_for_join(self, last_seq: int) -> dict:
@@ -209,6 +250,7 @@ class Board:
     def apply_ops(self, ops: List[dict], author: str) -> int:
         """op 들을 권위 문서에 적용하고 새 seq 를 반환한다."""
         with self._lock:
+            records = []
             for op in ops:
                 try:
                     self._apply_one(op)
@@ -217,7 +259,8 @@ class Board:
                 self.seq += 1
                 record = {"seq": self.seq, "op": op, "author": author}
                 self._oplog.append(record)
-                self._append_oplog(record)
+                records.append(record)
+            self._append_oplog(records)
             self._dirty = True
             return self.seq
 
@@ -257,6 +300,15 @@ class Board:
                 lst = self.doc.get(cat)
                 if isinstance(lst, list):
                     self.doc[cat] = [n for n in lst if _node_id(n) != tid]
+            # 노드에 물려 있던 엣지도 함께 제거(댕글링 엣지가 doc 에 영구 누적되는 것 방지).
+            # 클라는 노드 삭제 시 엣지도 지우므로 권위 doc 도 일치시킨다.
+            edges = self.doc.get("edges")
+            if isinstance(edges, list):
+                self.doc["edges"] = [
+                    e for e in edges
+                    if _as_id(e.get("source_node_id")) != tid
+                    and _as_id(e.get("target_node_id")) != tid
+                ]
         elif t == "node_move":
             n = self._find_node(target)
             if n is not None:

@@ -110,6 +110,8 @@ class SerializationMixin:
         from .nixi_node import NixiNodeWidget
         from .ups_node import UpsNodeWidget
         from .rmv_node import RmvNodeWidget
+        from .number_node import NumberNodeWidget
+        from .math_node import MathNodeWidget
         from .items import TextItem, GroupFrameItem
 
         data = {
@@ -121,7 +123,8 @@ class SerializationMixin:
             "edges": [], "pins": [], "texts": [], "sticky_notes": [],
             "prompt_nodes": [], "markdown_nodes": [], "image_cards": [], "checklists": [],
             "group_frames": [], "dimensions": [], "nixi_nodes": [],
-            "ups_nodes": [], "rmv_nodes": [],
+            "ups_nodes": [], "rmv_nodes": [], "number_nodes": [], "math_nodes": [],
+            "file_nodes": [],
             "next_id": self.app._next_id,
             "system_prompt": self.system_prompt,
             "system_files": list(self.system_files),
@@ -149,6 +152,8 @@ class SerializationMixin:
             NixiNodeWidget: "nixi_nodes",
             UpsNodeWidget: "ups_nodes",
             RmvNodeWidget: "rmv_nodes",
+            NumberNodeWidget: "number_nodes",
+            MathNodeWidget: "math_nodes",
             TextItem: "texts",
             GroupFrameItem: "group_frames",
         }
@@ -196,6 +201,17 @@ class SerializationMixin:
                 nid = getattr(card, 'node_id', None)
                 _save_errors.append(f"image_card {nid}: {e}")
                 logger.error(f"[SAVE] Failed to collect image_card {nid}: {e}", exc_info=True)
+
+        for fnode in self.file_node_items.values():
+            try:
+                nd = fnode.get_data()
+                nd['x'] = fnode.pos().x()
+                nd['y'] = fnode.pos().y()
+                data["file_nodes"].append(nd)
+            except Exception as e:
+                nid = getattr(fnode, 'node_id', None)
+                _save_errors.append(f"file_node {nid}: {e}")
+                logger.error(f"[SAVE] Failed to collect file_node {nid}: {e}", exc_info=True)
         for dim in self.dimension_items.values():
             try:
                 data["dimensions"].append(dim.get_data())
@@ -308,6 +324,8 @@ class SerializationMixin:
         "checklists": "node_id", "image_cards": "node_id",
         "dimensions": "node_id", "nixi_nodes": "node_id",
         "ups_nodes": "node_id", "rmv_nodes": "node_id",
+        "number_nodes": "node_id", "math_nodes": "node_id",
+        "file_nodes": "node_id",
     }
 
     def _categorize_selected_item(self, item):
@@ -325,7 +343,9 @@ class SerializationMixin:
         from .nixi_node import NixiNodeWidget
         from .ups_node import UpsNodeWidget
         from .rmv_node import RmvNodeWidget
-        from .items import TextItem, GroupFrameItem, ImageCardItem
+        from .number_node import NumberNodeWidget
+        from .math_node import MathNodeWidget
+        from .items import TextItem, GroupFrameItem, ImageCardItem, FileNodeItem
         from .dimension_item import DimensionItem
 
         if isinstance(item, QGraphicsProxyWidget):
@@ -373,6 +393,10 @@ class SerializationMixin:
                 return ("ups_nodes", node_id, widget.get_data())
             elif isinstance(widget, RmvNodeWidget):
                 return ("rmv_nodes", node_id, widget.get_data())
+            elif isinstance(widget, NumberNodeWidget):
+                return ("number_nodes", node_id, widget.get_data())
+            elif isinstance(widget, MathNodeWidget):
+                return ("math_nodes", node_id, widget.get_data())
         elif isinstance(item, TextItem):
             node_id = getattr(item, 'node_id', None)
             if node_id is None:
@@ -403,6 +427,11 @@ class SerializationMixin:
             if node_id is None:
                 return None
             return ("image_cards", node_id, item.get_data())
+        elif isinstance(item, FileNodeItem):
+            node_id = getattr(item, 'node_id', None)
+            if node_id is None:
+                return None
+            return ("file_nodes", node_id, item.get_data())
         elif isinstance(item, DimensionItem):
             node_id = getattr(item, 'node_id', None)
             if node_id is None:
@@ -503,11 +532,13 @@ class SerializationMixin:
             self.view._delete_selected_items()
 
     def _delete_item_by_scene_item(self, item):
-        from .items import ImageCardItem, TextItem, GroupFrameItem
+        from .items import ImageCardItem, TextItem, GroupFrameItem, FileNodeItem
         from .dimension_item import DimensionItem
 
         if isinstance(item, DimensionItem):
             self.delete_dimension_item(item)
+        elif isinstance(item, FileNodeItem):
+            self.delete_file_node(item)
         elif isinstance(item, ImageCardItem):
             self.delete_scene_item(item)
         elif isinstance(item, GroupFrameItem):
@@ -518,7 +549,7 @@ class SerializationMixin:
             self.delete_proxy_item(item)
 
     def move_items_to_dimension(self, scene_items, target_dimension):
-        from .items import ImageCardItem, TextItem, GroupFrameItem
+        from .items import ImageCardItem, TextItem, GroupFrameItem, FileNodeItem
         from .dimension_item import DimensionItem
 
         self._sync_single_dimension_window(target_dimension)
@@ -571,8 +602,11 @@ class SerializationMixin:
                           self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                           self.xor_gate_proxies, self.bulb_proxies,
                           self.checklist_proxies, self.repository_proxies,
-                          self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                          self.nixi_proxies, self.ups_proxies, self.rmv_proxies,
+                          self.number_proxies, self.math_proxies):
                     d.pop(nid, None)
+            elif isinstance(item, FileNodeItem):
+                self.file_node_items.pop(nid, None)
             elif isinstance(item, ImageCardItem):
                 self.image_card_items.pop(nid, None)
             elif isinstance(item, DimensionItem):
@@ -628,7 +662,7 @@ class SerializationMixin:
     def restore_data(self, data):
         from .function_types import FunctionDefinition
         from .chat_node import ChatNodeWidget
-        from .items import ImageCardItem
+        from .items import ImageCardItem, FileNodeItem
         from .ups_node import UpsNodeWidget
         from .rmv_node import RmvNodeWidget
 
@@ -658,6 +692,7 @@ class SerializationMixin:
             (_temp / 'attachments').mkdir(parents=True, exist_ok=True)
             ChatNodeWidget._board_temp_dir = str(_temp)
             ImageCardItem._board_temp_dir = str(_temp)
+            FileNodeItem._board_temp_dir = str(_temp)
             UpsNodeWidget._board_temp_dir = str(_temp)
             RmvNodeWidget._board_temp_dir = str(_temp)
 
@@ -667,10 +702,11 @@ class SerializationMixin:
             for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                       self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                       self.checklist_proxies, self.repository_proxies,
-                      self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                      self.nixi_proxies, self.ups_proxies, self.rmv_proxies,
+                      self.number_proxies, self.math_proxies):
                 for proxy in d.values():
                     self._remove_ports_and_edges(self._collect_ports(proxy))
-            for d in (self.image_card_items, self.dimension_items):
+            for d in (self.image_card_items, self.file_node_items, self.dimension_items):
                 for item in d.values():
                     self._remove_ports_and_edges(self._collect_ports(item))
 
@@ -712,11 +748,17 @@ class SerializationMixin:
                 self.scene.removeItem(proxy)
             for proxy in list(self.rmv_proxies.values()):
                 self.scene.removeItem(proxy)
+            for proxy in list(self.number_proxies.values()):
+                self.scene.removeItem(proxy)
+            for proxy in list(self.math_proxies.values()):
+                self.scene.removeItem(proxy)
             for item in list(self.text_items.values()):
                 self.scene.removeItem(item)
             for item in list(self.group_frame_items.values()):
                 self.scene.removeItem(item)
             for item in list(self.image_card_items.values()):
+                self.scene.removeItem(item)
+            for item in list(self.file_node_items.values()):
                 self.scene.removeItem(item)
             for item in list(self.dimension_items.values()):
                 self.scene.removeItem(item)
@@ -741,9 +783,12 @@ class SerializationMixin:
         self.nixi_proxies.clear()
         self.ups_proxies.clear()
         self.rmv_proxies.clear()
+        self.number_proxies.clear()
+        self.math_proxies.clear()
         self.text_items.clear()
         self.group_frame_items.clear()
         self.image_card_items.clear()
+        self.file_node_items.clear()
         self.dimension_items.clear()
         self.app.nodes.clear()
 

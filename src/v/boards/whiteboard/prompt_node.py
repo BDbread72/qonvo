@@ -251,6 +251,29 @@ class PromptNodeWidget(QWidget, BaseNode):
         text = self.body_edit.toPlainText()
         self.tokens_label.setText(f"{len(text)}자")
 
+    def on_signal_input(self, input_data=None):
+        """입력 포트로 들어온 텍스트를 본문에 채운다(양방향 텍스트 노드).
+
+        편집 중(포커스)이면 덮어쓰지 않는다. 상위 노드 완료 시 _emit_complete_signal
+        이 input_data 를 직접 넘겨주고, 없으면 연결된 소스에서 끌어온다.
+        """
+        data = input_data if input_data is not None else self._collect_input_data()
+        if data is None:
+            return
+        text = str(data)
+        if self.body_edit.hasFocus() or self.body_edit.toPlainText() == text:
+            return
+        self.body_edit.blockSignals(True)
+        self.body_edit.setPlainText(text)
+        self.body_edit.blockSignals(False)
+        self._update_token_count()
+        self._on_change()
+
+    @property
+    def text_content(self):
+        """하위 노드가 본문을 끌어갈 때 쓰는 텍스트(출력)."""
+        return self.body_edit.toPlainText()
+
     @property
     def prompt_enabled(self):
         return self._prompt_enabled

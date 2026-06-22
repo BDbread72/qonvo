@@ -41,6 +41,9 @@ ID_KEY_MAP = {
     "nixi_nodes": "node_id",
     "ups_nodes": "node_id",
     "rmv_nodes": "node_id",
+    "number_nodes": "node_id",
+    "math_nodes": "node_id",
+    "file_nodes": "node_id",
 }
 
 # 기본 아이템 크기 (w, h가 없는 경우 사용)
@@ -62,6 +65,9 @@ _DEFAULT_SIZE = {
     "nixi_nodes": (200, 180),
     "ups_nodes": (200, 150),
     "rmv_nodes": (200, 150),
+    "number_nodes": (200, 150),
+    "math_nodes": (190, 150),
+    "file_nodes": (240, 110),
 }
 
 

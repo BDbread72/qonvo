@@ -88,6 +88,11 @@ class ServerClient(QObject):
         self._last_seq: int = 0
         self._http_token = ""   # 첨부 HTTP 전송용 토큰 (auth_ok 에서 수신)
         self._http_base = ""    # http(s)://host:port (ws url 에서 파생)
+        self._server_models: dict = {}  # 서버가 돌릴 수 있는 모델 {id: name} (auth_ok)
+        self._server_model_options: dict = {}  # 서버 모델 옵션 스키마 {id: {opt: schema}} (auth_ok)
+        self._server_version = ""       # 서버 앱 의미버전 (auth_ok)
+        self._server_protocol = 0       # 서버 프로토콜 버전 (auth_ok). 0=구버전(미보고)
+        self._server_min_protocol = 0   # 서버가 요구하는 최소 클라 프로토콜 (auth_ok)
         self._ping_ms = 0
         self._last_cursor = None
         self._last_select = None
@@ -181,8 +186,8 @@ class ServerClient(QObject):
 
     def send_ai_request(self, node_id: str, model: str, message: str,
                         files: list | None = None, system_prompt: str = "",
-                        options: dict | None = None):
-        """서버에 AI 요청을 전송한다."""
+                        options: dict | None = None, count: int = 1):
+        """서버에 AI 요청을 전송한다. count>1 이면 preferred(N개 후보) 모드."""
         self._send({
             "type": "ai_request",
             "node_id": str(node_id),
@@ -192,6 +197,7 @@ class ServerClient(QObject):
                 "files": files or [],
                 "system_prompt": system_prompt,
                 "options": options or {},
+                "count": count,
             },
         })
 
@@ -223,6 +229,31 @@ class ServerClient(QObject):
     def http_token(self) -> str:
         """첨부 HTTP 전송용 토큰."""
         return self._http_token
+
+    @property
+    def server_models(self) -> dict:
+        """서버가 돌릴 수 있는 모델 {id: name} (auth_ok 에서 수신). 서버모드 피커용."""
+        return dict(self._server_models)
+
+    @property
+    def server_model_options(self) -> dict:
+        """서버 모델 옵션 스키마 {id: {opt: schema}} (auth_ok). 서버모드 옵션패널용."""
+        return dict(self._server_model_options)
+
+    @property
+    def server_version(self) -> str:
+        """서버 앱 의미버전 (auth_ok). 구버전 서버면 ''."""
+        return self._server_version
+
+    @property
+    def server_protocol(self) -> int:
+        """서버 프로토콜 버전 (auth_ok). 0=구버전(미보고)."""
+        return self._server_protocol
+
+    @property
+    def server_min_protocol(self) -> int:
+        """서버가 요구하는 최소 클라 프로토콜 (auth_ok)."""
+        return self._server_min_protocol
 
     @property
     def http_base(self) -> str:
@@ -324,6 +355,17 @@ class ServerClient(QObject):
         elif msg_type == "auth_ok":
             self._level = msg.get("level", 0)
             self._http_token = msg.get("http_token", "")
+            self._server_models = msg.get("models") or {}
+            self._server_model_options = msg.get("model_options") or {}
+            self._server_version = msg.get("server_version", "") or ""
+            try:
+                self._server_protocol = int(msg.get("protocol", 0) or 0)
+            except Exception:
+                self._server_protocol = 0
+            try:
+                self._server_min_protocol = int(msg.get("min_protocol", 0) or 0)
+            except Exception:
+                self._server_min_protocol = 0
             boards = msg.get("boards", [])
             self.auth_ok.emit(self._level, boards)
 
@@ -447,6 +489,13 @@ class _WebSocketThread(QThread):
                     "user": self._username,
                     "pass": self._password,
                 }
+                # 버전 핸드셰이크: 서버가 요구버전(min_protocol) 검사·경고에 쓴다.
+                try:
+                    from v.proto import PROTOCOL_VERSION, app_version
+                    payload["protocol"] = PROTOCOL_VERSION
+                    payload["client_version"] = app_version()
+                except Exception:
+                    pass
                 if self._merri:
                     payload["merri"] = True
                 ws.send(json.dumps(payload, ensure_ascii=False))
@@ -472,7 +521,9 @@ class _WebSocketThread(QThread):
                 on_error=on_error,
                 on_close=on_close,
             )
-            self._ws.run_forever(ping_interval=30, ping_timeout=10)
+            # ping_timeout 을 넉넉히(18s) — 서버가 잠깐 바쁘거나 망이 출렁여도
+            # 곧장 끊지 않는다(과거 10s 라 작업 중 'ping/pong timed out' 오진 빈발).
+            self._ws.run_forever(ping_interval=20, ping_timeout=18)
         except Exception as e:
             if self._running:
                 self.connection_error.emit(str(e))

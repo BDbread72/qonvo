@@ -26,3 +26,6 @@ Desktop.ini
 build_qonvo.log
 qonvo-server-dist.zip
 *.spec.bak
+
+# 빌드 스탬프(누적 커밋 수) — crack 스크립트가 생성/삭제하는 산출물
+buildno.txt

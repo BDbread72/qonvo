@@ -11,11 +11,16 @@
 #  - 새 소셜/서버 모듈은 지연 import 라서 --collect-submodules 로 통째 수집
 set -e
 
+# 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
+printf '%s' "$(git rev-list --count HEAD)" > buildno.txt
+trap 'rm -f buildno.txt' EXIT
+
 python3 -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --distpath . \
     --add-data "icon.ico:." \
     --add-data "icon.png:." \
     --add-data "lang:lang" \
     --add-data "build.toml:." \
+    --add-data "buildno.txt:." \
     --add-data "plugins:plugins" \
     --add-data "icons:icons" \
     --collect-all openai \

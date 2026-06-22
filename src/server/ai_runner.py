@@ -52,6 +52,39 @@ def build_router(config: dict):
     return ProviderRouter(gemini_provider=gemini)
 
 
+def available_models(router) -> Dict[str, str]:
+    """서버가 실제로 돌릴 수 있는 모델 {id: 표시이름}.
+
+    Gemini 는 키가 있을 때(router.gemini)만, 플러그인(OpenAI/Anthropic 등)은
+    build_router 에서 force_enable 된 것만 포함된다. 클라가 서버모드에서 이
+    목록으로 모델 피커를 채운다(서버 config 에 키 없는 provider 는 안 뜸).
+    """
+    out: Dict[str, str] = {}
+    try:
+        from v.provider import MODELS
+        from v.model_plugin import PluginRegistry
+        if getattr(router, "gemini", None) is not None:
+            out.update(MODELS)
+        out.update(PluginRegistry.instance().get_all_plugin_models())
+    except Exception:
+        pass
+    return out
+
+
+def available_model_options(router) -> Dict[str, Any]:
+    """서버 모델들의 옵션 스키마 {model_id: {opt: schema}}.
+
+    클라가 서버모드에서 이 스키마로 옵션 패널(G 버튼·aspect ratio 등)을 구성한다.
+    서버 전용 모델(gpt-image 등)의 옵션이 클라에 없어 1:1 고정되던 문제를 푼다.
+    build_router 에서 force_enable 된 플러그인의 옵션이 포함된다.
+    """
+    try:
+        from v.model_plugin import get_all_model_options
+        return get_all_model_options()
+    except Exception:
+        return {}
+
+
 def _b64(img: Any) -> Optional[str]:
     """이미지 데이터(bytes/str)를 base64 문자열로 변환한다."""
     if isinstance(img, bytes):

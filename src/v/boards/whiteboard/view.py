@@ -13,7 +13,7 @@ from PyQt6.QtGui import (
     QWheelEvent, QMouseEvent, QKeyEvent, QCursor
 )
 
-from .items import PinItem, TextItem, PortItem, TempEdgeItem, EdgeItem, ImageCardItem, GroupFrameItem
+from .items import PinItem, TextItem, PortItem, TempEdgeItem, EdgeItem, ImageCardItem, GroupFrameItem, FileNodeItem
 from .dimension_item import DimensionItem
 # from .minimap import BranchGraphWidget  # 미니맵 제거(미사용)
 from .radial_menu import RadialMenu
@@ -133,11 +133,8 @@ class WhiteboardView(QGraphicsView):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 if url.isLocalFile():
-                    from pathlib import Path
-                    ext = Path(url.toLocalFile()).suffix.lower()
-                    if ext in self._IMAGE_EXTENSIONS:
-                        event.acceptProposedAction()
-                        return
+                    event.acceptProposedAction()
+                    return
         event.ignore()
 
     def dragMoveEvent(self, event):
@@ -153,15 +150,21 @@ class WhiteboardView(QGraphicsView):
         from pathlib import Path
         base_pos = self.mapToScene(event.position().toPoint())
         offset = 0
+        other_files = []
         for url in event.mimeData().urls():
             if not url.isLocalFile():
                 continue
             path = Path(url.toLocalFile())
-            if path.suffix.lower() not in self._IMAGE_EXTENSIONS:
-                continue
+            if path.suffix.lower() in self._IMAGE_EXTENSIONS:
+                drop_pos = QPointF(base_pos.x() + offset, base_pos.y() + offset)
+                self.plugin.add_image_card(str(path), drop_pos)
+                offset += 30
+            elif path.is_file():
+                other_files.append(str(path))
+        # 이미지가 아닌 파일들은 하나의 파일 노드로 묶어 배치
+        if other_files:
             drop_pos = QPointF(base_pos.x() + offset, base_pos.y() + offset)
-            self.plugin.add_image_card(str(path), drop_pos)
-            offset += 30
+            self.plugin.add_file_node(other_files, drop_pos)
         event.acceptProposedAction()
 
     def focusNextPrevChild(self, next):
@@ -299,6 +302,40 @@ class WhiteboardView(QGraphicsView):
         scene = self.scene()
         if scene and hasattr(scene, '_snap_engine'):
             scene._snap_engine.clear_guides()
+
+    def _deselect_proxy_text_inputs(self, press_item=None):
+        """다른 곳을 클릭하면 프록시 노드 내부 QLineEdit/QTextEdit 의
+        잔류 캐럿/선택을 제거한다. (scene().clearFocus() 만으론 임베드 위젯의
+        깜빡이는 커서·하이라이트가 안 사라지는 문제 보정.)
+
+        ⚠️ 포커스 소스는 scene.focusItem() 이 아니라 QApplication.focusWidget()
+        을 쓴다. QGraphicsProxyWidget 안의 위젯이 실제로 포커스를 잡아도
+        scene.focusItem() 은 None/엉뚱한 값을 돌려줘서(이 때문에 캐럿이 안 지워짐)
+        — 앱 전역 포커스 위젯이 임베드 위젯을 정확히 가리키는 단일 진실원이다.
+
+        같은 노드를 다시 클릭하는 경우(press_item 이 그 위젯을 품은 프록시)는
+        건드리지 않아 더블클릭 단어선택/커서 재배치가 깨지지 않는다.
+        """
+        from PyQt6.QtWidgets import (
+            QApplication, QGraphicsProxyWidget, QLineEdit, QTextEdit, QPlainTextEdit,
+        )
+        fw = QApplication.focusWidget()
+        if not isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            return
+        # 방금 클릭한 아이템이 이 위젯을 품은 프록시면(같은 노드 재클릭) 그대로 둔다.
+        if isinstance(press_item, QGraphicsProxyWidget):
+            pw = press_item.widget()
+            if pw is not None and (pw is fw or pw.isAncestorOf(fw)):
+                return
+        if isinstance(fw, QLineEdit):
+            if fw.hasSelectedText():
+                fw.deselect()
+        elif isinstance(fw, (QTextEdit, QPlainTextEdit)):
+            cur = fw.textCursor()
+            if cur.hasSelection():
+                cur.clearSelection()
+                fw.setTextCursor(cur)
+        fw.clearFocus()
 
     def _clear_label_selections(self):
         """모든 텍스트 선택 해제 (QLabel + TextItem) — 추적 기반 최적화"""
@@ -515,6 +552,7 @@ class WhiteboardView(QGraphicsView):
 
     def mousePressEvent(self, event: QMouseEvent):
         self._clear_label_selections()
+        self._deselect_proxy_text_inputs(self.itemAt(event.pos()))
         self.scene().clearFocus()
 
         # 메뉴 열려있으면 클릭한 아이템 실행
@@ -744,7 +782,7 @@ class WhiteboardView(QGraphicsView):
                 if item not in candidates:
                     item.setSelected(False)
         for item in candidates:
-            if isinstance(item, (PinItem, TextItem, ImageCardItem, GroupFrameItem, DimensionItem)):
+            if isinstance(item, (PinItem, TextItem, ImageCardItem, FileNodeItem, GroupFrameItem, DimensionItem)):
                 in_rect = self._selection_rect.contains(item.pos())
                 if add_mode:
                     if in_rect:
@@ -777,12 +815,15 @@ class WhiteboardView(QGraphicsView):
             self._chat_input.setStyleSheet(
                 "QLineEdit { background:#26262b; color:#eee; border:2px solid #0d6efd;"
                 " border-radius:10px; padding:9px 14px; font-size:14px; }")
-            self._chat_input.returnPressed.connect(self._send_chat_input)
+            # Return 은 eventFilter 에서 직접 처리(consume) → 뷰 keyPressEvent 로 전파돼
+            # 채팅창이 즉시 재오픈되던 버그 방지. 그래서 returnPressed 는 연결하지 않는다.
             self._chat_input.installEventFilter(self)
         w = min(420, max(280, self.width() - 80))
         self._chat_input.setFixedWidth(w)
         self._chat_input.move((self.width() - w) // 2, self.height() - 64)
-        self._chat_input.clear()
+        # 이미 떠 있던(연속 채팅 유지) 입력창이면 입력 중 텍스트를 지우지 않고 포커스만.
+        if not self._chat_input.isVisible():
+            self._chat_input.clear()
         self._chat_input.show()
         self._chat_input.raise_()
         self._chat_input.setFocus()
@@ -814,9 +855,19 @@ class WhiteboardView(QGraphicsView):
                 self.setFocus()
                 self._report_cursor_state()
                 return True
+            # Return/Enter 는 여기서 전송 처리하고 **소비**한다(return True) → 부모 뷰의
+            # keyPressEvent 로 전파돼 채팅창이 다시 열리는 것을 막는다.
+            if (event.type() == QEvent.Type.KeyPress
+                    and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+                self._send_chat_input()
+                return True
             if event.type() == QEvent.Type.FocusOut:
-                self._chat_input.hide()
-                self._report_cursor_state()
+                # 연속 채팅 유지(stay-open) 모드면 포커스가 빠져도 닫지 않는다 —
+                # 전송 시 잠깐 포커스가 튀어 입력창이 닫혀버리던 버그. 닫기는 Esc 로만.
+                from v.settings import get_setting
+                if not get_setting("chat_stay_open", False):
+                    self._chat_input.hide()
+                    self._report_cursor_state()
         return super().eventFilter(obj, event)
 
     def drawForeground(self, painter: QPainter, rect: QRectF):
@@ -908,7 +959,7 @@ class WhiteboardView(QGraphicsView):
     def _select_all_items(self):
         """모든 선택 가능한 아이템 선택"""
         for item in self.scene().items():
-            if isinstance(item, (PinItem, TextItem, ImageCardItem, GroupFrameItem, DimensionItem)):
+            if isinstance(item, (PinItem, TextItem, ImageCardItem, FileNodeItem, GroupFrameItem, DimensionItem)):
                 item.setSelected(True)
             elif isinstance(item, QGraphicsProxyWidget) and item.flags() & QGraphicsProxyWidget.GraphicsItemFlag.ItemIsSelectable:
                 item.setSelected(True)
@@ -936,6 +987,8 @@ class WhiteboardView(QGraphicsView):
                 )
                 if reply == QMessageBox.StandardButton.Yes:
                     self.plugin.delete_dimension_item(item)
+            elif isinstance(item, FileNodeItem):
+                self.plugin.delete_file_node(item)
             elif isinstance(item, ImageCardItem):
                 self.plugin.delete_scene_item(item)
             elif isinstance(item, GroupFrameItem):

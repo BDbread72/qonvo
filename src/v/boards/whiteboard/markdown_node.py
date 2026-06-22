@@ -137,17 +137,33 @@ class MarkdownNodeWidget(QWidget, BaseNode):
     def _on_text_changed(self):
         """편집 중 변경이 발생하면 수정 콜백을 호출한다."""
         if not self._preview_mode:
+            self._raw_md = self.text_area.toPlainText()
+            self._sync_output()
             if self.on_modified:
                 self.on_modified()
 
+    @property
+    def text_content(self):
+        """하위 노드가 끌어갈 마크다운 텍스트(출력)."""
+        if not self._preview_mode:
+            return self.text_area.toPlainText()
+        return self._raw_md
+
+    def _sync_output(self):
+        """출력 포트 값 갱신 — 하위 노드가 끌어가도록."""
+        port = getattr(self, 'output_port', None)
+        if port is not None:
+            port.port_value = self.text_content
+
     def on_signal_input(self, input_data=None):
         """외부 신호 입력을 받아 마크다운 내용을 갱신한다."""
-        data = self._collect_input_data()
+        data = input_data if input_data is not None else self._collect_input_data()
         if data:
             self._raw_md = str(data)
             # 미리보기 모드에서만 화면 갱신 (편집 중 덮어쓰기 방지)
             if self._preview_mode:
                 self.text_area.setMarkdown(self._raw_md)
+            self._sync_output()
 
     def set_markdown(self, md_text):
         """마크다운 텍스트를 설정하고 현재 모드에 맞게 표시한다."""
@@ -156,6 +172,7 @@ class MarkdownNodeWidget(QWidget, BaseNode):
             self.text_area.setMarkdown(self._raw_md)
         else:
             self.text_area.setPlainText(self._raw_md)
+        self._sync_output()
 
     def get_data(self):
         """현재 노드 상태를 딕셔너리로 반환한다."""

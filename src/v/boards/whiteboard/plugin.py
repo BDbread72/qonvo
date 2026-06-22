@@ -14,7 +14,7 @@ from v.settings import get_board_size
 from v.logger import get_logger
 
 from .view import WhiteboardView
-from .items import PortItem, EdgeItem, ImageCardItem, TextItem, GroupFrameItem
+from .items import PortItem, EdgeItem, ImageCardItem, TextItem, GroupFrameItem, FileNodeItem
 from .dimension_item import DimensionItem
 from .chat_node import ChatNodeWidget
 from .repository_node import RepositoryNodeWidget
@@ -131,9 +131,12 @@ class WhiteBoardPlugin(
         self.not_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.xor_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.bulb_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.number_proxies: Dict[int, QGraphicsProxyWidget] = {}
+        self.math_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.text_items: Dict[int, TextItem] = {}
         self.group_frame_items: Dict[int, GroupFrameItem] = {}
         self.image_card_items: Dict[int, ImageCardItem] = {}
+        self.file_node_items: Dict[int, FileNodeItem] = {}
         self.dimension_items: Dict[int, DimensionItem] = {}
 
         self._edges: List[EdgeItem] = []
@@ -219,6 +222,8 @@ class WhiteBoardPlugin(
         self.scene.setBspTreeDepth(0)
         self.scene.setSceneRect(-half, -half, size, size)
         self.scene._plugin = self
+        # 임베드 위젯(QTextEdit/QLineEdit) 잔류 캐럿 제거는 뷰의 mousePressEvent
+        # → _deselect_proxy_text_inputs(QApplication.focusWidget 기반)에서 처리한다.
         self.app.bind(self.scene)
 
         self._origin_item = QGraphicsEllipseItem(-6, -6, 12, 12)
@@ -298,40 +303,49 @@ class WhiteBoardPlugin(
             PortItem.OUTPUT, proxy, name="⚡ 완료",
             index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
 
-    def _toggle_meta_ports(self, node):
-        if node.meta_ports_enabled:
-            self._enable_meta_ports(node)
+    def _meta_port_type(self, name):
+        """메트릭 key → 포트 타입. success 만 BOOLEAN(로직 게이트 연결), 나머지 STRING."""
+        from .chat_node import META_METRICS
+        for k, _label, is_bool in META_METRICS:
+            if k == name:
+                return PortItem.TYPE_BOOLEAN if is_bool else PortItem.TYPE_STRING
+        return PortItem.TYPE_STRING
+
+    def _toggle_meta_port(self, node, name, enabled):
+        """단일 계측 포트 추가/제거(M 메뉴 콜백). 추가 시 현재 메트릭 값으로 즉시 채움."""
+        if enabled:
+            self._add_meta_port(node, name)
+            if hasattr(node, '_set_meta_port_values'):
+                node._set_meta_port_values(getattr(node, '_last_elapsed', 0.0))
         else:
-            self._disable_meta_ports(node)
+            self._remove_meta_port(node, name)
 
-    def _enable_meta_ports(self, node):
+    def _add_meta_port(self, node, name):
         proxy = node.proxy
-        if proxy is None or node.meta_output_ports:
+        if proxy is None or name in node.meta_output_ports:
             return
-        node.meta_output_ports["elapsed_time"] = self._add_port(
-            PortItem.OUTPUT, proxy, name="elapsed_time",
-            index=0, total=1, data_type=PortItem.TYPE_STRING)
-        node.meta_output_ports["model_name"] = self._add_port(
-            PortItem.OUTPUT, proxy, name="model_name",
-            index=0, total=1, data_type=PortItem.TYPE_STRING)
-        node.meta_output_ports["tokens"] = self._add_port(
-            PortItem.OUTPUT, proxy, name="tokens",
-            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        node.meta_output_ports[name] = self._add_port(
+            PortItem.OUTPUT, proxy, name=name,
+            index=0, total=1, data_type=self._meta_port_type(name))
         self._reindex_chat_input_ports(node)
 
-    def _disable_meta_ports(self, node):
-        if not node.meta_output_ports:
+    def _remove_meta_port(self, node, name):
+        port = node.meta_output_ports.pop(name, None)
+        if port is None:
             return
-        for port in list(node.meta_output_ports.values()):
-            for edge in list(port.edges):
-                self.remove_edge(edge)
-            if port.scene():
-                self.scene.removeItem(port)
-            port.scene_remove_label()
-            if self.view and port in self.view._all_port_items:
-                self.view._all_port_items.discard(port)
-        node.meta_output_ports.clear()
+        for edge in list(port.edges):
+            self.remove_edge(edge)
+        if port.scene():
+            self.scene.removeItem(port)
+        port.scene_remove_label()
+        if self.view and port in self.view._all_port_items:
+            self.view._all_port_items.discard(port)
         self._reindex_chat_input_ports(node)
+
+    def _apply_meta_selection(self, node):
+        """로드 시 node.meta_selected 에 든 메트릭들의 포트를 일괄 생성."""
+        for name in sorted(getattr(node, 'meta_selected', ()) or ()):
+            self._add_meta_port(node, name)
 
     def _add_chat_input_port(self, node, port_type_str, port_name=None):
         proxy = node.proxy
@@ -360,7 +374,8 @@ class WhiteBoardPlugin(
         node.extra_input_defs.append({"name": port_name, "type": port_type_str})
         self._reindex_chat_input_ports(node)
         node._update_input_count()
-        self._notify_modified()
+        # 포트 구조 변경을 서버에 동기화(extra_input_defs 영속 → 엣지 안 끊김).
+        self._mark_node_dirty(node.node_id)
 
     def _remove_chat_input_port(self, node, port_name):
         if port_name not in node.input_ports:
@@ -556,6 +571,13 @@ class WhiteBoardPlugin(
                     elif tp_name == "⚡ B" and hasattr(target_node, 'on_signal_b'):
                         target_node.on_signal_b(input_data=sig_data, powered=True)
 
+        if start_port.port_data_type == PortItem.TYPE_NUMBER and start_port.port_value is not None:
+            target_node = end_port.parent_proxy.widget() if (
+                end_port.parent_proxy and hasattr(end_port.parent_proxy, 'widget')) else None
+            if target_node is not None and hasattr(target_node, 'on_number_input'):
+                end_port.port_value = start_port.port_value
+                target_node.on_number_input(end_port.port_name, start_port.port_value)
+
         if isinstance(start_port.parent_proxy, ImageCardItem) and start_port.parent_proxy.image_path:
             card = start_port.parent_proxy
             target = end_port.parent_proxy
@@ -642,6 +664,9 @@ class WhiteBoardPlugin(
     def delete_scene_item(self, item):
         self._delete_scene_item(item, self.image_card_items)
 
+    def delete_file_node(self, item):
+        self._delete_scene_item(item, self.file_node_items)
+
     def delete_dimension_item(self, item):
         self._delete_scene_item(item, self.dimension_items)
 
@@ -688,8 +713,40 @@ class WhiteBoardPlugin(
                 target_node.on_signal_a(input_data=data, powered=powered)
             elif tp_name == "⚡ B" and hasattr(target_node, 'on_signal_b'):
                 target_node.on_signal_b(input_data=data, powered=powered)
+            elif tp_name.startswith("⚡") and hasattr(target_node, 'on_named_signal'):
+                # 이름붙은 신호 입력(⚡ 증가/⚡ 리셋 등) → 노드가 직접 분기
+                target_node.on_named_signal(tp_name, input_data=data, powered=powered)
             elif powered and not prev and hasattr(target_node, 'on_signal_input'):
                 target_node.on_signal_input(input_data=data)
+
+    def _propagate_number(self, source_port, value):
+        """NUMBER 출력값을 연결된 입력 포트들로 밀어넣고 on_number_input 호출.
+
+        port_value 도 갱신 → 챗/nixie 등 STRING 소비자는 _collect_input_data 의
+        str(port_value) 로 깔끔히 읽는다(값을 int/float 로 정규화해 둠).
+        """
+        if source_port is None:
+            return
+        source_port.port_value = value
+        if not hasattr(self, '_num_depth'):
+            self._num_depth = 0
+        if self._num_depth > 64:
+            return
+        self._num_depth += 1
+        try:
+            for edge in list(self._edges):
+                if edge.source_port is not source_port:
+                    continue
+                tgt = edge.target_port
+                if tgt is None:
+                    continue
+                tgt.port_value = value
+                tp = tgt.parent_proxy
+                node = tp.widget() if (tp is not None and hasattr(tp, 'widget')) else None
+                if node is not None and hasattr(node, 'on_number_input'):
+                    node.on_number_input(tgt.port_name, value)
+        finally:
+            self._num_depth -= 1
 
     def emit_signal(self, source_port, data=None):
         self.set_port_state(source_port, True, data)
@@ -832,6 +889,10 @@ class WhiteBoardPlugin(
             logger.error(f"[IMAGE_CARD] Failed to save: {e}")
 
     def _on_image_card_changed(self, card: ImageCardItem):
+        # 서버모드: 이미지가 바뀌면(업로드 다이얼로그/엣지 전파 등) 서버에 영속.
+        if getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False) \
+                and getattr(card, 'image_path', None):
+            self._upload_and_sync_image(card)
         if not card.output_port or not card.image_path:
             return
         for edge in list(self._edges):

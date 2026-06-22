@@ -1,8 +1,13 @@
 @echo off
+rem 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
+set BUILDNO=
+for /f %%i in ('git rev-list --count HEAD') do set BUILDNO=%%i
+> buildno.txt echo|set /p="%BUILDNO%"
 python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon.ico --distpath . ^
     --add-data "icon.ico;." ^
     --add-data "lang;lang" ^
     --add-data "build.toml;." ^
+    --add-data "buildno.txt;." ^
     --add-data "plugins;plugins" ^
     --add-data "icons;icons" ^
     --collect-all openai ^
@@ -47,3 +52,4 @@ python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon
     --hidden-import "v.boards.whiteboard.function_editor" ^
     --hidden-import "v.data_viewer" ^
     ./src/main.py
+del buildno.txt 2>nul

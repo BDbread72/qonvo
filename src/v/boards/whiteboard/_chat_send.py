@@ -155,6 +155,17 @@ class ChatSendMixin:
             from .widgets import StreamWorker
 
             messages = list(prefix_messages) + [ChatMessage(role="user", content=message or "", attachments=files or None)]
+            # ── 진단: 모델로 나가는 실제 페이로드 덤프 (이전대화/형제노드 누수 추적용) ──
+            try:
+                _sys_prev = (effective_system_prompt or "")[:200].replace("\n", " ")
+                logger.info(f"[CHAT_PAYLOAD] node={node.node_id} sys_len={len(effective_system_prompt or '')} "
+                            f"sys='{_sys_prev}' msg_count={len(messages)}")
+                for _i, _m in enumerate(messages):
+                    _c = (_m.content or "")[:200].replace("\n", " ")
+                    logger.info(f"[CHAT_PAYLOAD] node={node.node_id} #{_i} role={_m.role} "
+                                f"len={len(_m.content or '')} content='{_c}'")
+            except Exception:
+                pass
             worker = StreamWorker(
                 provider,
                 model,
@@ -376,3 +387,133 @@ class ChatSendMixin:
         self._preferred_results.pop(nid, None)
         self._preferred_expected.pop(nid, None)
         self._rework_params.pop(nid, None)
+
+    # ──────────────────────────────────────────── 체크리스트 완료 신호 / AI
+
+    def _on_checklist_complete(self, node_id):
+        """체크리스트 모든 항목 체크 → ⚡ 완료 신호 발화."""
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+        sig_port = getattr(node, 'signal_output_port', None)
+        if sig_port is not None:
+            try:
+                self.emit_signal(sig_port, data=node.get_markdown())
+            except Exception:
+                logger.exception("[CHECKLIST] complete signal failed")
+
+    @staticmethod
+    def _parse_checklist_json(text):
+        """AI 응답(JSON)에서 항목 리스트 추출. 코드펜스/잡음 허용."""
+        import json
+        import re
+        if not text:
+            return []
+        s = text.strip()
+        # ```json ... ``` 펜스 제거
+        if s.startswith("```"):
+            s = re.sub(r"^```[a-zA-Z]*\n?", "", s)
+            s = re.sub(r"\n?```$", "", s).strip()
+        try:
+            data = json.loads(s)
+        except Exception:
+            # 본문에서 첫 JSON 객체/배열만 뽑아 재시도
+            m = re.search(r"(\{.*\}|\[.*\])", s, re.DOTALL)
+            if not m:
+                return []
+            try:
+                data = json.loads(m.group(1))
+            except Exception:
+                return []
+        if isinstance(data, dict):
+            items = data.get("items") or data.get("tasks") or []
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+        return items if isinstance(items, list) else []
+
+    def _checklist_ai_prompt(self, kind, goal, current_items):
+        if kind == "cleanup":
+            joined = "\n".join(f"- {it}" for it in current_items) or "(없음)"
+            return (
+                "다음 할 일 목록을 정리해줘: 중복 제거, 비슷한 항목 통합, 논리적 순서로 재정렬, "
+                "모호한 표현은 명확하게. 항목 텍스트는 한국어로 간결하게.\n\n"
+                f"현재 목록:\n{joined}\n\n"
+                'JSON 으로만 답해: {"items": [{"text": "..."}]}'
+            )
+        return (
+            f'"{goal}" 라는 목표를 달성하기 위한 구체적이고 실행 가능한 체크리스트 항목을 '
+            "3~8개로 분해해줘. 각 항목은 한국어로 간결한 행동 단위.\n\n"
+            'JSON 으로만 답해: {"items": [{"text": "..."}]}'
+        )
+
+    def _checklist_ai(self, node_id, kind):
+        """✨ AI: 목표→항목 분해(breakdown) / 항목 정리·요약(cleanup)."""
+        from PyQt6.QtWidgets import QInputDialog
+
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+
+        current_items = [it.get("text", "") for it in node.get_items() if it.get("text")]
+        goal = node.title_edit.text().strip()
+        if kind == "breakdown":
+            goal, ok = QInputDialog.getText(
+                self.view, "AI 분해", "목표를 입력하세요", text=goal)
+            if not ok or not goal.strip():
+                return
+            goal = goal.strip()
+        elif kind == "cleanup" and not current_items:
+            return
+
+        from v.settings import get_default_model
+        model = get_default_model()
+        if not model:
+            node.set_ai_busy(False)
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self.view, "AI", "기본 모델이 설정되지 않았습니다.")
+            return
+
+        prompt = self._checklist_ai_prompt(kind, goal, current_items)
+        replace = (kind == "cleanup")
+        node.set_ai_busy(True)
+
+        # 서버 모드: 서버가 AI 대행 → _on_ai_complete 에서 체크리스트로 분기
+        if getattr(self, 'server_mode', False):
+            if not hasattr(self, '_checklist_ai_pending'):
+                self._checklist_ai_pending = {}
+            self._checklist_ai_pending[str(node_id)] = replace
+            try:
+                self._server_client.send_ai_request(
+                    node_id=str(node_id), model=model, message=prompt,
+                    files=[], system_prompt="", options={"json_mode": True})
+            except Exception:
+                node.set_ai_busy(False)
+                self._checklist_ai_pending.pop(str(node_id), None)
+            return
+
+        # 로컬 모드
+        from .widgets import StreamWorker
+        provider = self._ensure_provider()
+        messages = [ChatMessage(role="user", content=prompt)]
+        worker = StreamWorker(provider, model, messages, json_mode=True)
+        worker._node_id = node_id
+
+        def _done(text, n=node, w=worker, rep=replace):
+            self._finish_worker(w, lambda: self._apply_checklist_ai(n, text, rep))
+
+        def _err(err, n=node, w=worker):
+            self._finish_worker(w, lambda: (n.set_ai_busy(False), logger.warning(f"[CHECKLIST_AI] {err}")))
+
+        worker.finished_signal.connect(_done)
+        worker.error_signal.connect(_err)
+
+        if self._active_workers < self._max_concurrent_workers:
+            self._start_worker(worker)
+        else:
+            self._pending_workers.append((node, worker))
+
+    def _apply_checklist_ai(self, node, text, replace):
+        items = self._parse_checklist_json(text)
+        node.apply_ai_items(items, replace=replace)

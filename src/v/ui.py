@@ -43,6 +43,13 @@ class _SaveWorker(QThread):
 
 
 def _get_version() -> str:
+    # 타이틀바 표시용 — 의미 버전 + 빌드 스탬프 (예: beta-1.2.1+142)
+    try:
+        from v.board import _get_display_version
+        return _get_display_version()
+    except Exception:
+        pass
+    # 폴백: build.toml 직접 읽기 (빌드 스탬프 없음)
     if getattr(sys, 'frozen', False):
         toml_path = Path(sys._MEIPASS) / "build.toml"
     else:
@@ -1572,6 +1579,15 @@ class MainWindow(QMainWindow):
         self.action_save_as.setEnabled(False)
 
         client = self._server_client
+        # 서버모드: 모델 피커를 서버가 광고한 모델 목록으로 채운다(보드 머티리얼라이즈
+        # 전에 설정해야 노드 피커가 서버 모델로 생성됨). 구버전 서버는 빈 목록을
+        # 보내므로 그 경우 set_models_override(None) 처럼 로컬 목록으로 폴백.
+        try:
+            from v.model_plugin import set_models_override, set_model_options_override
+            set_models_override(client.server_models)
+            set_model_options_override(client.server_model_options)
+        except Exception:
+            pass
         client.user_joined.connect(self._on_server_user_joined)
         client.user_left.connect(self._on_server_user_left)
         client.disconnected.connect(self._on_server_disconnected)
@@ -1583,6 +1599,24 @@ class MainWindow(QMainWindow):
         client.chat_received.connect(self._on_chat_received)
         self._setup_server_overlays(username, board_id)
         self._setup_chat_dock(client)
+        self._warn_if_outdated(client)
+
+    def _warn_if_outdated(self, client):
+        """서버 프로토콜이 내 클라보다 높으면 업데이트 권장 배너를 띄운다(접속은 유지).
+
+        서버가 요구버전(min_protocol)으로 막으면 auth_fail 로 이미 거부되므로,
+        여기서는 '서버가 더 최신 = 일부 기능이 안 맞을 수 있음' 경고만 한다.
+        """
+        try:
+            from v.proto import PROTOCOL_VERSION
+            sp = client.server_protocol
+            if sp and sp > PROTOCOL_VERSION:
+                sv = client.server_version or "최신"
+                self.statusBar().showMessage(
+                    f"⚠ 서버가 더 최신입니다(server {sv}). qonvo 업데이트를 권장합니다 "
+                    f"— 일부 기능이 다르게 동작할 수 있어요.", 15000)
+        except Exception:
+            pass
 
     def _setup_server_overlays(self, username, board_id):
         """F1(사용자목록)/F12(디버그) 오버레이 생성·단축키 등록."""
@@ -1663,12 +1697,17 @@ class MainWindow(QMainWindow):
 
         if getattr(self, '_chat_dock', None) is None:
             self._chat_panel = ChatPanel(self)
-            self._chat_dock = QDockWidget("채팅", self)
+            self._chat_dock = QDockWidget("채팅 로그", self)
             self._chat_dock.setWidget(self._chat_panel)
             self._chat_dock.setObjectName("server_chat")
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
             self._chat_panel.send_message.connect(self._send_chat)
-            self._chat_dock.hide()  # 히스토리용 — 기본 숨김(말풍선이 메인)
+            self._chat_dock.hide()  # 기본 숨김(말풍선이 메인) — F2 로 로그 패널 토글
+            # F2: 채팅 로그 패널 보이기/숨기기
+            from PyQt6.QtGui import QShortcut, QKeySequence
+            self._sc_f2 = QShortcut(QKeySequence("F2"), self)
+            self._sc_f2.activated.connect(
+                lambda: self._chat_dock.setVisible(not self._chat_dock.isVisible()))
 
     def _send_chat(self, text):
         if getattr(self, '_server_client', None) is not None:
@@ -1701,6 +1740,13 @@ class MainWindow(QMainWindow):
     def _exit_server_mode(self):
         self.setWindowTitle("Qonvo")
         self._server_board = ""      # presence: 협업 종료 → online 로
+        # 서버모드 모델 오버라이드 해제 → 로컬 모델 목록 복원
+        try:
+            from v.model_plugin import set_models_override, set_model_options_override
+            set_models_override(None)
+            set_model_options_override(None)
+        except Exception:
+            pass
         self.action_connect.setVisible(True)
         if hasattr(self, "action_host"):
             self.action_host.setVisible(True)

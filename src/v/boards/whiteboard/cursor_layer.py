@@ -21,6 +21,12 @@ _ARROW = QPolygonF([
     QPointF(0, 0), QPointF(0, 18), QPointF(4.5, 13.5), QPointF(8, 21),
     QPointF(11, 19.5), QPointF(7.5, 12.5), QPointF(13, 12),
 ])
+# I-beam(텍스트 커서) 글리프 — state == "typing" 일 때 화살표 대신 그린다.
+_IBEAM = QPolygonF([
+    QPointF(0, 0), QPointF(9, 0), QPointF(9, 2), QPointF(6, 2),
+    QPointF(6, 18), QPointF(9, 18), QPointF(9, 20), QPointF(0, 20),
+    QPointF(0, 18), QPointF(3, 18), QPointF(3, 2), QPointF(0, 2),
+])
 _EASE = 0.35
 _SETTLE = 0.4
 _BUBBLE_TTL = 6.0
@@ -92,7 +98,8 @@ class _CursorItem(QGraphicsItem):
             p.scale(self._scale, self._scale)
         p.setPen(QColor(255, 255, 255, 230))
         p.setBrush(self._color)
-        p.drawPolygon(_ARROW)
+        # 입력 중이면 텍스트 커서(I-beam), 그 외엔 화살표
+        p.drawPolygon(_IBEAM if self._state == "typing" else _ARROW)
         lw, lh = self._lw, self._lh
         path = QPainterPath()
         path.addRoundedRect(QRectF(14, 14, lw, lh), 5, 5)
@@ -195,7 +202,16 @@ class CursorLayer(QObject):
         if not text or self._scene is None:
             return
         if is_self:
-            pos = list(self._self_pos) if self._self_pos else [0.0, 0.0]
+            # 내 채팅: 캔버스에서 마우스를 안 움직였으면 _self_pos 가 없어 안 보였음
+            # (채팅칸에 타이핑만 한 경우) → 현재 뷰 중앙에 띄워 항상 보이게.
+            if self._self_pos:
+                pos = list(self._self_pos)
+            else:
+                try:
+                    c = self._view.mapToScene(self._view.viewport().rect().center())
+                    pos = [c.x(), c.y()]
+                except Exception:
+                    pos = [0.0, 0.0]
         else:
             c = self._cursors.get(user)
             pos = list(c["cur"]) if c else (list(self._self_pos) if self._self_pos else [0.0, 0.0])

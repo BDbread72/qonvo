@@ -19,7 +19,9 @@ from .ups_node import UpsNodeWidget
 from .rmv_node import RmvNodeWidget
 from .switch_node import SwitchNodeWidget
 from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget, BulbNodeWidget
-from .items import ImageCardItem, TextItem, GroupFrameItem
+from .number_node import NumberNodeWidget
+from .math_node import MathNodeWidget
+from .items import ImageCardItem, TextItem, GroupFrameItem, FileNodeItem
 from .dimension_item import DimensionItem
 from .function_types import FunctionDefinition
 
@@ -37,7 +39,7 @@ class NodeFactoryMixin:
         node.on_cancel = self._cancel_node_workers
         node.on_add_port = self._add_chat_input_port
         node.on_remove_port = self._remove_chat_input_port
-        node.on_toggle_meta = self._toggle_meta_ports
+        node.on_toggle_meta_port = self._toggle_meta_port
         proxy = self._add_proxy(node, node_id, pos, self.proxies)
         self._create_ports(proxy, node)
         QTimer.singleShot(0, node.reposition_ports)
@@ -207,6 +209,11 @@ class NodeFactoryMixin:
         node.output_port = self._add_port(
             PortItem.OUTPUT, proxy, name="prompt",
             index=0, total=1, data_type=PortItem.TYPE_STRING)
+        # 입력 포트 추가 — 상위 텍스트를 받아 본문에 채움(양방향). 기존 보드는
+        # 엣지를 포트 '이름'으로 복원하므로 출력 "prompt" 유지 → 기존 연결 안전.
+        node.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="입력",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
@@ -217,6 +224,10 @@ class NodeFactoryMixin:
         proxy = self._add_proxy(node, node_id, pos, self.markdown_proxies)
         node.input_port = self._add_port(
             PortItem.INPUT, proxy, name="text",
+            index=0, total=1, data_type=PortItem.TYPE_STRING)
+        # 출력 포트 추가 — 마크다운 텍스트를 하위로 내보냄(양방향). 입력 "text" 유지.
+        node.output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="출력",
             index=0, total=1, data_type=PortItem.TYPE_STRING)
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
@@ -360,6 +371,74 @@ class NodeFactoryMixin:
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
 
+    def add_number(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = NumberNodeWidget(
+            node_id,
+            on_value_changed=self._on_number_changed,
+            on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.number_proxies)
+        node.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="설정",
+            index=0, total=3, data_type=PortItem.TYPE_NUMBER)
+        node.signal_input_port = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ 증가",
+            index=1, total=3, data_type=PortItem.TYPE_BOOLEAN)
+        node.signal_input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="⚡ 리셋",
+            index=2, total=3, data_type=PortItem.TYPE_BOOLEAN)
+        node.output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="값",
+            index=0, total=2, data_type=PortItem.TYPE_NUMBER)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 변경",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.output_port.port_value = node._value
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def add_math(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
+        node = MathNodeWidget(
+            node_id,
+            on_value_changed=self._on_math_changed,
+            on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        proxy = self._add_proxy(node, node_id, pos, self.math_proxies)
+        node.input_port = self._add_port(
+            PortItem.INPUT, proxy, name="A",
+            index=0, total=2, data_type=PortItem.TYPE_NUMBER)
+        node.input_port_b = self._add_port(
+            PortItem.INPUT, proxy, name="B",
+            index=1, total=2, data_type=PortItem.TYPE_NUMBER)
+        node.output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="결과",
+            index=0, total=2, data_type=PortItem.TYPE_NUMBER)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 참",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
+        node.output_port.port_value = node._result
+        QTimer.singleShot(0, node.reposition_ports)
+        return proxy
+
+    def _on_number_changed(self, node_id):
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+        val = getattr(node, '_value', 0)
+        self._propagate_number(getattr(node, 'output_port', None), val)
+        sp = getattr(node, 'signal_output_port', None)
+        if sp is not None:
+            self.emit_signal(sp, data=str(val))
+
+    def _on_math_changed(self, node_id):
+        node = self.app.nodes.get(node_id)
+        if node is None:
+            return
+        self._propagate_number(getattr(node, 'output_port', None), getattr(node, '_result', 0))
+        bsp = getattr(node, 'signal_output_port', None)
+        if bsp is not None:
+            self.set_port_state(bsp, bool(getattr(node, '_bool', False)), data=str(getattr(node, '_result', 0)))
+
     def _attach_item_ports(self, item, in_type: str, out_type: str):
         item.input_port = self._add_port(
             PortItem.INPUT, item, name="_default",
@@ -400,8 +479,48 @@ class NodeFactoryMixin:
         item.on_image_changed = self._on_image_card_changed
         item.setToolTip(f"Image #{node_id}")
         self._send_node_add_op(node_id, item, pos)
+        # 서버모드: 드래그/붙여넣기로 넣은 이미지를 서버에 업로드+영속(자동 prop 동기화 제외 대상).
+        if image_path and getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False):
+            self._upload_and_sync_image(item)
         self._notify_modified()
         return item
+
+    def add_file_node(
+        self,
+        file_paths=None,
+        pos: Optional[QPointF] = None,
+        node_id: Optional[int] = None,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+    ):
+        node_id = self._next_id(node_id)
+        if pos is None:
+            pos = self._cursor_scene_pos()
+        item = FileNodeItem(pos.x(), pos.y())
+        item.node_id = node_id
+
+        if file_paths:
+            item.set_files(file_paths)
+
+        if width is not None and height is not None:
+            item.prepareGeometryChange()
+            item._width = width
+            item._height = height
+            item.update()
+
+        self.scene.addItem(item)
+        self.file_node_items[node_id] = item
+        self.app.nodes[node_id] = item
+
+        self._attach_item_ports(item, PortItem.TYPE_FILE, PortItem.TYPE_FILE)
+        item.on_files_changed = self._on_file_node_changed
+        item.setToolTip(f"Files #{node_id}")
+        self._send_node_add_op(node_id, item, pos)
+        self._notify_modified()
+        return item
+
+    def _on_file_node_changed(self, item):
+        self._notify_modified()
 
     def add_dimension_item(self, pos: Optional[QPointF] = None):
         node_id = self._next_id()
@@ -449,14 +568,39 @@ class NodeFactoryMixin:
     def add_checklist(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None,
                       title: str = "", items: list = None):
         node_id = self._next_id(node_id)
-        node = ChecklistWidget(title=title, items=items, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
+        node = ChecklistWidget(
+            title=title, items=items,
+            on_modified=lambda nid=node_id: self._mark_node_dirty(nid),
+            on_complete=lambda nid=node_id: self._on_checklist_complete(nid),
+            get_current_user=self._checklist_current_user,
+            on_ai=lambda kind, nid=node_id: self._checklist_ai(nid, kind),
+            get_users=self._checklist_online_users,
+        )
         node.node_id = node_id
         proxy = self._add_proxy(node, node_id, pos, self.checklist_proxies)
         node.output_port = self._add_port(
             PortItem.OUTPUT, proxy, name="체크리스트",
-            index=0, total=1, data_type=PortItem.TYPE_STRING)
+            index=0, total=2, data_type=PortItem.TYPE_STRING)
+        node.signal_output_port = self._add_port(
+            PortItem.OUTPUT, proxy, name="⚡ 완료",
+            index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
         QTimer.singleShot(0, node.reposition_ports)
         return proxy
+
+    # ── 체크리스트 협업/AI 콜백 헬퍼 ──
+    def _checklist_current_user(self) -> str:
+        try:
+            if getattr(self, 'server_mode', False) and getattr(self, '_server_client', None):
+                return self._server_client.username or ""
+        except Exception:
+            pass
+        return ""
+
+    def _checklist_online_users(self) -> list:
+        try:
+            return [u.get("user", "") for u in getattr(self, '_last_presence', []) if u.get("user")]
+        except Exception:
+            return []
 
     def add_repository(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
@@ -575,13 +719,13 @@ class NodeFactoryMixin:
             return [
                 ("node", "Chat", lambda: self.add_node(scene_pos)),
                 ("function", "Function", lambda: self.add_function(scene_pos)),
-                ("round_table", "Round Table", lambda: self.add_round_table(scene_pos)),
-                ("repository", "자료함", lambda: self.add_repository(scene_pos)),
+                # Round Table / 자료함(repository) 은 폐기 — 생성 메뉴에서 숨김
+                # (기존 보드 로드는 _materialization 으로 계속 지원)
                 ("nixi", "Nixi", lambda: self.add_nixi(scene_pos)),
             ]
         elif category == "notes":
             return [
-                ("sticky", "Sticky", lambda: self.add_sticky(scene_pos)),
+                # Sticky 는 Prompt 로 통합 — 생성 메뉴에서 숨김(기존 보드는 계속 로드).
                 ("prompt", "Prompt", lambda: self.add_prompt_node(scene_pos)),
                 ("text", "Text", lambda: self.add_text_item(scene_pos)),
                 ("markdown", "Markdown", lambda: self.add_markdown(scene_pos)),
@@ -590,6 +734,7 @@ class NodeFactoryMixin:
         elif category == "media":
             return [
                 ("image", "Image", lambda: self.add_image_card("", scene_pos)),
+                ("file", "Files", lambda: self.add_file_node(None, scene_pos)),
                 ("dimension", "Dimension", lambda: self.add_dimension_item(scene_pos)),
                 ("ups", "Upscale", lambda: self.add_ups(scene_pos)),
                 ("rmv", "Remove BG", lambda: self.add_rmv(scene_pos)),
@@ -604,6 +749,8 @@ class NodeFactoryMixin:
                 ("or", "OR", lambda: self.add_or_gate(scene_pos)),
                 ("xor", "XOR", lambda: self.add_xor_gate(scene_pos)),
                 ("bulb", "Bulb", lambda: self.add_bulb(scene_pos)),
+                ("number", "Number", lambda: self.add_number(scene_pos)),
+                ("math", "Math", lambda: self.add_math(scene_pos)),
             ]
         elif category == "ui":
             return [

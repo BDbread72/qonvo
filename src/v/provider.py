@@ -12,6 +12,70 @@ from google import genai
 from google.genai import types
 
 
+# 문서 텍스트 추출 (의존성 없이 zipfile+xml) — Gemini 가 바이너리로 못 먹는
+# 오피스/한글 포맷을 텍스트로 변환해 프롬프트에 실어 보낸다.
+_DOC_EXTS = {"docx", "pptx", "xlsx", "hwpx"}
+
+
+def _doc_members(z, ext: str):
+    """포맷별로 본문 텍스트가 들어있는 zip 멤버 목록을 고른다."""
+    names = z.namelist()
+    if ext == "docx":
+        return [n for n in ("word/document.xml",) if n in names]
+    if ext == "pptx":
+        return sorted(n for n in names if n.startswith("ppt/slides/slide") and n.endswith(".xml"))
+    if ext == "xlsx":
+        picked = [n for n in ("xl/sharedStrings.xml",) if n in names]
+        picked += sorted(n for n in names if n.startswith("xl/worksheets/") and n.endswith(".xml"))
+        return picked
+    if ext == "hwpx":
+        return sorted(n for n in names if n.startswith("Contents/") and n.endswith(".xml"))
+    return []
+
+
+def _xml_collect_text(el, chunks: list):
+    """로컬 태그명이 't'(=텍스트 런)인 엘리먼트의 텍스트를 모으고
+    문단/행/줄바꿈 경계('p','si','tr','br')에서 개행을 넣는다.
+    docx(w:t)/pptx(a:t)/hwpx(hp:t)/xlsx(t) 모두 로컬명 't'로 통일된다."""
+    tag = el.tag.rsplit("}", 1)[-1]
+    if tag == "t" and el.text:
+        chunks.append(el.text)
+    for child in el:
+        _xml_collect_text(child, chunks)
+    if tag in ("p", "si", "tr", "br"):
+        chunks.append("\n")
+
+
+def _extract_document_text(path: str):
+    """오피스/HWPX 문서를 평문 텍스트로 추출. 실패하면 None."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ext = path.lower().rsplit(".", 1)[-1] if "." in path else ""
+    if ext not in _DOC_EXTS:
+        return None
+    try:
+        with zipfile.ZipFile(path) as z:
+            chunks = []
+            for member in _doc_members(z, ext):
+                try:
+                    raw = z.read(member)
+                    root = ET.fromstring(raw)
+                except (KeyError, ET.ParseError):
+                    continue
+                _xml_collect_text(root, chunks)
+            text = "".join(chunks)
+    except (zipfile.BadZipFile, OSError):
+        return None
+    # 과한 빈 줄 정리
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    cleaned = "\n".join(lines)
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
 # 모델 정의 (ID → 표시 이름)
 MODELS = {
     "gemini-3.1-pro-preview": "Gemini 3.1 Pro",
@@ -29,11 +93,30 @@ MODELS = {
 # UI용 모델 ID 목록
 MODEL_IDS = list(MODELS.keys())
 
+# 모델별 토큰 단가 (USD / 1M tokens) → (input, output). cost 추정용 — 근사값, 자유 수정 가능.
+# 이미지 모델은 토큰이 아니라 장당 과금이라 여기 없음(estimate_cost 가 None 반환).
+MODEL_PRICING = {
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    "gemini-3-pro-preview": (2.00, 12.00),
+    "gemini-3-flash-preview": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-2.5-flash": (0.30, 2.50),
+}
+
+
+def estimate_cost(model: str, tokens_in: int, tokens_out: int):
+    """입력/출력 토큰으로 USD 비용 추정. 단가표에 없는 모델(이미지 등)은 None."""
+    price = MODEL_PRICING.get(model)
+    if not price:
+        return None
+    pin, pout = price
+    return (tokens_in or 0) / 1_000_000 * pin + (tokens_out or 0) / 1_000_000 * pout
+
 # 공통 생성 옵션 (temperature, top_p, max_output_tokens)
 _COMMON_GEN_OPTIONS = {
     "temperature": {
         "type": "float",
-        "label": "Temperature",
+        "label": "Temp",
         "min": 0.0,
         "max": 2.0,
         "step": 0.05,
@@ -41,7 +124,7 @@ _COMMON_GEN_OPTIONS = {
     },
     "top_p": {
         "type": "float",
-        "label": "Top P",
+        "label": "Top-P",
         "min": 0.0,
         "max": 1.0,
         "step": 0.05,
@@ -49,7 +132,7 @@ _COMMON_GEN_OPTIONS = {
     },
     "max_output_tokens": {
         "type": "int",
-        "label": "Max Tokens",
+        "label": "Max",
         "min": 1,
         "max": 65536,
         "default": 8192,
@@ -135,7 +218,7 @@ MODEL_OPTIONS = {
     "gemini-3.1-pro-preview": {
         "thinking_level": {
             "type": "choice",
-            "label": "Thinking",
+            "label": "Think",
             "values": ["HIGH", "MEDIUM", "LOW"],
             "default": "HIGH",
         },
@@ -145,7 +228,7 @@ MODEL_OPTIONS = {
     "gemini-3-pro-preview": {
         "thinking_level": {
             "type": "choice",
-            "label": "Thinking",
+            "label": "Think",
             "values": ["HIGH", "MEDIUM", "LOW"],
             "default": "HIGH",
         },
@@ -155,7 +238,7 @@ MODEL_OPTIONS = {
     "gemini-3-flash-preview": {
         "thinking_level": {
             "type": "choice",
-            "label": "Thinking",
+            "label": "Think",
             "values": ["HIGH", "MEDIUM", "LOW"],
             "default": "HIGH",
         },
@@ -165,7 +248,7 @@ MODEL_OPTIONS = {
     "gemini-2.5-pro": {
         "thinking_budget": {
             "type": "int",
-            "label": "Thinking Budget",
+            "label": "Think",
             "min": 0,
             "max": 24576,
             "default": 2804,
@@ -176,7 +259,7 @@ MODEL_OPTIONS = {
     "gemini-2.5-flash": {
         "thinking_budget": {
             "type": "int",
-            "label": "Thinking Budget",
+            "label": "Think",
             "min": 0,
             "max": 24576,
             "default": 0,
@@ -187,7 +270,7 @@ MODEL_OPTIONS = {
     "gemini-3.1-flash-image-preview": {
         "thinking_level": {
             "type": "choice",
-            "label": "Thinking",
+            "label": "Think",
             "values": ["MINIMAL", "LOW", "MEDIUM", "HIGH"],
             "default": "MINIMAL",
         },
@@ -196,12 +279,12 @@ MODEL_OPTIONS = {
         **_IMAGE_GEN_OPTIONS,
         "google_search": {
             "type": "bool",
-            "label": "Google Search",
+            "label": "Search",
             "default": False,
         },
         "image_search": {
             "type": "bool",
-            "label": "Image Search",
+            "label": "ImgSrch",
             "default": False,
         },
     },
@@ -365,6 +448,18 @@ class GeminiProvider:
     }
     _SKIP_SIG = b"skip_thought_signature_validator"
 
+    @staticmethod
+    def _file_text(fpath: str) -> str:
+        """비-네이티브(이미지/PDF가 아닌) 파일을 텍스트 파트 문자열로 변환.
+        오피스/HWPX 는 구조에서 텍스트를 추출하고, 그 외는 UTF-8 평문으로 읽는다.
+        읽지 못하면 예외를 던져 호출부에서 경고 후 스킵하도록 한다."""
+        fname = os.path.basename(fpath)
+        doc = _extract_document_text(fpath)
+        if doc is not None:
+            return f"[{fname}]:\n{doc}"
+        with open(fpath, "r", encoding="utf-8") as f:
+            return f"[{fname}]:\n{f.read()}"
+
     def _build_system_instruction(self, text, files):
         """시스템 프롬프트 텍스트/파일 → system_instruction Content 빌드"""
         if not text and not files:
@@ -387,10 +482,7 @@ class GeminiProvider:
                     logger.warning(f"Failed to read file {fpath}: {e}")
             else:
                 try:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    fname = os.path.basename(fpath)
-                    parts.append(types.Part.from_text(text=f"[{fname}]:\n{content}"))
+                    parts.append(types.Part.from_text(text=self._file_text(fpath)))
                 except Exception as e:
                     from v.logger import get_logger
                     logger = get_logger("qonvo.provider")
@@ -458,11 +550,8 @@ class GeminiProvider:
                                 logger.warning(f"Failed to read attachment {fpath}: {e}")
                         else:
                             try:
-                                with open(fpath, "r", encoding="utf-8") as f:
-                                    content = f.read()
-                                fname = os.path.basename(fpath)
                                 parts.append(types.Part(
-                                    text=f"[{fname}]:\n{content}",
+                                    text=self._file_text(fpath),
                                     thought_signature=_next_sig(),
                                 ))
                             except Exception as e:
@@ -494,10 +583,8 @@ class GeminiProvider:
                                 pass  # logged above
                         else:
                             try:
-                                with open(fpath, "r", encoding="utf-8") as f:
-                                    content = f.read()
                                 parts.append(types.Part.from_text(
-                                    text=f"[{fname}]:\n{content}"))
+                                    text=self._file_text(fpath)))
                             except Exception as e:
                                 from v.logger import get_logger
                                 logger = get_logger("qonvo.provider")
@@ -1016,45 +1103,54 @@ class GeminiProvider:
         }
 
     def _stream_with_signatures(self, model, contents, config):
-        """스트리밍 생성 결과를 전달하면서 thought_signature를 수집한다. 초기 연결 실패 시 재시도한다."""
+        """스트리밍 생성 결과를 전달하면서 thought_signature를 수집한다.
+
+        재시도 정책: 아직 텍스트를 하나도 내보내지 않은 상태에서 재시도 가능한 오류
+        (연결 리셋 10054 등)가 나면 **스트림 전체를 처음부터 다시 시도**한다(최대 3회).
+        이미 텍스트가 흘러간 뒤의 중간 끊김은 중복 출력을 막기 위해 그대로 오류로 보고한다.
+        """
         def stream_gen():
+            from v.logger import get_logger
             usage = None
             sigs = []
             stream_error = None
-            try:
-                stream_iter = None
-                for attempt in range(4):
-                    try:
-                        stream_iter = self._get_client().models.generate_content_stream(
-                            model=model, contents=contents, config=config,
-                        )
-                        break
-                    except Exception as e:
-                        if self._cancel_requested or attempt == 3 or not self._is_retryable(e):
-                            raise
-                        delay = 2.0 * (2 ** attempt)
-                        from v.logger import get_logger
-                        get_logger("qonvo.provider").warning(
-                            f"[RETRY-STREAM] attempt {attempt+1}/3 failed: {e} — retrying in {delay:.0f}s"
-                        )
-                        time.sleep(delay)
-                for chunk in stream_iter:
-                    if self._cancel_requested:
-                        break
-                    if chunk.text:
-                        yield chunk.text
-                    if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
-                        usage = chunk.usage_metadata
-                    if hasattr(chunk, 'candidates') and chunk.candidates:
-                        for part in (chunk.candidates[0].content.parts or []):
-                            if getattr(part, 'thought', False):
-                                continue
-                            sig = getattr(part, 'thought_signature', None)
-                            if sig:
-                                encoded = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else sig
-                                sigs.append(encoded)
-            except Exception as e:
-                stream_error = e
+            for attempt in range(3):
+                usage = None
+                sigs = []
+                stream_error = None
+                yielded_text = False
+                try:
+                    stream_iter = self._get_client().models.generate_content_stream(
+                        model=model, contents=contents, config=config,
+                    )
+                    for chunk in stream_iter:
+                        if self._cancel_requested:
+                            break
+                        if chunk.text:
+                            yielded_text = True
+                            yield chunk.text
+                        if hasattr(chunk, 'usage_metadata') and chunk.usage_metadata:
+                            usage = chunk.usage_metadata
+                        if hasattr(chunk, 'candidates') and chunk.candidates:
+                            for part in (chunk.candidates[0].content.parts or []):
+                                if getattr(part, 'thought', False):
+                                    continue
+                                sig = getattr(part, 'thought_signature', None)
+                                if sig:
+                                    encoded = base64.b64encode(sig).decode('ascii') if isinstance(sig, bytes) else sig
+                                    sigs.append(encoded)
+                except Exception as e:
+                    stream_error = e
+                # 텍스트 출력 전 + 재시도 가능 오류 → 스트림 통째로 재시도
+                if (stream_error and not yielded_text and not self._cancel_requested
+                        and self._is_retryable(stream_error) and attempt < 2):
+                    delay = 2.0 * (2 ** attempt)
+                    get_logger("qonvo.provider").warning(
+                        f"[RETRY-STREAM] attempt {attempt+1}/3 failed: {stream_error} — retrying in {delay:.0f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                break
             # 메타데이터는 오류 여부와 무관하게 항상 전달
             if usage:
                 yield {"__usage__": True,

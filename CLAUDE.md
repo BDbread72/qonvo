@@ -77,15 +77,20 @@ connect_dialog.py    ← ConnectDialog(host/port/wss) + BoardSelectDialog
 - Streaming extraction (256KB chunks), seek-based random access
 - Legacy ZIP format auto-detected and migrated
 
-### Node System (23 categories)
+### Node System (24 categories)
 All node widgets inherit `QWidget` + `BaseNode` mixin, wrapped in `NodeProxyWidget` (QGraphicsProxyWidget).
+단, 일부 미디어 노드(`ImageCardItem`, `FileNodeItem`)는 위젯이 아니라 `SceneItemMixin + QGraphicsItem` 직접 그리기 — `add_*` 시 proxy dict 가 아니라 `image_card_items`/`file_node_items` 같은 전용 dict 에 등록되고, `_node_factory._attach_item_ports()` 로 포트를 단다.
 
 | ID Key | Categories |
 |--------|------------|
 | `id` | nodes, function_nodes, round_tables, repository_nodes, texts, group_frames |
-| `node_id` | sticky_notes, buttons, checklists, image_cards, dimensions, prompt_nodes, markdown_nodes, nixi_nodes, ups_nodes, rmv_nodes, switch_nodes, latch_nodes, and_gates, or_gates, not_gates, xor_gates, bulb_nodes |
+| `node_id` | sticky_notes, buttons, checklists, image_cards, file_nodes, dimensions, prompt_nodes, markdown_nodes, nixi_nodes, ups_nodes, rmv_nodes, switch_nodes, latch_nodes, and_gates, or_gates, not_gates, xor_gates, bulb_nodes |
 
 ID key mapping is definitive in `lazy_loader.py:ID_KEY_MAP` — 직접 나열하지 말고 그 상수를 참조할 것 (자주 추가됨).
+
+**새 노드 카테고리 추가 = 다회 배선**: 등록 지점이 여러 파일에 흩어져 있어 하나라도 빠지면 저장/로드/삭제가 깨진다. `FileNodeItem` 추가 시 손댄 곳을 템플릿으로 참고: `items.py`(아이템 클래스) → `lazy_loader.ID_KEY_MAP`+`_DEFAULT_SIZE` → `_node_factory.add_file_node`+radial menu → `plugin.py`(레지스트리 dict+`delete_file_node`) → `_serialization`(data dict 키·collect 루프·`_ID_KEY_MAP`·copy/delete dispatch·temp-dir 셋업·cleanup/clear) → `_materialization`(dispatch+`_materialize_*`+`_verify_load`) → `_server_mixin`(add_map·reg map) → `view.py`(드롭/선택/삭제 isinstance). 서버 협업까지 원하면 `server/board_store._LIST_CATEGORIES` 에도 추가(없으면 move/prop/remove op 가 서버 doc 에 안 먹음).
+
+**FileNode → AI**: `FileNodeItem` 은 임의 파일 다수를 담고 TYPE_FILE 출력 포트로 챗 노드에 물린다. 챗 노드(`chat_node.py:_collect_all_inputs`)는 소스에 `get_resolved_paths()` 가 있으면 전체 목록을 첨부로 확장한다. 첨부 영속은 이미지와 동일(UUID 복사 + basename 해석).
 
 `logic_nodes.py`: switch/latch + and/or/not/xor/bulb 게이트 (시그널 회로용).
 
@@ -126,6 +131,7 @@ Signal: ButtonNode click → emit_signal(signal_output_port)
 - **Streaming**: `_stream_with_signatures()` yields text chunks + thought_signatures
 - `StreamWorker` (QThread) runs off main thread, emits Qt signals
 - `ProviderRouter` → `PluginRegistry.get_plugin_for_model()` → routes to correct plugin or fallback to Gemini
+- **첨부 파일 → 파트 변환** (`GeminiProvider`): `_MIME_MAP` 에 든 확장자(이미지·`pdf`)는 바이트 inline, 그 외는 `_file_text()` 로 텍스트화. `_file_text` 는 hwpx/docx/xlsx/pptx 를 `_extract_document_text()`(stdlib zipfile+xml, 로컬태그명 `t` 수집 — 추가 의존성 없음)로 추출하고 실패하면 UTF-8 평문으로 읽는다. 구형 바이너리 `.hwp`(OLE)는 미지원 → 스킵. system/user/assistant 3개 경로가 모두 이 헬퍼를 공유.
 
 ### Lazy Loading
 ```python
@@ -281,11 +287,23 @@ from v.settings import get_setting, set_setting, get_api_keys
 
 ## Versioning (버전 관리)
 
-### 형식: `beta-X.Y.Z`
+### 형식: `beta-X.Y.Z+B`
+의미 버전 `beta-X.Y.Z` 뒤에 **빌드 스탬프 `+B`** 가 자동으로 붙는다 (예: `beta-1.2.1+142`).
+타이틀바·정보창에 표시되어 사용자/테스터가 **어느 빌드인지** 구분할 수 있다.
+
 - **X** (major): 대규모 변경, 호환성 변경. main 브랜치 = X.0.0만 보관
 - **Y** (minor): 새 기능 추가. main에서 `Y` 브랜치 생성 (예: `1.0`, `1.1`)
 - **Z** (patch): 버그 수정, 소규모 개선. minor 브랜치에서 작업
+- **B** (build): **누적 git 커밋 수** (`git rev-list --count HEAD`). **손으로 안 적음 — 자동.** 커밋/푸시마다 증가
 - `beta-` 접두사 유지
+
+### 빌드 스탬프(`+B`) 동작 — 자동, 손대지 말 것
+- 의미 버전(`beta-X.Y.Z`)만 `build.toml [app] version` 으로 **손으로** 관리. 빌드번호는 자동.
+- **dev 실행**(`python src/main.py`): 실행 시 `git rev-list --count HEAD` 를 즉석 계산 (`v/board.py:_get_build_number`)
+- **frozen exe**: `crack.bat`/`crack.ps1`/`crack.sh` 가 빌드 직전 커밋 수를 `buildno.txt` 로 구워 번들에 포함(`--add-data`), 빌드 후 삭제. exe는 `_MEIPASS/buildno.txt` 를 읽음
+- 타이틀바 표시: `v/board.py:_get_display_version()` = `version + "+" + buildno`. UI는 `ui.py:_get_version()` 가 이를 사용
+- ⚠️ **마이그레이션/보드 저장 비교는 `_get_app_version()`(의미 버전만)** 사용 — 빌드 스탬프 제외. 마이그레이션 파서가 `+B` 를 무시하므로 보드 호환성에는 영향 없음
+- `buildno.txt` 는 빌드 산출물(`.gitignore` 처리). 커밋하지 않음
 
 ### 브랜치 전략
 ```
@@ -302,8 +320,8 @@ main              ← X.0.0 릴리스만 (beta-1.0.0, beta-2.0.0, ...)
 - 태그: `beta-X.Y.Z` (릴리스 시)
 
 ### 버전 변경 시
-1. `build.toml`의 version 업데이트
-2. 커밋 + 태그
+1. `build.toml`의 version(`beta-X.Y.Z`)만 업데이트 — 빌드번호 `+B`는 자동이라 손대지 않음
+2. 커밋 + 태그 (`beta-X.Y.Z`, 빌드번호 제외)
 3. push (브랜치 + 태그)
 
 ## Command Interpretation (사용자 명령 해석)

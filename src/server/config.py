@@ -54,6 +54,9 @@ motd = "Welcome to Qonvo"
 default_level = 1
 # true 이면 users.json/[users]에 없는 사용자도 default_level 로 자동 입장 허용
 allow_guests = false
+# 요구 클라이언트 프로토콜 버전(마크식). 이 값 미만 클라는 접속 거부된다.
+# 0 = 전원 허용(구버전 포함). 호환 깨는 변경을 내보낸 뒤에만 올린다.
+min_protocol = 0
 
 [access]
 # 화이트리스트 모드: true 면 whitelist.json 에 있는 사용자만 접속 가능
@@ -113,6 +116,7 @@ _DEFAULTS: Dict[str, Any] = {
         "motd": "Welcome to Qonvo",
         "default_level": 1,
         "allow_guests": False,
+        "min_protocol": 0,
     },
     "access": {"whitelist": False},
     "network": {"upnp": True, "public_host": "", "public_url": "", "upnp_lease": 3600},

@@ -18,8 +18,7 @@ import uuid
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QComboBox, QScrollArea, QFrame, QApplication, QDoubleSpinBox, QSpinBox,
-    QCheckBox,
+    QScrollArea, QFrame, QApplication, QSpinBox, QMenu,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPainterPath
@@ -31,6 +30,34 @@ from .base_node import BaseNode
 from .model_picker import ModelSelectorButton
 from .options_panel import OptionsPanel
 from .widgets import DraggableHeader, ResizeHandle, InputDialog
+
+
+# 계측 메타 포트 — 단일 진실원. (key, 표시라벨, is_bool).
+# M 메뉴가 이 목록으로 체크리스트를 만들고, plugin 이 같은 key 로 포트를 생성한다.
+# chat_node._set_meta_port_values 가 같은 key 로 값을 채운다.
+META_METRICS = [
+    ("success", "Success (bool)", True),
+    ("error", "Error 메시지", False),
+    ("elapsed", "Elapsed (초)", False),
+    ("model_name", "Model", False),
+    ("tokens_in", "Tokens in", False),
+    ("tokens_out", "Tokens out", False),
+    ("tokens_total", "Tokens total", False),
+    ("cost", "Cost ($)", False),
+    ("runs", "Run count", False),
+]
+META_METRIC_KEYS = [k for k, _l, _b in META_METRICS]
+
+
+class _StayOpenMenu(QMenu):
+    """체크 항목을 토글해도 닫히지 않는 메뉴(여러 개 연속 선택용)."""
+
+    def mouseReleaseEvent(self, e):
+        act = self.activeAction()
+        if act is not None and act.isCheckable() and act.isEnabled():
+            act.trigger()   # 체크 토글만, 메뉴는 유지
+            return
+        super().mouseReleaseEvent(e)
 
 
 class ChatLogWindow(QWidget):
@@ -483,9 +510,16 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._pref_window = None
         self._log_window = None
         self.meta_output_ports = {}
-        self.meta_ports_enabled = False
-        self.on_toggle_meta = None
+        self.meta_selected = set()      # 노출할 메트릭 키 집합(사용자 선택). M 메뉴로 토글.
+        self.on_toggle_meta_port = None  # plugin 콜백(node, key, enabled) — 포트 추가/제거
         self._start_time = None
+
+        # 계측(분석용) — 마지막 실행 메트릭. meta 포트 + 분석 노드(④)가 읽는다.
+        self._run_count = 0
+        self._last_success = False
+        self._last_error = ""
+        self._last_elapsed = 0.0
+        self._last_cost = None
 
         # Multi-run history
         self._history = []            # [{"user": str, "files": [], "response": str, "images": [], "tokens_in": int, "tokens_out": int, "model": str}, ...]
@@ -627,8 +661,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             QPushButton:checked {{ background-color: #2a6; color: white; }}
             QPushButton:hover {{ background-color: {Theme.BG_HOVER}; }}
         """)
-        self.btn_meta_toggle.setToolTip("Meta Output Ports (elapsed_time / model_name / tokens)")
-        self.btn_meta_toggle.clicked.connect(self._on_meta_toggle_clicked)
+        self.btn_meta_toggle.setToolTip("계측 출력 포트 선택 (success/elapsed/tokens/cost ...)")
+        self.btn_meta_toggle.clicked.connect(self._open_meta_menu)
         model_layout.addWidget(self.btn_meta_toggle)
 
         model_layout.addStretch()
@@ -636,6 +670,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         # 생성 옵션 패널 — 스키마 기반(OptionsPanel). 현재 모델의 MODEL_OPTIONS 를 그대로
         # 렌더하므로 thinking_level/budget 같은 옵션도 자동 노출되고, 새 옵션은 스키마 한 줄.
+        # 인라인 아코디언(G 토글로 펼침). 필드가 노드 폭에 맞춰 줄어들어 폭이 안 터진다.
         self.opts_panel = OptionsPanel()
         self.opts_panel.changed.connect(self._on_opts_changed)
         self.opts_panel.hide()
@@ -900,11 +935,36 @@ class ChatNodeWidget(QWidget, BaseNode):
     def _toggle_opts_panel(self):
         self.opts_panel.setVisible(self.btn_opts_toggle.isChecked())
 
-    def _on_meta_toggle_clicked(self):
-        """메타 포트 토글 버튼 클릭 시 meta_ports_enabled를 갱신하고 on_toggle_meta 콜백을 호출한다."""
-        self.meta_ports_enabled = self.btn_meta_toggle.isChecked()
-        if self.on_toggle_meta:
-            self.on_toggle_meta(self)
+    def _open_meta_menu(self):
+        """M 클릭 → 어떤 계측 포트를 노출할지 고르는 체크리스트 메뉴(여러 개 연속 선택 가능)."""
+        menu = _StayOpenMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{ background-color: {Theme.BG_SECONDARY}; color: {Theme.TEXT_PRIMARY};
+                     border: 1px solid #444; border-radius: 6px; padding: 4px; }}
+            QMenu::item {{ padding: 5px 24px 5px 8px; border-radius: 4px; }}
+            QMenu::item:selected {{ background-color: {Theme.ACCENT_PRIMARY}; }}
+        """)
+        for key, label, _is_bool in META_METRICS:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(key in self.meta_selected)
+            act.toggled.connect(lambda checked, k=key: self._toggle_meta_metric(k, checked))
+        from PyQt6.QtGui import QCursor
+        menu.exec(QCursor.pos())
+        # 버튼 활성 표시는 선택이 하나라도 있으면 on
+        self.btn_meta_toggle.setChecked(bool(self.meta_selected))
+
+    def _toggle_meta_metric(self, key, enabled):
+        """단일 계측 포트 on/off → plugin 콜백으로 포트 추가/제거 + dirty."""
+        if enabled:
+            self.meta_selected.add(key)
+        else:
+            self.meta_selected.discard(key)
+        self.btn_meta_toggle.setChecked(bool(self.meta_selected))
+        if callable(self.on_toggle_meta_port):
+            self.on_toggle_meta_port(self, key, enabled)
+        if callable(self.on_modified):
+            self.on_modified(self.node_id)
 
     def _toggle_preferred(self, checked):
         self.preferred_options_enabled = checked
@@ -1015,7 +1075,17 @@ class ChatNodeWidget(QWidget, BaseNode):
         texts = []
         files = []
         prompt_entries = []
-        for port_name, port in self.input_ports.items():
+        # 메인 입력 포트("이전 대화" = self.input_port)도 함께 스캔한다.
+        # 예전엔 self.input_ports(추가 포트 dict)만 봐서, 메인 포트에 물린
+        # 프롬프트 노드가 prompt_entries 로 분류되지 못하고 시스템 프롬프트가
+        # 통째로 누락되거나 메시지로 새던 버그가 있었음.
+        scan_ports = []
+        main_port = getattr(self, 'input_port', None)
+        if main_port is not None:
+            scan_ports.append((main_port, True))
+        scan_ports.extend((p, False) for p in self.input_ports.values())
+
+        for port, is_main in scan_ports:
             if not port.edges:
                 continue
             is_image = port.port_data_type == port.TYPE_FILE
@@ -1026,7 +1096,20 @@ class ChatNodeWidget(QWidget, BaseNode):
                     continue
                 source_node = source_proxy.widget() if hasattr(source_proxy, 'widget') else source_proxy
 
+                # 실행 중인 소스(채팅/함수 등)의 출력은 직전 결과(stale)이거나 미완성이다.
+                # 그대로 읽으면 '다른 주제의 이전 응답'이 새 입력에 섞여 들어간다.
+                # 프롬프트/텍스트/이미지 같은 정적 노드는 _running 이 없어 영향 없음.
+                if getattr(source_node, '_running', False):
+                    continue
+
                 if is_image:
+                    # 파일 노드(여러 파일을 담는 노드)는 전체 목록을 첨부로 확장
+                    get_files = getattr(source_node, 'get_resolved_paths', None)
+                    if callable(get_files):
+                        multi = get_files()
+                        if multi:
+                            files.extend(multi)
+                            continue
                     path = None
                     if hasattr(source_port, 'port_value') and source_port.port_value is not None:
                         path = str(source_port.port_value)
@@ -1055,9 +1138,31 @@ class ChatNodeWidget(QWidget, BaseNode):
                                 "role": getattr(source_node, 'prompt_role', 'system'),
                                 "priority": getattr(source_node, 'prompt_priority_value', 0),
                             })
+                        elif is_main:
+                            # 메인 포트의 비프롬프트 텍스트(이전 대화 컨텍스트)는
+                            # 메시지 경로(_collect_input_data → on_signal_input)가
+                            # 이미 처리하므로 중복 방지로 여기선 건너뛴다.
+                            continue
                         else:
                             texts.append(text)
         return texts, files, prompt_entries
+
+    def _collect_input_data(self):
+        """메인 포트 소스가 프롬프트 노드면 '메시지'로 잡지 않는다.
+
+        메인 포트("이전 대화")에 프롬프트 노드를 물리면 그것은 채팅 메시지가
+        아니라 시스템/유저 프롬프트다. _collect_all_inputs 가 prompt_entries 로
+        처리하므로, 여기서 그 텍스트를 메시지로 끌어오면 시스템 프롬프트가
+        user 메시지로 새어든다(=#1 의 'Response with MarkDown' 누수 버그).
+        """
+        port = getattr(self, 'input_port', None)
+        if port is not None and port.edges:
+            src_proxy = port.edges[0].source_port.parent_proxy
+            if src_proxy is not None:
+                src = src_proxy.widget() if hasattr(src_proxy, 'widget') else src_proxy
+                if getattr(src, 'is_prompt_node', False):
+                    return None
+        return super()._collect_input_data()
 
     def on_signal_input(self, input_data=None):
         context = input_data or self._collect_input_data() or ""
@@ -1068,6 +1173,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         model_id = self.model_combo.currentData()
         opts = get_all_model_options().get(model_id, {})
         self.opts_panel.set_schema(opts)
+        # 모델이 바뀌면 옵션 기본값으로 node_options 갱신(저장 대상 항상 최신 유지).
+        self.node_options = self.opts_panel.values()
         # 옵션이 없는 모델이면 'G' 토글/패널을 닫아둔다.
         if not self.opts_panel.has_options() and self.btn_opts_toggle.isChecked():
             self.btn_opts_toggle.setChecked(False)
@@ -1077,7 +1184,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.on_modified(self.node_id)
 
     def _on_opts_changed(self):
-        """옵션 패널 값 변경 → 보드 dirty 표시."""
+        """옵션 값 변경 → node_options 즉시 갱신(전송 안 해도 저장됨) + 보드 dirty."""
+        self.node_options = self.opts_panel.values()
         if callable(self.on_modified):
             self.on_modified(self.node_id)
 
@@ -1107,6 +1215,19 @@ class ChatNodeWidget(QWidget, BaseNode):
     def _collect_node_options(self, model=None):
         """현재 옵션 패널의 값(스키마 기반)을 그대로 반환. provider 로 흐를 node_options."""
         return self.opts_panel.values()
+
+    def _clear_pending_output(self):
+        """새 실행을 시작할 때 직전 결과를 비운다.
+
+        ai_response 는 완료 시점에만 갱신되므로, 비우지 않으면 재실행이 도는 동안에도
+        이 노드는 '직전 응답(=다른 주제일 수 있음)'을 출력으로 계속 들고 있게 된다.
+        그 사이 다운스트림이 _collect_all_inputs 로 이 노드를 읽으면 stale 출력이
+        새 입력과 섞여 들어간다(='이전 내용이 보이는' 버그). 시작 시 비워서 차단.
+        """
+        self.ai_response = None
+        op = getattr(self, 'output_port', None)
+        if op is not None and getattr(op, 'port_value', None) is not None:
+            op.port_value = None
 
     def _send(self, msg, files):
         if self._running:
@@ -1152,6 +1273,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._running = False
             return
 
+        # 입력 수집(_collect_all_inputs)을 끝낸 뒤 비운다 — 이 노드의 출력만 비우고
+        # 입력으로 끌어온 값에는 영향을 주지 않기 위함.
+        self._clear_pending_output()
+
         self._history.append({
             "user": msg,
             "files": list(files),
@@ -1187,6 +1312,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.model = entry["model"]
         self.node_options = entry["node_options"]
 
+        self._clear_pending_output()
+
         self._history.append({
             "user": entry["msg"],
             "files": entry["files"],
@@ -1211,8 +1338,11 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self.on_send:
             self.on_send(self.node_id, entry["model"], entry["send_msg"], entry["send_files"], entry["prompt_entries"])
 
-    def set_response(self, response, done=False):
-        """Update response -- only updates history, no inline display."""
+    def set_response(self, response, done=False, is_error=None):
+        """Update response -- only updates history, no inline display.
+
+        is_error: 명시 시 성공/에러 판정. None 이면 응답 접두("Error:"/"⚠️")로 추론.
+        """
         self.ai_response = response
         self._current_streaming = response
 
@@ -1230,10 +1360,30 @@ class ChatNodeWidget(QWidget, BaseNode):
                 self._history[-1]["tokens_in"] = self.tokens_in
                 self._history[-1]["tokens_out"] = self.tokens_out
             elapsed = time.time() - self._start_time if self._start_time else 0
+            if is_error is None:
+                is_error = bool(str(response or "").lstrip().startswith(("Error:", "⚠️")))
+            self._record_run(elapsed, is_error, str(response) if is_error else "")
             self._set_meta_port_values(elapsed)
             self._update_status("done")
             if self._send_queue:
                 QTimer.singleShot(0, self._process_queue)
+
+    def _record_run(self, elapsed, is_error, error_msg=""):
+        """실행 메트릭을 노드 상태 + 마지막 history 항목에 기록(분석용 단일 진실원)."""
+        from v.provider import estimate_cost
+        self._run_count += 1
+        self._last_elapsed = float(elapsed or 0.0)
+        self._last_success = not is_error
+        self._last_error = error_msg or ""
+        model = self.model_combo.currentData() or ""
+        self._last_cost = estimate_cost(model, self.tokens_in, self.tokens_out)
+        if self._history:
+            h = self._history[-1]
+            h["elapsed"] = self._last_elapsed
+            h["success"] = self._last_success
+            h["error"] = self._last_error
+            h["cost"] = self._last_cost
+            h["model"] = model
 
     def _decode_image_data(self, img_data):
         if isinstance(img_data, bytes):
@@ -1310,6 +1460,7 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         self._running = False
         elapsed = time.time() - self._start_time if self._start_time else 0
+        self._record_run(elapsed, is_error=False)
         self._set_meta_port_values(elapsed)
         self.btn_input.setText(t("button.compose"))
         self.btn_input.setEnabled(True)
@@ -1328,12 +1479,22 @@ class ChatNodeWidget(QWidget, BaseNode):
 
     def _set_meta_port_values(self, elapsed):
         meta = self.meta_output_ports
-        if "elapsed_time" in meta:
-            meta["elapsed_time"].port_value = f"{elapsed:.1f}s"
-        if "model_name" in meta:
-            meta["model_name"].port_value = self.model_combo.currentData() or ""
-        if "tokens" in meta:
-            meta["tokens"].port_value = f"{self.tokens_in:,} / {self.tokens_out:,}"
+        tin, tout = self.tokens_in or 0, self.tokens_out or 0
+        # 분석 친화 typed 포트들. 없는 키는 조용히 건너뜀(포트 셋이 바뀌어도 안전).
+        values = {
+            "success": self._last_success,                       # BOOLEAN
+            "error": self._last_error,                           # STRING
+            "elapsed": f"{elapsed:.2f}",                          # 초(숫자 문자열)
+            "model_name": self.model_combo.currentData() or "",
+            "tokens_in": str(tin),
+            "tokens_out": str(tout),
+            "tokens_total": str(tin + tout),
+            "cost": ("" if self._last_cost is None else f"{self._last_cost:.6f}"),
+            "runs": str(self._run_count),
+        }
+        for key, val in values.items():
+            if key in meta:
+                meta[key].port_value = val
 
     def _show_tokens(self):
         self.tokens_label.setText(f"{self.tokens_in:,}  {self.tokens_out:,}")
@@ -1531,12 +1692,13 @@ class ChatNodeWidget(QWidget, BaseNode):
             "node_options": self.node_options,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
+            "run_count": self._run_count,
             "notify_on_complete": self.notify_on_complete,
             "extra_input_defs": [] if _light else copy.deepcopy(self.extra_input_defs),
             "preferred_options_enabled": self.preferred_options_enabled,
             "preferred_options_count": self.preferred_options_count,
             "opts_panel_visible": self.btn_opts_toggle.isChecked(),
-            "meta_ports_enabled": self.meta_ports_enabled,
+            "meta_selected": sorted(self.meta_selected),
             "history": [] if _light else copy.deepcopy(self._history),
         }
         if self._archive_path:
@@ -1548,16 +1710,20 @@ class ChatNodeWidget(QWidget, BaseNode):
     _SYNC_EXCLUDE_KEYS = {
         "user_message", "user_files", "ai_response", "ai_image_paths",
         "thought_signatures", "history", "sent", "tokens_in", "tokens_out",
-        "archive_path", "archived_count", "extra_input_defs", "meta_ports_enabled",
+        "archive_path", "archived_count", "extra_input_defs", "meta_selected",
     }
 
     def sync_props(self) -> dict:
         """서버모드 동기화용 데이터 — get_data 에서 내용/포트 키만 제외(=설정/크기 전부).
 
         get_data 에 새 설정 필드가 추가되면 자동으로 포함된다(따로 손볼 필요 없음).
+        extra_input_defs(추가 입력 포트 구조)는 명시적으로 포함한다 — 서버 doc 에
+        영속돼야 재접속 시 포트가 복원되고 그 포트로 연결된 엣지가 안 끊긴다.
         """
-        return {k: v for k, v in self.get_data(_light=True).items()
-                if k not in self._SYNC_EXCLUDE_KEYS}
+        d = {k: v for k, v in self.get_data(_light=True).items()
+             if k not in self._SYNC_EXCLUDE_KEYS}
+        d["extra_input_defs"] = [dict(x) for x in self.extra_input_defs]
+        return d
 
     def apply_sync_data(self, data: dict):
         """원격 변경을 제자리 반영. load 와 동일한 restore_state 를 재사용(단일 진실원).
@@ -1588,26 +1754,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         if "node_options" in row and isinstance(row["node_options"], dict):
             opts = row["node_options"]
             self.node_options = opts
-            for key, combo in (("aspect_ratio", getattr(self, 'ratio_combo', None)),
-                               ("image_size", getattr(self, 'size_combo', None)),
-                               ("image_quality", getattr(self, 'quality_combo', None)),
-                               ("background", getattr(self, 'bg_combo', None))):
-                if combo is not None and key in opts:
-                    i = combo.findText(opts[key])
-                    if i >= 0:
-                        combo.setCurrentIndex(i)
-            for key, spin in (("temperature", getattr(self, 'temp_spin', None)),
-                              ("top_p", getattr(self, 'top_p_spin', None)),
-                              ("max_output_tokens", getattr(self, 'max_tokens_spin', None))):
-                if spin is not None and key in opts:
-                    try:
-                        spin.setValue(opts[key])
-                    except Exception:
-                        pass
-            for key, chk in (("google_search", getattr(self, 'chk_google_search', None)),
-                             ("image_search", getattr(self, 'chk_image_search', None))):
-                if chk is not None and key in opts:
-                    chk.setChecked(bool(opts[key]))
+            # 모델 복원(위)으로 패널 스키마가 이미 세팅됨 → 저장된 값을 패널에 반영.
+            self.opts_panel.set_values(opts)
         if "pinned" in row:
             self.pinned = bool(row["pinned"])
             self.btn_pin.setChecked(self.pinned)
@@ -1619,6 +1767,10 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.tokens_in = row.get("tokens_in", 0)
         if "tokens_out" in row:
             self.tokens_out = row.get("tokens_out", 0)
+        if "run_count" in row:
+            self._run_count = int(row.get("run_count", 0) or 0)
+        if "meta_selected" in row:
+            self.meta_selected = set(row.get("meta_selected") or [])
         if "notify_on_complete" in row:
             self.notify_on_complete = bool(row["notify_on_complete"])
             self.btn_notify.setChecked(self.notify_on_complete)
@@ -1629,8 +1781,9 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.preferred_options_count = int(row["preferred_options_count"])
             self.pref_count_spin.setValue(self.preferred_options_count)
         self.pref_count_spin.setEnabled(self.preferred_options_enabled)
-        if row.get("opts_panel_visible", False):
+        if row.get("opts_panel_visible", False) and self.opts_panel.has_options():
             self.btn_opts_toggle.setChecked(True)
+            self.opts_panel.setVisible(True)
         if "history" in row:
             self._history = row.get("history") or []
             if not self._history and row.get("ai_response"):

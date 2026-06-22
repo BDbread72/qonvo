@@ -107,7 +107,10 @@ class MaterializationMixin:
             'nixi': self.nixi_proxies,
             'ups': self.ups_proxies,
             'rmv': self.rmv_proxies,
+            'number': self.number_proxies,
+            'math': self.math_proxies,
             'image_card': self.image_card_items,
+            'file_node': self.file_node_items,
             'dimension': self.dimension_items,
             'text': self.text_items,
             'group_frame': self.group_frame_items,
@@ -153,10 +156,13 @@ class MaterializationMixin:
             "texts": self._materialize_text,
             "group_frames": self._materialize_group_frame,
             "image_cards": self._materialize_image_card,
+            "file_nodes": self._materialize_file_node,
             "dimensions": self._materialize_dimension,
             "nixi_nodes": self._materialize_nixi_node,
             "ups_nodes": self._materialize_ups_node,
             "rmv_nodes": self._materialize_rmv_node,
+            "number_nodes": self._materialize_number_node,
+            "math_nodes": self._materialize_math_node,
         }
         handler = dispatch.get(category)
         if handler:
@@ -170,11 +176,13 @@ class MaterializationMixin:
         # 위젯 필드(크기/옵션/내용/히스토리) 복원 — sync(apply_sync_data)와 동일 코드(단일 진실원)
         node.restore_state(row)
         # 플러그인 레벨(포트 토폴로지/콜백)은 여기서:
-        node.on_toggle_meta = self._toggle_meta_ports
-        if row.get("meta_ports_enabled", False):
-            node.meta_ports_enabled = True
+        node.on_toggle_meta_port = self._toggle_meta_port
+        # 구버전 호환: meta_ports_enabled=True → 기본 메트릭 셋으로 마이그레이션
+        if not node.meta_selected and row.get("meta_ports_enabled", False):
+            node.meta_selected = {"success", "elapsed", "tokens_total", "cost"}
+        if node.meta_selected:
             node.btn_meta_toggle.setChecked(True)
-            self._enable_meta_ports(node)
+            self._apply_meta_selection(node)
         for port_def in row.get("extra_input_defs", []):
             self._add_chat_input_port(node, port_def["type"], port_def.get("name"))
 
@@ -524,6 +532,23 @@ class MaterializationMixin:
         if item and row.get("vision_results"):
             item._vision_results = row["vision_results"]
 
+    def _materialize_file_node(self, row):
+        item = self.add_file_node(
+            None,
+            QPointF(row.get("x", 0), row.get("y", 0)),
+            node_id=row.get("node_id"),
+            width=row.get("width"),
+            height=row.get("height"),
+        )
+        if item:
+            # set_files 는 복사를 동반하므로 로드 시엔 저장된 경로를 그대로 복원
+            item.prepareGeometryChange()
+            item.file_paths = list(row.get("file_paths", []))
+            item._hidden = row.get("hidden", False)
+            item._height = max(item._height, item._content_height())
+            item.update()
+            item._reposition_own_ports()
+
     def _materialize_dimension(self, row):
         item = DimensionItem.from_data(row)
         node_id = self._next_id(row.get("node_id"))
@@ -544,6 +569,42 @@ class MaterializationMixin:
         value = row.get("current_value", "")
         if value:
             node._update_display(value)
+
+    def _materialize_number_node(self, row):
+        proxy = self.add_number(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        node._initial = row.get("initial", 0)
+        node._step = row.get("step", 1)
+        node.step_edit.blockSignals(True)
+        node.step_edit.setText(node._fmt(node._step))
+        node.step_edit.blockSignals(False)
+        node.set_value(row.get("value", 0), propagate=False, mark=False)
+        if node.output_port:
+            node.output_port.port_value = node._value
+
+    def _materialize_math_node(self, row):
+        proxy = self.add_math(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
+        if proxy is None:
+            return
+        node = proxy.widget()
+        if row.get("width") and row.get("height"):
+            node.resize(int(row["width"]), int(row["height"]))
+        node._a = row.get("a", 0)
+        node._b = row.get("b", 0)
+        op = row.get("op", "add")
+        idx = node.op_combo.findData(op)
+        if idx >= 0:
+            node.op_combo.blockSignals(True)
+            node.op_combo.setCurrentIndex(idx)
+            node.op_combo.blockSignals(False)
+            node._op = op
+        node._evaluate(propagate=False)
+        if node.output_port:
+            node.output_port.port_value = node._result
 
     def _materialize_ups_node(self, row):
         proxy = self.add_ups(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))

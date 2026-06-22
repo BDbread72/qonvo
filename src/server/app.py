@@ -20,6 +20,8 @@ from aiohttp import web
 
 from v.logger import get_logger
 
+from v.proto import PROTOCOL_VERSION, app_version
+
 from .auth import Authenticator, MEMBER, LEVEL_NAMES
 from .board_store import BoardManager, list_boards, safe_board_id
 from .oauth import MattermostOAuth
@@ -44,7 +46,10 @@ class QonvoServer:
         self.registry = Registry()
         self.router = None  # ProviderRouter (lazy)
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self._app = web.Application()
+        # ⚠️ aiohttp 기본 client_max_size = 1MB → 1MB 넘는 이미지 PUT 이 413 으로
+        # 조용히 거부되어 서버에 영구 미저장(재접속 시 유실)됐다. 첨부 업로드는 사진/
+        # 스크린샷이 흔히 1MB 를 넘으므로 WS max_msg_size(64MB) 와 동급으로 넉넉히 올린다.
+        self._app = web.Application(client_max_size=256 * 1024 * 1024)
         self._runner: Optional[web.AppRunner] = None
 
         srv = config["server"]
@@ -52,6 +57,13 @@ class QonvoServer:
         self.port = int(srv.get("port", 9700))
         self.name = srv.get("name", "Qonvo Server")
         self.motd = srv.get("motd", "")
+        # 마크식 요구 버전: 이 프로토콜 미만 클라는 접속 거부(0=전원 허용).
+        # 호환 깨는 변경을 내보낼 때만 올린다. PROTOCOL_VERSION 은 현 서버가 말하는 버전.
+        try:
+            self.min_protocol = int(srv.get("min_protocol", 0) or 0)
+        except Exception:
+            self.min_protocol = 0
+        self.app_version = app_version()
         self.default_model = config.get("ai", {}).get("default_model", "gemini-2.5-flash")
         self.chat_log_enabled = bool(config.get("chat", {}).get("log", True))
 
@@ -103,6 +115,9 @@ class QonvoServer:
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "name": self.name,
+            "version": self.app_version,
+            "protocol": PROTOCOL_VERSION,
+            "min_protocol": self.min_protocol,
             "boards": list_boards(),
             "online": sum(1 for s in self.registry.all_sessions() if s.authed),
             "auth": {
@@ -250,7 +265,7 @@ class QonvoServer:
         elif mtype == "op":
             await self._handle_op(sess, data)
         elif mtype == "ai_request":
-            await self._handle_ai(sess, data)
+            self._spawn_ai(sess, data)
         elif mtype == "ping":
             # 지연 측정: 받은 t 그대로 되돌려 클라가 RTT 계산
             await sess.send({"type": "pong", "t": data.get("t")})
@@ -311,6 +326,20 @@ class QonvoServer:
         username = (data.get("user") or "").strip()
         password = data.get("pass") or ""
 
+        # 요구 버전 게이트(마크식): 구버전 클라는 접속 거부. 구버전 클라는 protocol
+        # 필드를 안 보내 0 으로 간주되므로, min_protocol=0 이면 전원 통과(하위호환).
+        try:
+            client_proto = int(data.get("protocol", 0) or 0)
+        except Exception:
+            client_proto = 0
+        if client_proto < self.min_protocol:
+            await sess.send({"type": "auth_fail", "reason": (
+                f"클라이언트 버전이 너무 낮습니다. qonvo를 업데이트하세요.\n"
+                f"(서버 요구 protocol v{self.min_protocol} / 현재 v{client_proto})")})
+            logger.info("auth reject old client sid=%s proto=%s < min=%s",
+                        sess.id, client_proto, self.min_protocol)
+            return
+
         # merri 프로필 토큰 인증: 토큰을 merri 에 검증해 실제 username 을 얻는다.
         if data.get("merri") and self._oauth.enabled:
             res = await self._oauth.validate_token(password)
@@ -338,16 +367,52 @@ class QonvoServer:
         self._http_tokens[http_token] = (username, level)
         sess.http_token = http_token
         await sess.send({"type": "auth_ok", "level": level, "boards": list_boards(),
-                         "http_token": http_token})
+                         "http_token": http_token,
+                         "server_version": self.app_version,
+                         "protocol": PROTOCOL_VERSION,
+                         "min_protocol": self.min_protocol,
+                         "models": await self._available_models(),
+                         "model_options": getattr(self, "_model_options_cache", {})})
         logger.info("auth ok sid=%s user=%s level=%s(%s)", sess.id, username, level, reason)
+
+    async def _available_models(self) -> dict:
+        """서버가 돌릴 수 있는 모델 {id: name} — 클라 모델 피커용(라우터 1회 구성·캐시).
+
+        ⚠️ build_router 는 플러그인(openai SDK 등) import 로 수백ms~수초가 걸려
+        이벤트 루프를 막으면 ping/pong 타임아웃으로 접속이 끊긴다 → 반드시
+        run_in_executor 로 루프 밖에서 구성한다. 첫 접속만 대기, 이후 캐시 히트.
+        """
+        cached = getattr(self, "_models_cache", None)
+        if cached is not None:
+            return cached
+        loop = asyncio.get_running_loop()
+
+        def _build():
+            from .ai_runner import available_models, available_model_options
+            r = self._ensure_router()
+            return available_models(r), available_model_options(r)
+        try:
+            models, opts = await loop.run_in_executor(None, _build)
+        except Exception as e:
+            logger.warning("available_models failed: %s", e)
+            models, opts = {}, {}
+        self._models_cache = models
+        self._model_options_cache = opts
+        return models
 
     async def _handle_join(self, sess: Session, data: dict) -> None:
         board_id = safe_board_id(data.get("board_id", ""))
         last_seq = int(data.get("last_seq", 0) or 0)
-        board = self.boards.get(board_id)
+        loop = asyncio.get_running_loop()
+        # ⚠️ 보드 최초 로드(snapshot+oplog 디스크 읽기)와 sync 페이로드 구성(대형 doc
+        # deepcopy)은 수십~수백ms 걸려 이벤트 루프를 막는다. 루프에서 직접 하면 그동안
+        # 다른 세션의 WS ping 에 PONG 을 못 해 'ping/pong timed out' 으로 끊긴다
+        # (대형 보드 join 시 특히). executor 로 빼서 루프가 계속 돌게 한다.
+        board = await loop.run_in_executor(None, self.boards.get, board_id)
         self.registry.join_board(sess, board.board_id)
 
-        await sess.send(board.snapshot_for_join(last_seq))
+        payload = await loop.run_in_executor(None, board.snapshot_for_join, last_seq)
+        await sess.send(payload)
         if self.motd:
             await sess.send({"type": "server_msg", "text": self.motd})
         await self.registry.broadcast(
@@ -375,6 +440,30 @@ class QonvoServer:
             exclude=sess,
         )
 
+    def _spawn_ai(self, sess: Session, data: dict) -> None:
+        """AI 요청을 백그라운드 태스크로 실행한다.
+
+        ⚠️ AI(특히 GPT/이미지)는 20초 이상 걸린다. 수신 루프(async for msg in ws)
+        안에서 인라인으로 await 하면 그 동안 그 연결이 소켓을 안 읽어 클라가 보내는
+        WS ping 에 자동 PONG 을 못 한다 → 클라(run_forever ping_timeout=18s)가
+        'ping/pong timed out' 으로 끊는다. 태스크로 분리하면 수신 루프가 계속 돌며
+        ping 에 응답해 긴 AI 중에도 연결이 유지된다.
+        """
+        if not hasattr(self, "_ai_tasks"):
+            self._ai_tasks = set()
+        task = asyncio.create_task(self._handle_ai(sess, data))
+        self._ai_tasks.add(task)
+
+        def _done(t):
+            self._ai_tasks.discard(t)
+            try:
+                exc = t.exception()
+            except Exception:
+                exc = None
+            if exc:
+                logger.warning("ai task failed sid=%s: %s", sess.id, exc)
+        task.add_done_callback(_done)
+
     async def _handle_ai(self, sess: Session, data: dict) -> None:
         if sess.level < MEMBER:
             await sess.send({"type": "error", "code": "perm", "message": "read-only (Visitor)"})
@@ -388,6 +477,15 @@ class QonvoServer:
         options = params.get("options", {})
         board_id = sess.board_id
 
+        # 클라가 보낸 입력 파일 참조(attachments/<name>·basename)를 서버 보드의
+        # 실제 첨부 경로로 해석한다(이미지 input). 못 찾으면 원본 유지.
+        files = self._resolve_input_files(board_id, files)
+
+        try:
+            count = max(1, min(int(params.get("count", 1)), 8))
+        except Exception:
+            count = 1
+
         try:
             router = self._ensure_router()
         except Exception as e:
@@ -395,6 +493,33 @@ class QonvoServer:
             return
 
         loop = asyncio.get_running_loop()
+        from .ai_runner import run_ai
+
+        # preferred: N개 후보를 동시 생성해 요청자에게만 candidates 로 보낸다(선택은 클라가).
+        if count > 1:
+            logger.info("ai_request(preferred x%d) sid=%s node=%s model=%s", count, sess.id, node_id, model)
+            tasks = [
+                loop.run_in_executor(
+                    None,
+                    lambda: run_ai(router, model, message, files, system_prompt, options, None),
+                )
+                for _ in range(count)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            candidates = []
+            for r in results:
+                if isinstance(r, dict):
+                    candidates.append({
+                        "text": r.get("text", ""), "images": r.get("images", []),
+                        "tokens_in": r.get("tokens_in", 0), "tokens_out": r.get("tokens_out", 0),
+                        "error": r.get("error"),
+                    })
+                else:
+                    candidates.append({"text": "", "images": [], "error": str(r)})
+            await sess.send({"type": "ai_complete", "node_id": node_id,
+                             "result": {"candidates": candidates}})
+            return
+
         accum: list[str] = []
 
         def on_chunk(text: str):
@@ -406,8 +531,6 @@ class QonvoServer:
                 ),
                 loop,
             )
-
-        from .ai_runner import run_ai
 
         logger.info("ai_request sid=%s node=%s model=%s", sess.id, node_id, model)
         result = await loop.run_in_executor(
@@ -438,6 +561,36 @@ class QonvoServer:
         )
         if result.get("error"):
             await sess.send({"type": "error", "code": "ai", "message": result["error"]})
+
+    def _resolve_input_files(self, board_id: str, files) -> list:
+        """클라가 보낸 입력 파일 참조를 서버 보드의 실제 첨부 경로로 해석한다.
+
+        클라는 'attachments/<name>' 또는 basename 을 보낸다(로컬 절대경로는 서버가
+        못 읽으므로). 보드 첨부 디렉토리에서 같은 이름을 찾아 절대경로로 바꾼다.
+        이미 존재하는 절대경로면 그대로, 못 찾으면 원본 유지(provider 가 처리/무시).
+        """
+        import os as _os
+        if not files:
+            return []
+        try:
+            board = self.boards.get(board_id)
+        except Exception:
+            board = None
+        out = []
+        for f in files:
+            if not isinstance(f, str) or not f:
+                continue
+            if _os.path.isabs(f) and _os.path.exists(f):
+                out.append(f)
+                continue
+            name = _os.path.basename(f)
+            if board is not None:
+                p = board.attachment_path(name)
+                if p is not None and p.exists():
+                    out.append(str(p))
+                    continue
+            out.append(f)
+        return out
 
     def _persist_ai_images(self, board_id: str, images_b64: list) -> list:
         """AI 이미지(base64)를 서버 첨부로 저장하고 'attachments/<uuid>.png' 목록 반환."""

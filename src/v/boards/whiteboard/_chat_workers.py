@@ -500,7 +500,7 @@ class ChatWorkersMixin:
     def _on_batch_resume_failed(self, node, job_name):
         from v.batch_queue import BatchQueueManager
         BatchQueueManager().remove_job(job_name)
-        node.set_response("배치 만료/실패 — 다시 실행해주세요", done=True)
+        node.set_response("배치 만료/실패 — 다시 실행해주세요", done=True, is_error=True)
         nid = node.node_id
         self._preferred_results.pop(nid, None)
         self._preferred_expected.pop(nid, None)
@@ -516,7 +516,7 @@ class ChatWorkersMixin:
             if not images:
                 error_msg = text if text else "[이미지 생성 실패: API 응답에 이미지 없음]"
                 logger.warning(f"[IMAGE_PAYLOAD] node={nid} no images: {error_msg!r}")
-                node.set_response(error_msg, done=True)
+                node.set_response(error_msg, done=True, is_error=True)
                 self._finish_worker(worker)
                 self._emit_complete_signal(node)
                 return

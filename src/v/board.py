@@ -258,8 +258,63 @@ def _get_build_config() -> dict:
 
 
 def _get_app_version() -> str:
-    """build.toml에서 앱 버전 읽기"""
+    """build.toml에서 앱 버전 읽기 (의미 버전, 예: beta-1.2.1).
+    마이그레이션/보드 저장 비교는 항상 이 의미 버전만 사용한다(빌드 스탬프 제외)."""
     return _get_build_config().get("version", "")
+
+
+_build_number_cache = None  # 한 번만 계산
+
+
+def _get_build_number() -> str:
+    """빌드 식별자(누적 git 커밋 수). 사용자/테스터가 빌드를 구분하기 위한 값.
+    - frozen exe: 빌드 시 crack 스크립트가 구워둔 buildno.txt 를 읽음
+    - dev(python src/main.py): git rev-list --count HEAD 를 즉석 계산
+    실패 시 빈 문자열."""
+    global _build_number_cache
+    if _build_number_cache is not None:
+        return _build_number_cache
+    num = ""
+    if getattr(sys, 'frozen', False):
+        try:
+            p = Path(sys._MEIPASS) / "buildno.txt"
+            if p.exists():
+                num = p.read_text(encoding="utf-8").strip()
+        except Exception:
+            num = ""
+    else:
+        try:
+            import subprocess
+            root = Path(__file__).resolve().parent.parent.parent
+            out = subprocess.run(
+                ["git", "rev-list", "--count", "HEAD"],
+                cwd=str(root), capture_output=True, text=True, timeout=2,
+            )
+            if out.returncode == 0:
+                num = out.stdout.strip()
+                # 작업트리에 미커밋 변경이 있으면 dirty 표식. 빌드번호(+B)는 커밋 수라
+                # 커밋 전엔 안 올라가므로, 미커밋 상태로 다시 실행/빌드한 것이 같은 +B 로
+                # 보이는 혼동을 막는다 → 'beta-1.3.0+65-dirty'.
+                st = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=str(root), capture_output=True, text=True, timeout=2,
+                )
+                if st.returncode == 0 and st.stdout.strip():
+                    num += "-dirty"
+        except Exception:
+            num = ""
+    _build_number_cache = num
+    return num
+
+
+def _get_display_version() -> str:
+    """UI(타이틀바 등)에 보여줄 전체 버전 문자열. 예: beta-1.2.1+142
+    빌드번호를 못 구하면 의미 버전만 반환."""
+    ver = _get_app_version()
+    build = _get_build_number()
+    if ver and build:
+        return f"{ver}+{build}"
+    return ver
 
 
 def _migrate_board_data(data: Dict[str, Any], file_version: str) -> Dict[str, Any]:

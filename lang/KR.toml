@@ -243,6 +243,17 @@ images_only = "이미지"
 model = "Model"
 text_default = "텍스트"
 
+[checklist]
+filter_mine = "내 작업만 보기"
+ai = "AI 보조"
+assign = "담당자 지정"
+assign_other = "직접 입력…"
+assign_clear = "담당자 지우기"
+due = "마감일"
+due_hint = "마감일 (YYYY-MM-DD, 비우면 해제)"
+ai_breakdown = "목표를 항목으로 분해"
+ai_cleanup = "항목 정리·요약"
+
 [round_table]
 edit_settings = "설정 편집"
 config_desc = "참가자를 추가하고 순서를 조정하세요. 드래그로 순서 변경 가능."

@@ -9,7 +9,7 @@ import importlib.util
 import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class ModelPlugin(ABC):
@@ -317,8 +317,32 @@ def _get_bundled_plugins_dir() -> Path | None:
 
 # ── 통합 접근자 (built-in + plugin) ──
 
+# 서버모드 모델 오버라이드 — 서버가 auth_ok 로 광고한 모델 목록.
+# 설정되면 get_all_models() 가 로컬 플러그인 대신 이 목록을 돌려준다(서버모드에선
+# AI 를 서버가 돌리므로 모델 가용성도 서버 기준이어야 함). None 이면 평상시(로컬).
+_MODELS_OVERRIDE: Optional[Dict[str, str]] = None
+
+
+_MODEL_OPTIONS_OVERRIDE: Optional[Dict[str, Dict]] = None
+
+
+def set_models_override(models: Optional[Dict[str, str]]) -> None:
+    """서버모드 진입 시 서버 모델 목록으로 덮어쓰고, 해제 시 None 으로 복원."""
+    global _MODELS_OVERRIDE
+    _MODELS_OVERRIDE = dict(models) if models else None
+
+
+def set_model_options_override(options: Optional[Dict[str, Dict]]) -> None:
+    """서버모드 진입 시 서버 모델 옵션 스키마로 덮어쓰고, 해제 시 None 복원.
+    서버 전용 모델(gpt-image 등)의 옵션(aspect ratio·quality)을 클라가 표시하게 한다."""
+    global _MODEL_OPTIONS_OVERRIDE
+    _MODEL_OPTIONS_OVERRIDE = dict(options) if options else None
+
+
 def get_all_models() -> Dict[str, str]:
-    """내장 모델 + 플러그인 모델 통합 딕셔너리"""
+    """내장 모델 + 플러그인 모델 통합 딕셔너리 (서버모드면 서버 광고 목록)"""
+    if _MODELS_OVERRIDE is not None:
+        return dict(_MODELS_OVERRIDE)
     from v.provider import MODELS
     result = dict(MODELS)
     result.update(PluginRegistry.instance().get_all_plugin_models())
@@ -331,7 +355,9 @@ def get_all_model_ids() -> list:
 
 
 def get_all_model_options() -> Dict[str, Dict]:
-    """내장 + 플러그인 모델 옵션 스키마"""
+    """내장 + 플러그인 모델 옵션 스키마 (서버모드면 서버 광고 스키마)"""
+    if _MODEL_OPTIONS_OVERRIDE is not None:
+        return dict(_MODEL_OPTIONS_OVERRIDE)
     from v.provider import MODEL_OPTIONS
     result = dict(MODEL_OPTIONS)
     result.update(PluginRegistry.instance().get_all_plugin_model_options())

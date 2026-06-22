@@ -138,12 +138,14 @@ class PortItem(QGraphicsEllipseItem):
     TYPE_BOOLEAN = "boolean"  # 신호 (on/off, 레드스톤)
     TYPE_STRING = "str"       # 문자열
     TYPE_FILE = "file"        # 파일/이미지
+    TYPE_NUMBER = "number"    # 숫자 (int/float)
 
     # 타입별 색상 (Theme 사용)
     TYPE_COLORS = {
         TYPE_BOOLEAN: Theme.PORT_BOOLEAN,
         TYPE_STRING: Theme.PORT_STRING,
         TYPE_FILE: Theme.ACCENT_SUCCESS,
+        TYPE_NUMBER: Theme.PORT_NUMBER,
     }
 
     # 기본 색상 팔레트 (다중 포트 구분용 - 레거시)
@@ -200,7 +202,8 @@ class PortItem(QGraphicsEllipseItem):
         type_name_kr = {
             self.TYPE_BOOLEAN: "신호",
             self.TYPE_STRING: "문자열",
-            self.TYPE_FILE: "파일"
+            self.TYPE_FILE: "파일",
+            self.TYPE_NUMBER: "숫자"
         }.get(self.port_data_type, self.port_data_type)
         port_dir = "입력" if port_type == self.INPUT else "출력"
         tooltip = f"{port_dir} 포트\n타입: {type_name_kr} ({self.port_data_type})"
@@ -435,8 +438,12 @@ class EdgeItem(QGraphicsPathItem):
         self.source_port = source_port  # PortItem (OUTPUT)
         self.target_port = target_port  # PortItem (INPUT)
 
-        # 타입 검증: 같은 타입끼리만 연결 가능
-        self.is_type_valid = (source_port.port_data_type == target_port.port_data_type)
+        # 타입 검증: 같은 타입끼리, 또는 숫자↔문자열(숫자는 깔끔히 문자열화되므로 호환)
+        st, tt = source_port.port_data_type, target_port.port_data_type
+        self.is_type_valid = (
+            st == tt
+            or {st, tt} <= {PortItem.TYPE_NUMBER, PortItem.TYPE_STRING}
+        )
 
         # 타입에 따라 색상 결정
         if self.is_type_valid:
@@ -1246,6 +1253,339 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             d["preview_b64"] = self._preview_b64
         if hasattr(self, '_vision_results') and self._vision_results:
             d["vision_results"] = self._vision_results
+        return d
+
+
+class FileNodeItem(SceneItemMixin, QGraphicsItem):
+    """파일 노드 — 임의 파일(PDF/HWP/docx/xlsx/txt …) 여러 개를 담아 AI에 전달.
+
+    이미지 카드와 동일한 첨부 영속 패턴을 쓴다: 끌어다 놓거나 추가한 파일을
+    보드별 temp/attachments 폴더에 UUID 이름으로 복사해 보관하고, 상대/절대
+    경로를 basename 으로 해석한다. 출력 포트(TYPE_FILE)로 챗 노드에 연결하면
+    담긴 파일 전부가 첨부로 전달된다.
+    """
+
+    _board_temp_dir: str | None = None
+
+    HEADER_H = 30
+    ROW_H = 26
+    PAD = 8
+    MIN_W = 180
+    MIN_H = 80
+
+    # 확장자 카테고리별 배지 색상
+    _EXT_COLORS = {
+        "pdf": "#e74c3c",
+        "hwp": "#2d6cdf", "hwpx": "#2d6cdf",
+        "doc": "#3a5bbf", "docx": "#3a5bbf",
+        "xls": "#1f9d55", "xlsx": "#1f9d55", "csv": "#1f9d55",
+        "ppt": "#e67e22", "pptx": "#e67e22",
+        "txt": "#7f8c8d", "md": "#7f8c8d", "rtf": "#7f8c8d",
+        "zip": "#8e6f4e", "json": "#8e44ad", "xml": "#8e44ad",
+    }
+
+    def __init__(self, x: float, y: float, file_paths=None, width: float = 0, height: float = 0):
+        super().__init__()
+        self.setPos(x, y)
+        self.node_id = None
+        self.input_port = None
+        self.output_port = None
+        self.on_files_changed = None  # callback: fn(self)
+        self.setZValue(55)
+
+        self._hidden = False
+        self.file_paths = []
+        if file_paths:
+            # __init__ 단계에선 복사 없이 보관(materialize 경로). 복사는 set_files.
+            self.file_paths = [p for p in file_paths if p]
+
+        if width > 0 and height > 0:
+            self._width = width
+            self._height = height
+        else:
+            self._width = 240
+            self._height = self._content_height()
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsFocusable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setAcceptHoverEvents(True)
+        self.setToolTip("Files")
+
+        self._resizing = False
+        self._resize_start = None
+        self._initial_size = None
+
+    # ── 경로/파일 관리 ──────────────────────────────────
+
+    def _content_height(self) -> float:
+        rows = max(1, len(self.file_paths))
+        return self.HEADER_H + rows * self.ROW_H + self.PAD
+
+    def _copy_to_managed(self, src_path: str) -> str:
+        """파일을 보드별 temp 폴더에 UUID 이름으로 복사. 이미 관리 폴더면 스킵."""
+        import shutil
+        import uuid as _uuid
+
+        if FileNodeItem._board_temp_dir:
+            managed_dir = Path(FileNodeItem._board_temp_dir) / "attachments"
+        else:
+            from v.settings import get_app_data_path
+            managed_dir = get_app_data_path() / "temp" / "board_files"
+        managed_dir.mkdir(parents=True, exist_ok=True)
+
+        src = Path(src_path)
+        try:
+            src.resolve().relative_to(Path(managed_dir).parent.resolve())
+            return src_path  # 이미 temp 하위
+        except ValueError:
+            pass
+
+        dest = managed_dir / f"{_uuid.uuid4().hex}{src.suffix}"
+        try:
+            shutil.copy2(str(src), str(dest))
+            return str(dest)
+        except Exception:
+            return src_path
+
+    def set_files(self, paths):
+        """파일 목록 교체 — 원본을 관리 폴더에 복사해 보관."""
+        self.add_files(paths, replace=True)
+
+    def add_files(self, paths, replace: bool = False):
+        if isinstance(paths, str):
+            paths = [paths]
+        managed = []
+        for p in (paths or []):
+            if not p:
+                continue
+            if os.path.exists(p):
+                managed.append(self._copy_to_managed(p))
+            else:
+                managed.append(p)  # 해석 불가 경로는 그대로(로드 후 basename 해석)
+        self.prepareGeometryChange()
+        if replace:
+            self.file_paths = managed
+        else:
+            self.file_paths = list(self.file_paths) + managed
+        self._height = max(self._height, self._content_height())
+        self.update()
+        self._reposition_own_ports()
+        if self.on_files_changed:
+            self.on_files_changed(self)
+
+    def remove_file(self, index: int):
+        if 0 <= index < len(self.file_paths):
+            self.prepareGeometryChange()
+            del self.file_paths[index]
+            self._height = max(self.MIN_H, self._content_height())
+            self.update()
+            self._reposition_own_ports()
+            if self.on_files_changed:
+                self.on_files_changed(self)
+
+    def _resolve(self, p: str):
+        """상대/절대 경로를 실제 파일 경로로 해석. 없으면 None."""
+        if not p:
+            return None
+        if os.path.isabs(p) and os.path.exists(p):
+            return p
+        if FileNodeItem._board_temp_dir:
+            for sub in ("attachments", ""):
+                base = FileNodeItem._board_temp_dir
+                cand = os.path.join(base, sub, os.path.basename(p)) if sub else os.path.join(base, os.path.basename(p))
+                if os.path.exists(cand):
+                    return cand
+        return p if os.path.exists(p) else None
+
+    def get_resolved_paths(self) -> list:
+        """AI 전달용 — 실제 존재하는 절대 경로 목록."""
+        out = []
+        for p in self.file_paths:
+            r = self._resolve(p)
+            if r:
+                out.append(r)
+        return out
+
+    # ── 지오메트리/렌더 ─────────────────────────────────
+
+    def boundingRect(self) -> QRectF:
+        # 선택 테두리(2px)와 우하단 리사이즈 핸들이 (0,0,w,h) 밖으로 그려지므로
+        # 마진을 줘서 갱신/이동 시 그 바깥 픽셀까지 무효화 범위에 포함시킨다
+        # (안 그러면 커서/테두리 잔상이 남음 — ImageCardItem 과 동일한 처리).
+        hs = self.HANDLE_SIZE
+        return QRectF(-hs, -hs, self._width + 2 * hs, self._height + 2 * hs)
+
+    @staticmethod
+    def _ext_of(path: str) -> str:
+        name = os.path.basename(path)
+        return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    def _row_at(self, pos) -> int | None:
+        if not self.file_paths:
+            return None
+        y = pos.y() - self.HEADER_H
+        if y < 0:
+            return None
+        idx = int(y // self.ROW_H)
+        return idx if 0 <= idx < len(self.file_paths) else None
+
+    def _x_hit(self, pos, idx: int) -> bool:
+        """행 우측 ✕(삭제) 영역 히트 판정."""
+        row_top = self.HEADER_H + idx * self.ROW_H
+        return (self._width - 26) <= pos.x() <= self._width and row_top <= pos.y() <= row_top + self.ROW_H
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0, 0, self._width, self._height)
+
+        # 배경 카드
+        painter.setBrush(QBrush(QColor(Theme.BG_SECONDARY)))
+        painter.setPen(QPen(QColor(Theme.NODE_BORDER), 1.2))
+        painter.drawRoundedRect(rect, 8, 8)
+
+        # 헤더
+        painter.setPen(QPen(QColor(Theme.TEXT_PRIMARY)))
+        hf = QFont("Segoe UI", 9)
+        hf.setBold(True)
+        painter.setFont(hf)
+        painter.drawText(
+            QRectF(self.PAD, 4, self._width - 2 * self.PAD, self.HEADER_H - 6),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+            f"\U0001F4CE 파일 ({len(self.file_paths)})",
+        )
+        painter.setPen(QPen(QColor(Theme.NODE_BORDER), 0.8))
+        painter.drawLine(QPointF(self.PAD, self.HEADER_H), QPointF(self._width - self.PAD, self.HEADER_H))
+
+        if not self.file_paths:
+            painter.setPen(QPen(QColor(Theme.TEXT_SECONDARY)))
+            painter.setFont(QFont("Segoe UI", 8))
+            painter.drawText(
+                QRectF(self.PAD, self.HEADER_H, self._width - 2 * self.PAD, self._height - self.HEADER_H),
+                Qt.AlignmentFlag.AlignCenter,
+                "파일을 끌어다 놓거나\n더블클릭으로 추가",
+            )
+        else:
+            rf = QFont("Segoe UI", 8)
+            for idx, p in enumerate(self.file_paths):
+                row_top = self.HEADER_H + idx * self.ROW_H
+                if row_top > self._height:
+                    break
+                ext = self._ext_of(p)
+                badge_color = QColor(self._EXT_COLORS.get(ext, "#6b7280"))
+                # 배지
+                badge_rect = QRectF(self.PAD, row_top + 4, 34, self.ROW_H - 8)
+                painter.setBrush(QBrush(badge_color))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(badge_rect, 4, 4)
+                painter.setPen(QPen(QColor("#ffffff")))
+                bf = QFont("Segoe UI", 7)
+                bf.setBold(True)
+                painter.setFont(bf)
+                painter.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, (ext[:4].upper() or "?"))
+                # 파일명 (생략표시)
+                painter.setPen(QPen(QColor(Theme.TEXT_PRIMARY)))
+                painter.setFont(rf)
+                name_rect = QRectF(self.PAD + 40, row_top, self._width - self.PAD - 40 - 22, self.ROW_H)
+                fm = painter.fontMetrics()
+                elided = fm.elidedText(os.path.basename(p), Qt.TextElideMode.ElideMiddle, int(name_rect.width()))
+                missing = self._resolve(p) is None
+                if missing:
+                    painter.setPen(QPen(QColor(Theme.TEXT_SECONDARY)))
+                painter.drawText(name_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided)
+                # ✕ 삭제
+                painter.setPen(QPen(QColor(Theme.TEXT_SECONDARY)))
+                painter.drawText(
+                    QRectF(self._width - 24, row_top, 20, self.ROW_H),
+                    Qt.AlignmentFlag.AlignCenter, "✕")
+
+        if self.isSelected():
+            painter.setPen(QPen(QColor(Theme.ACCENT_PRIMARY), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, 8, 8)
+            self._paint_resize_handle(painter, rect)
+
+    # ── 상호작용 ────────────────────────────────────────
+
+    def _upload_files(self):
+        scene = self.scene()
+        if not scene or not scene.views():
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            scene.views()[0], "파일 선택", "", "All Files (*.*)")
+        if paths:
+            self.add_files(paths)
+            sc = self.scene()
+            if sc and hasattr(sc, '_plugin'):
+                sc._plugin._notify_modified()
+
+    def _open_file(self, path: str):
+        resolved = self._resolve(path)
+        if resolved:
+            from PyQt6.QtGui import QDesktopServices
+            from PyQt6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(resolved))
+
+    def mouseDoubleClickEvent(self, event):
+        idx = self._row_at(event.pos())
+        if idx is not None and not self._x_hit(event.pos(), idx):
+            self._open_file(self.file_paths[idx])
+        else:
+            self._upload_files()
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # ✕ 삭제 영역 클릭
+            idx = self._row_at(event.pos())
+            if idx is not None and self._x_hit(event.pos(), idx):
+                self.remove_file(idx)
+                sc = self.scene()
+                if sc and hasattr(sc, '_plugin'):
+                    sc._plugin._notify_modified()
+                event.accept()
+                return
+            if self.isSelected() and self._is_near_bottom_right(event.pos(), self._width, self._height):
+                self._resizing = True
+                self._resize_start = event.scenePos()
+                self._initial_size = (self._width, self._height)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resizing and self._resize_start and self._initial_size:
+            delta = event.scenePos() - self._resize_start
+            self._begin_resize()
+            self._width = max(self.MIN_W, self._initial_size[0] + delta.x())
+            self._height = max(self.MIN_H, self._initial_size[1] + delta.y())
+            self.update()
+            self._reposition_own_ports()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        pre = getattr(self, '_pre_move_pos', None)
+        moved = pre is not None and self.pos() != pre
+        resized = self._resizing
+        self._end_resize()
+        self._initial_size = None
+        super().mouseReleaseEvent(event)
+        if moved or resized:
+            scene = self.scene()
+            if scene and hasattr(scene, '_plugin'):
+                scene._plugin._notify_modified()
+
+    def get_data(self) -> Dict[str, Any]:
+        d = self._base_data()
+        d.update(type="file_node", node_id=self.node_id,
+                 width=self._width, height=self._height,
+                 file_paths=list(self.file_paths),
+                 hidden=self._hidden)
         return d
 
 

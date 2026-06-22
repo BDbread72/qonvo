@@ -1,0 +1,5 @@
+node_modules
+dist
+# Large download artifacts are copied in at deploy time, not committed
+public/downloads/*.exe
+public/downloads/*.zip

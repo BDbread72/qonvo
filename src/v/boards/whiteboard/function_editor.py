@@ -538,6 +538,18 @@ class FunctionEditorView(QGraphicsView):
             self.scale(factor, factor)
 
     def mousePressEvent(self, event: QMouseEvent):
+        # 임베드 위젯(QLineEdit/QTextEdit) 잔류 캐럿 제거 — scene().clearFocus() 만으론
+        # 안 지워지므로 앱 전역 포커스 위젯을 직접 clearFocus (메인 뷰와 동일 패턴).
+        from PyQt6.QtWidgets import (
+            QApplication, QLineEdit, QTextEdit, QPlainTextEdit, QGraphicsProxyWidget,
+        )
+        _fw = QApplication.focusWidget()
+        if isinstance(_fw, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            _pi = self.itemAt(event.pos())
+            _keep = (isinstance(_pi, QGraphicsProxyWidget) and _pi.widget() is not None
+                     and (_pi.widget() is _fw or _pi.widget().isAncestorOf(_fw)))
+            if not _keep:
+                _fw.clearFocus()
         self.scene().clearFocus()
 
         if event.button() in (Qt.MouseButton.MiddleButton, Qt.MouseButton.RightButton):

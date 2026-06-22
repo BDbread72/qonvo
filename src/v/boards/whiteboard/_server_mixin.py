@@ -124,6 +124,11 @@ class ServerMixin:
                                       msg.get("text", ""), is_self=(user == me))
 
     def _on_presence_cursors(self, users: list):
+        # 체크리스트 담당자 메뉴 등에서 쓰도록 최신 접속자 목록 캐시
+        try:
+            self._last_presence = list(users or [])
+        except Exception:
+            self._last_presence = []
         if getattr(self, '_cursor_layer', None) is None:
             return
         me = self._server_client.username if self._server_client else ""
@@ -309,11 +314,28 @@ class ServerMixin:
 
     def _on_ai_complete(self, node_id_str: str, result: dict):
         from .chat_node import ChatNodeWidget
+        from .checklist import ChecklistWidget
         node_id = int(node_id_str) if node_id_str.isdigit() else None
         if node_id is None:
             return
         node = self.app.nodes.get(node_id)
+        # 체크리스트 AI(분해/정리) 결과 분기
+        pending = getattr(self, '_checklist_ai_pending', None)
+        if node and isinstance(node, ChecklistWidget) and pending is not None \
+                and node_id_str in pending:
+            replace = pending.pop(node_id_str, False)
+            err = result.get("error")
+            if err and not result.get("text"):
+                node.set_ai_busy(False)
+            else:
+                self._apply_checklist_ai(node, result.get("text", ""), replace)
+            return
         if node and isinstance(node, ChatNodeWidget):
+            # preferred(N개 후보) 결과
+            candidates = result.get("candidates")
+            if candidates is not None:
+                self._show_server_preferred(node, candidates)
+                return
             text = result.get("text", "")
             images = result.get("images", [])
             err = result.get("error")
@@ -331,6 +353,80 @@ class ServerMixin:
                 node.set_response(text, done=True)
             self._emit_complete_signal(node)
 
+    def _prepare_server_input_files(self, files):
+        """입력 이미지(로컬 경로)를 서버 첨부로 업로드하고 'attachments/<name>' 참조로 변환.
+
+        서버는 클라 로컬 경로를 못 읽으므로, 각 파일을 서버에 PUT 업로드한 뒤
+        서버가 board attachments 에서 해석할 수 있는 상대참조를 보낸다.
+        """
+        import os
+        from .items import ImageCardItem
+        refs = []
+        client = self._server_client
+        board_id = self._board_name
+        for f in files or []:
+            if not isinstance(f, str) or not f:
+                continue
+            local = f if os.path.exists(f) else None
+            if local is None and ImageCardItem._board_temp_dir:
+                for sub in ("attachments", ""):
+                    cand = (os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(f))
+                            if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(f)))
+                    if os.path.exists(cand):
+                        local = cand
+                        break
+            if local is None:
+                # 이미 상대참조(attachments/...)거나 못 찾음 → 그대로 보냄(서버가 해석/무시)
+                refs.append(f)
+                continue
+            name = os.path.basename(local)
+            try:
+                if client is not None:
+                    client.upload_attachment(board_id, name, local)
+            except Exception:
+                pass
+            refs.append(f"attachments/{name}")
+        return refs
+
+    def _show_server_preferred(self, node, candidates):
+        """서버 preferred 후보(candidates: [{text,images(base64),error}])를 노드의
+        preferred 결과 UI 로 표시한다. base64 이미지는 temp 에 저장해 경로로 넘긴다."""
+        import os, uuid as _uuid
+        from .chat_node import ChatNodeWidget
+        temp_dir = ChatNodeWidget._board_temp_dir or __import__('tempfile').gettempdir()
+        results = []
+        for c in candidates or []:
+            text = c.get("text", "")
+            if not text and c.get("error"):
+                text = f"⚠️ {c['error']}"
+            img_paths = []
+            for img_data in c.get("images", []) or []:
+                try:
+                    raw = node._decode_image_data(img_data)
+                except Exception:
+                    raw = None
+                if not raw:
+                    continue
+                p = os.path.join(temp_dir, f"{_uuid.uuid4().hex}.png")
+                try:
+                    with open(p, "wb") as fh:
+                        fh.write(raw)
+                    img_paths.append(p)
+                except Exception:
+                    continue
+            results.append((text, img_paths))
+        node._on_preferred_selected = self._on_chat_preferred_option_selected
+        node.show_preferred_results(results)
+        notify = getattr(node, 'notify_on_complete', False)
+        if notify:
+            try:
+                from .toast_notification import ToastManager
+                mw = self.view.window() if self.view else None
+                ToastManager.instance().show_toast(
+                    f"Chat #{node.node_id} - {len(results)}개 결과 준비됨", mw)
+            except Exception:
+                pass
+
     def _handle_chat_send_server(self, node_id, node, model, message, files, prompt_entries):
         from v.settings import get_model_options
 
@@ -344,17 +440,45 @@ class ServerMixin:
             system_parts = [e.get("text", "") for e in sorted_entries
                            if e.get("role") == "system" and e.get("text")]
             if system_parts:
-                effective_system_prompt = f"{effective_system_prompt}\n\n{''.join(system_parts)}".strip()
+                effective_system_prompt = f"{effective_system_prompt}\n\n{chr(10).join(system_parts)}".strip()
 
-        node.set_response("서버 처리 중...", done=False)
+        # 입력 이미지 업로드 + 상대참조로 변환(서버가 읽을 수 있게).
+        ref_files = self._prepare_server_input_files(files)
+
+        # 노드 옵션(temperature 등) 병합.
+        options = get_model_options(model)
+        node_opts = getattr(node, 'node_options', {})
+        if node_opts:
+            options.update(node_opts)
+
+        # preferred(N개 후보) 모드 지원.
+        pref_enabled = getattr(node, 'preferred_options_enabled', False)
+        count = getattr(node, 'preferred_options_count', 3) if pref_enabled else 1
+        if pref_enabled:
+            node._on_preferred_selected = self._on_chat_preferred_option_selected
+            node.set_response(f"생성 중... (0/{count})", done=False)
+        else:
+            node.set_response("서버 처리 중...", done=False)
+
+        # ── 진단: 서버로 나가는 실제 페이로드 덤프 (이전대화/형제노드 누수 추적용) ──
+        try:
+            from v.logger import get_logger as _gl
+            _lg = _gl("qonvo.plugin")
+            _sysp = (effective_system_prompt or "")[:200].replace("\n", " ")
+            _msgp = (message or "")[:300].replace("\n", " ")
+            _lg.info(f"[CHAT_PAYLOAD/server] node={node_id} sys_len={len(effective_system_prompt or '')} "
+                     f"sys='{_sysp}' msg_len={len(message or '')} msg='{_msgp}'")
+        except Exception:
+            pass
 
         self._server_client.send_ai_request(
             node_id=node_id,
             model=model,
             message=message or "",
-            files=[f for f in (files or []) if isinstance(f, str)],
+            files=ref_files,
             system_prompt=effective_system_prompt,
-            options=get_model_options(model),
+            options=options,
+            count=count,
         )
 
     def _apply_remote_op(self, op: dict):
@@ -406,10 +530,14 @@ class ServerMixin:
             "texts": self.add_text_item,
             "group_frames": self.add_group_frame,
             "image_cards": self.add_image_card,
+            "file_nodes": self.add_file_node,
         }
         add_fn = add_map.get(category)
         if add_fn:
             add_fn(pos=pos, node_id=node_id)
+        # 원격이 새 이미지/파일 노드를 추가 → 참조 첨부를 백그라운드로 받아온다.
+        if category in ("image_cards", "file_nodes"):
+            self._schedule_attach_resync()
 
     def _remote_remove_node(self, target: str):
         node_id = int(target) if target.isdigit() else None
@@ -453,6 +581,9 @@ class ServerMixin:
         node = self.app.nodes.get(node_id)
         if node is None:
             return
+        # 원격이 이미지 카드 데이터를 보냄(드래그 추가/교체) → 새 첨부 증분 다운로드.
+        if node_id in getattr(self, 'image_card_items', {}) or node_id in getattr(self, 'file_node_items', {}):
+            self._schedule_attach_resync()
         # 신규: 전체 노드 데이터를 제자리 적용(텍스트/제목/색상 등 위젯 갱신).
         # apply_sync_data 가 있으면 제자리 갱신(부드러움), 없으면 데이터로 재생성(범용).
         full = data.get("data")
@@ -460,6 +591,18 @@ class ServerMixin:
             if hasattr(node, "apply_sync_data"):
                 try:
                     node.apply_sync_data(full)
+                except Exception:
+                    pass
+                # 채팅 노드 추가 입력 포트(extra_input_defs) 라이브 복원(없는 것만 추가)
+                # → restore_state 는 포트를 안 만들므로 플러그인 레벨에서 보강.
+                try:
+                    from .chat_node import ChatNodeWidget
+                    if isinstance(node, ChatNodeWidget) and "extra_input_defs" in full:
+                        existing = set(node.input_ports.keys())
+                        for d in (full.get("extra_input_defs") or []):
+                            nm = d.get("name")
+                            if nm and nm not in existing:
+                                self._add_chat_input_port(node, d.get("type", "text"), nm)
                 except Exception:
                     pass
             else:
@@ -505,6 +648,7 @@ class ServerMixin:
         else:
             reg = {"texts": self.text_items, "group_frames": self.group_frame_items,
                    "image_cards": self.image_card_items,
+                   "file_nodes": self.file_node_items,
                    "dimensions": self.dimension_items}.get(category)
             if reg is None:
                 return
@@ -595,6 +739,60 @@ class ServerMixin:
             "x": pos.x(),
             "y": pos.y(),
         })
+
+    def _upload_and_sync_image(self, card):
+        """서버모드에서 새로 넣은 이미지카드를 서버에 영속한다.
+
+        이미지카드는 자동 prop 동기화에서 제외돼 있어, 드래그/붙여넣기로 넣은
+        이미지는 (1) 첨부 파일 업로드 (2) 상대경로(attachments/<name>) 기록이
+        둘 다 안 돼서 저장이 안 됐다. 여기서 둘 다 처리한다:
+          - node_prop 으로 image_path=attachments/<name> + preview_b64 를 즉시
+            전송 → 서버 doc 머지(영속) + 타 멤버 미리보기 표시.
+          - 파일 PUT 은 백그라운드 스레드(큰 이미지로 UI 안 멈춤).
+        """
+        if not getattr(self, 'server_mode', False) or self._applying_remote_op:
+            return
+        client = getattr(self, '_server_client', None)
+        if client is None or not client.is_connected:
+            return
+        import os
+        path = getattr(card, 'image_path', None)
+        if not path or not os.path.exists(path):
+            return
+        name = os.path.basename(path)
+        board_id = self._board_name
+        if not board_id:
+            return
+        # (1) doc + 타 멤버에 즉시 반영(상대경로). 이미지카드는 _send_op 직접 호출.
+        try:
+            data = card.get_data()
+            data["image_path"] = f"attachments/{name}"
+            self._send_op("node_prop", card.node_id, {"data": data})
+        except Exception:
+            pass
+        # (2) 파일 업로드는 백그라운드(동기 PUT 을 UI 스레드 밖에서)
+        import threading
+
+        def _do_upload(b=board_id, n=name, p=path):
+            try:
+                client.upload_attachment(b, n, p)
+            except Exception:
+                pass
+        threading.Thread(target=_do_upload, daemon=True).start()
+
+    def _schedule_attach_resync(self):
+        """원격 op 가 새 이미지 첨부를 참조 → 백그라운드 증분 다운로드(디바운스)."""
+        if not getattr(self, 'server_mode', False):
+            return
+        from PyQt6.QtCore import QTimer
+        if getattr(self, '_attach_resync_timer', None) is None:
+            self._attach_resync_timer = QTimer(self.view if self.view is not None else None)
+            self._attach_resync_timer.setSingleShot(True)
+            self._attach_resync_timer.setInterval(500)
+            self._attach_resync_timer.timeout.connect(
+                lambda: self._start_attachment_sync(self._board_name))
+        if not self._attach_resync_timer.isActive():
+            self._attach_resync_timer.start()
 
     def _send_node_remove_op(self, node_id):
         if not self.server_mode or self._applying_remote_op:
