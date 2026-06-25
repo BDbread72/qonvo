@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import secrets
 import time
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 import aiohttp
@@ -41,7 +41,22 @@ class MattermostOAuth:
         self._admin_base = (admin_base or "").rstrip("/")
         self._states: Dict[str, dict] = {}  # state -> {exp, loopback}
         # 관리자 페이지에서 Mattermost 전체 사용자 검색에 쓸 관리자 본인 토큰(로그인 시 저장)
-        self.admin_mm_tokens: Dict[str, str] = {}  # username -> mattermost access_token
+        # TTL 부여 — 라이브 MM 토큰이 메모리에 무기한 잔류하지 않게.
+        self.admin_mm_tokens: Dict[str, tuple] = {}  # username -> (access_token, exp)
+
+    def _prune_admin_tokens(self, now: float) -> None:
+        for k in [k for k, v in list(self.admin_mm_tokens.items()) if v[1] < now]:
+            self.admin_mm_tokens.pop(k, None)
+
+    def get_admin_token(self, username: str) -> Optional[str]:
+        """만료 안 된 관리자 MM 토큰을 반환(만료면 즉시 폐기). 없으면 None."""
+        v = self.admin_mm_tokens.get(username)
+        if not v:
+            return None
+        if v[1] < time.time():
+            self.admin_mm_tokens.pop(username, None)
+            return None
+        return v[0]
 
     def register(self, app: web.Application) -> None:
         """라우트를 등록한다(비활성 시 안내만)."""
@@ -100,8 +115,9 @@ class MattermostOAuth:
         # 실제 Operator 여부는 /admin/api/login 의 authenticate(레벨 오버라이드 포함)가 판단.
         if loopback == "admin":
             from urllib.parse import quote
-            # 관리자 페이지의 Mattermost 전체 검색에 쓰도록 본인 토큰 보관
-            self.admin_mm_tokens[username] = access_token
+            # 관리자 페이지의 Mattermost 전체 검색에 쓰도록 본인 토큰 보관(TTL 1시간 + 만료분 청소)
+            self._prune_admin_tokens(now)
+            self.admin_mm_tokens[username] = (access_token, now + 3600)
             token = self._auth.tokens.issue(username, self.default_level, now)
             # 외부 https 주소가 설정돼 있으면 그리로(포트 없는 깔끔한 주소), 없으면 상대경로
             raise web.HTTPFound(

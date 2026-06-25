@@ -508,11 +508,13 @@ class ChatWorkersMixin:
         logger.warning(f"[BATCH_RESUME] Failed: {job_name} (node {nid})")
 
     def _on_image_payload(self, node, worker, payload):
-        images = payload.get("images", [])
-        text = payload.get("text", "")
-        nid = getattr(node, 'node_id', '?')
-        logger.info(f"[IMAGE_PAYLOAD] node={nid}, images={len(images)}, text_len={len(text)}")
         try:
+            if not isinstance(payload, dict):
+                payload = {}
+            images = payload.get("images", [])
+            text = payload.get("text", "")
+            nid = getattr(node, 'node_id', '?')
+            logger.info(f"[IMAGE_PAYLOAD] node={nid}, images={len(images)}, text_len={len(text)}")
             if not images:
                 error_msg = text if text else "[이미지 생성 실패: API 응답에 이미지 없음]"
                 logger.warning(f"[IMAGE_PAYLOAD] node={nid} no images: {error_msg!r}")

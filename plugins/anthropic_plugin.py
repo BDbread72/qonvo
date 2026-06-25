@@ -55,6 +55,11 @@ class AnthropicPlugin(ModelPlugin):
         sys_prompt = options.pop("system_prompt", "")
         ant_messages = []
         for msg in messages:
+            # Anthropic 은 "system" 을 메시지 role 로 받지 않는다(최상위 system 파라미터 전용).
+            # RoundTable/프롬프트가 system 메시지를 끼워 넣으면 API 가 거부 → system 으로 합친다.
+            if msg.role == "system":
+                sys_prompt = f"{sys_prompt}\n\n{msg.content}".strip() if sys_prompt else msg.content
+                continue
             content_parts = [{"type": "text", "text": msg.content}]
             if msg.attachments:
                 import base64

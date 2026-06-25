@@ -116,6 +116,37 @@ class QonvoServer:
         self.admin.register(self._app)
 
     # ---- 인프라 ---------------------------------------------------------
+    def _server_icon_b64(self) -> str:
+        """서버 아이콘을 base64 data-URI 로 반환 — 마크 server-icon.png 식.
+
+        우선순위: ``%APPDATA%/Qonvo/server/server-icon.png`` (운영자 커스텀, 1:1 권장)
+        → 없으면 번들 기본 ``server/default-icon.png`` (qonvo 앱 로고).
+        (경로, mtime) 기준 캐시. 256KB 초과(/health 비대화 방지)는 "".
+        """
+        try:
+            from pathlib import Path as _Path
+            from .config import get_server_dir
+            custom = get_server_dir() / "server-icon.png"
+            default = _Path(__file__).resolve().parent / "default-icon.png"
+            p = custom if custom.exists() else default
+            if not p.exists():
+                self._icon_cache = ("", str(p), -1.0)
+                return ""
+            mtime = p.stat().st_mtime
+            cached = getattr(self, "_icon_cache", None)
+            if cached and cached[1] == str(p) and cached[2] == mtime:
+                return cached[0]
+            raw = p.read_bytes()
+            if len(raw) > 256 * 1024:
+                self._icon_cache = ("", str(p), mtime)
+                return ""
+            import base64 as _b64
+            data = "data:image/png;base64," + _b64.b64encode(raw).decode("ascii")
+            self._icon_cache = (data, str(p), mtime)
+            return data
+        except Exception:
+            return ""
+
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({
             "name": self.name,
@@ -124,6 +155,7 @@ class QonvoServer:
             "min_protocol": self.min_protocol,
             "boards": list_boards(),
             "online": sum(1 for s in self.registry.all_sessions() if s.authed),
+            "icon": self._server_icon_b64(),   # 마크식 서버 아이콘(data-URI, 없으면 "")
             "auth": {
                 # 클라가 서버 추가 창에서 "merri로 로그인" 노출 여부를 판단
                 "merri": bool(self._oauth.enabled),
@@ -520,7 +552,8 @@ class QonvoServer:
         from .ai_runner import run_ai
 
         # 동시/레이트 카운트 시작 — 완료(또는 예외) 시 반드시 end() 로 회계.
-        self.policy.begin(sess.username)
+        # count(preferred N후보)를 넘겨 실제 동시 실행 수를 반영(한도 우회 방지).
+        self.policy.begin(sess.username, count)
         tin = tout = 0
         try:
             # preferred: N개 후보를 동시 생성해 요청자에게만 candidates 로 보낸다(선택은 클라가).

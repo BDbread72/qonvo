@@ -261,7 +261,7 @@ class AdminPanel:
         if not q:
             return web.json_response({"users": []})
         oauth = getattr(self.s, "_oauth", None)
-        tok = getattr(oauth, "admin_mm_tokens", {}).get(admin_user) if oauth else None
+        tok = oauth.get_admin_token(admin_user) if oauth else None
         if not tok:
             return web.json_response(
                 {"error": "Mattermost로 다시 로그인하면 전체 검색이 됩니다.", "need_login": True},

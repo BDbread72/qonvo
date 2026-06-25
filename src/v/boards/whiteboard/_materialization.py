@@ -698,7 +698,8 @@ class MaterializationMixin:
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                   self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
                   self.image_card_items, self.dimension_items, self.text_items,
-                  self.group_frame_items, self.nixi_proxies):
+                  self.group_frame_items, self.nixi_proxies,
+                  self.number_proxies, self.math_proxies, self.file_node_items):
             if node_id in d:
                 return d[node_id]
         return None

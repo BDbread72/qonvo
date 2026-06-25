@@ -712,7 +712,7 @@ class WhiteBoardPlugin(
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies):
+                  self.nixi_proxies, self.number_proxies, self.math_proxies):
             d.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
         self.node_names.pop(node_id, None)
@@ -726,9 +726,14 @@ class WhiteBoardPlugin(
     def _delete_scene_item(self, item, registry: dict):
         node_id = getattr(item, "node_id", None)
         self._send_node_remove_op(node_id)
+        # FileNode 등 임시 첨부 정리(없으면 temp 에 orphan 파일이 남음 — proxy 경로와 동일하게)
+        if hasattr(item, 'cleanup_temp_files'):
+            item.cleanup_temp_files()
         self._remove_ports_and_edges(self._collect_ports(item))
         registry.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
+        self.node_names.pop(node_id, None)        # 이름 오버라이드 누수 방지(id 재사용 시 stale 이름 상속)
+        self.node_title_items.pop(node_id, None)
         self._node_data_cache.pop(node_id, None)
         self._dirty_node_ids.discard(node_id)
         if hasattr(item, 'stop_animation'):

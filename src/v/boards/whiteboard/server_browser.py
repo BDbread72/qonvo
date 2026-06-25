@@ -10,12 +10,14 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import urllib.request
 from typing import Optional
 from urllib.parse import quote
 
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QThread, Qt, QSize, pyqtSignal
+from PyQt6.QtGui import QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QPushButton, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QCheckBox,
@@ -71,9 +73,26 @@ def _http_base(host: str, port: int, secure: bool) -> str:
 _LIVE_PINGS: set = set()
 
 
+def _icon_from_b64(b64: str) -> Optional[QIcon]:
+    """data-URI/base64 PNG → QIcon. 실패 시 None."""
+    try:
+        if not b64:
+            return None
+        if "," in b64:
+            b64 = b64.split(",", 1)[1]
+        raw = base64.b64decode(b64)
+        pm = QPixmap()
+        if not pm.loadFromData(raw) or pm.isNull():
+            return None
+        return QIcon(pm)
+    except Exception:
+        return None
+
+
 class _PingThread(QThread):
     """각 서버의 /health 를 조회해 상태를 보고한다(취소 가능)."""
-    result = pyqtSignal(int, bool, str, int, bool)  # idx, online, name, online_count, merri
+    # idx, online, name, online_count, merri, icon_b64(마크식 서버 아이콘)
+    result = pyqtSignal(int, bool, str, int, bool, str)
 
     def __init__(self, servers: list):
         super().__init__()
@@ -87,7 +106,7 @@ class _PingThread(QThread):
         for i, s in enumerate(self._servers):
             if self._cancelled:
                 return
-            online, name, count, merri = False, s.get("name", ""), 0, False
+            online, name, count, merri, icon = False, s.get("name", ""), 0, False, ""
             try:
                 base = _http_base(s.get("host", ""), int(s.get("port", 9700)), s.get("secure", False))
                 with urllib.request.urlopen(base + "/", timeout=4) as r:
@@ -96,11 +115,12 @@ class _PingThread(QThread):
                 name = data.get("name", name)
                 count = data.get("online", 0)
                 merri = bool(data.get("auth", {}).get("merri", False))
+                icon = data.get("icon", "") or ""
             except Exception:
                 pass
             if self._cancelled:
                 return
-            self.result.emit(i, online, name, count, merri)
+            self.result.emit(i, online, name, count, merri, icon)
 
 
 class ServerBrowserWidget(QWidget):
@@ -163,6 +183,7 @@ class ServerBrowserWidget(QWidget):
             f"QListWidget::item {{ padding: 10px; border-radius: 6px; }}"
             f"QListWidget::item:selected {{ background-color: #0d6efd; }}"
         )
+        self._list.setIconSize(QSize(36, 36))   # 마크식 서버 아이콘 썸네일
         self._list.itemDoubleClicked.connect(lambda _i: self._on_connect())
         layout.addWidget(self._list, 1)
 
@@ -235,6 +256,9 @@ class ServerBrowserWidget(QWidget):
         for s in self._servers:
             label = f"⚪  {s.get('name','(이름없음)')}\n      {s.get('host','')}:{s.get('port',9700)}"
             it = QListWidgetItem(label)
+            qicon = _icon_from_b64(s.get("_icon", ""))   # 직전 핑에서 받은 아이콘 유지
+            if qicon is not None:
+                it.setIcon(qicon)
             self._list.addItem(it)
         if self._servers:
             self._list.setCurrentRow(0)
@@ -253,15 +277,20 @@ class ServerBrowserWidget(QWidget):
         self._ping.result.connect(self._on_ping)
         self._ping.start()
 
-    def _on_ping(self, idx, online, name, count, merri):
+    def _on_ping(self, idx, online, name, count, merri, icon):
         if idx >= self._list.count():
             return
         s = self._servers[idx]
         s["_merri"] = merri  # 접속 시 참고
+        s["_icon"] = icon    # 마크식 서버 아이콘(다음 새로고침까지 유지)
+        item = self._list.item(idx)
         dot = "🟢" if online else "🔴"
         extra = f"  ·  {count}명 접속" if online else "  ·  오프라인"
-        self._list.item(idx).setText(
+        item.setText(
             f"{dot}  {s.get('name','')}{extra}\n      {s.get('host','')}:{s.get('port',9700)}")
+        qicon = _icon_from_b64(icon) if online else None
+        if qicon is not None:
+            item.setIcon(qicon)
 
     def _cur(self) -> Optional[dict]:
         i = self._list.currentRow()
@@ -472,19 +501,32 @@ class ServerEntryDialog(QDialog):
 class ServerBoardListDialog(QDialog):
     """접속한 서버의 보드 목록 + 새 보드/열기."""
 
-    def __init__(self, client, parent=None):
+    def __init__(self, client, parent=None, icon_b64: str = ""):
         super().__init__(parent)
         self.setWindowTitle("보드 선택")
         self.setMinimumSize(420, 380)
         self.setModal(True)
         self.setStyleSheet(f"QDialog {{ background-color: {Theme.BG_PRIMARY}; }}")
         self._client = client
+        self._icon_b64 = icon_b64 or ""   # 핑에서 이미 받은 아이콘(있으면 네트워크 재조회 안 함)
         self._board_id: Optional[str] = None
 
         layout = QVBoxLayout(self)
+        # 헤더: 서버 아이콘(마크식) + 타이틀
+        head = QHBoxLayout()
+        icon_pm = self._fetch_server_icon()
+        if icon_pm is not None:
+            lbl = QLabel()
+            lbl.setPixmap(icon_pm.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+            lbl.setFixedSize(40, 40)
+            head.addWidget(lbl)
+            head.addSpacing(8)
         title = QLabel("보드 선택")
         title.setStyleSheet(f"color: {Theme.TEXT_PRIMARY}; font-size: 16px; font-weight: bold;")
-        layout.addWidget(title)
+        head.addWidget(title)
+        head.addStretch()
+        layout.addLayout(head)
 
         self._list = QListWidget()
         self._list.setStyleSheet(
@@ -507,6 +549,25 @@ class ServerBoardListDialog(QDialog):
         layout.addLayout(row)
 
         self._load_boards()
+
+    def _fetch_server_icon(self) -> Optional[QPixmap]:
+        """서버 아이콘 QPixmap. 핑에서 받은 b64 가 있으면 그대로 쓰고(네트워크 X),
+        없을 때만 /health 를 1회 조회한다. 실패 시 None."""
+        try:
+            icon = self._icon_b64
+            if not icon:   # 폴백: 핑 아이콘이 없을 때만 동기 조회(드묾)
+                base = getattr(self._client, "http_base", "")
+                if not base:
+                    return None
+                with urllib.request.urlopen(base + "/", timeout=4) as r:
+                    icon = json.loads(r.read().decode("utf-8")).get("icon", "") or ""
+            qicon = _icon_from_b64(icon)
+            if qicon is None:
+                return None
+            pm = qicon.pixmap(64, 64)
+            return pm if not pm.isNull() else None
+        except Exception:
+            return None
 
     def _load_boards(self):
         """서버 /boards 메타로 노드수까지 표시. 실패하면 이름만."""

@@ -1219,7 +1219,7 @@ class MainWindow(QMainWindow):
 
         def on_auth_ok(level, boards):
             cleanup()
-            board_dlg = ServerBoardListDialog(client, self)
+            board_dlg = ServerBoardListDialog(client, self, icon_b64=info.get("_icon", ""))
             if board_dlg.exec() != QDialog.DialogCode.Accepted:
                 # 보드 선택 취소 → 연결 종료
                 client.disconnect_from_server()

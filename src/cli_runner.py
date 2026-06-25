@@ -76,8 +76,12 @@ class BatchRunner:
         meta["elapsed_seconds"] = round(time.time() - start, 2)
         return "".join(chunks), meta
 
-    def run_file(self, path: Path) -> Tuple[str, Dict[str, Any]]:
-        """파일(.txt/.json) 입력을 읽어 단건 실행한다."""
+    def run_file(self, path: Path, model_override: str = None) -> Tuple[str, Dict[str, Any]]:
+        """파일(.txt/.json) 입력을 읽어 단건 실행한다.
+
+        model_override 가 주어지면 파일에 적힌 model 대신 그 모델로 **실제 실행**한다
+        (예전엔 meta 만 덮어써서 표기≠실제였음).
+        """
         path = Path(path)
         suffix = path.suffix.lower()
 
@@ -99,6 +103,8 @@ class BatchRunner:
         if not prompt:
             raise ValueError(f"Empty prompt in {path}")
 
+        if model_override:
+            model = model_override
         return self.run_single(prompt, model=model, system=system, options=options)
 
     def run_batch(
@@ -130,11 +136,8 @@ class BatchRunner:
                 on_progress(idx, total, stem)
 
             try:
-                text, meta = self.run_file(file)
-
-                # 배치 실행에서 모델을 강제할 경우 메타만 덮어쓴다.
-                if model_override:
-                    meta["model"] = model_override
+                # 모델 강제는 run_file 로 넘겨 실제 실행에 반영(meta["model"] 도 run_single 이 정확히 기록).
+                text, meta = self.run_file(file, model_override=model_override)
 
                 result_file = output_path / f"{stem}_result.md"
                 meta_file = output_path / f"{stem}_meta.json"

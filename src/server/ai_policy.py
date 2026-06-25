@@ -112,17 +112,20 @@ class AIPolicy:
                     return False, f"오늘 토큰 한도({dt:,})를 모두 사용했습니다.", count
         return True, "", count
 
-    def begin(self, user: str) -> None:
-        """authorize 통과 후 실제 실행 직전 — 레이트 윈도우 기록 + 동시 카운트 증가."""
+    def begin(self, user: str, count: int = 1) -> None:
+        """authorize 통과 후 실제 실행 직전 — 레이트 윈도우 기록 + 동시 카운트 증가.
+
+        preferred(N후보)는 실제로 N개 동시 실행이므로 count 만큼 증가시켜야 동시 한도가
+        제대로 먹는다(예전엔 항상 +1 이라 count=8 배치가 1슬롯으로만 잡혀 한도 우회).
+        """
         with self._lock:
             self._recent[user].append(time.time())
-            self._active[user] += 1
+            self._active[user] += max(1, int(count or 1))
 
     def end(self, user: str, model: str, tokens_in: int, tokens_out: int, count: int = 1) -> None:
         """실행 완료 — 동시 카운트 감소 + 토큰/요청 누적(영속) + 감사 로그."""
         with self._lock:
-            if self._active.get(user, 0) > 0:
-                self._active[user] -= 1
+            self._active[user] = max(0, self._active.get(user, 0) - max(1, int(count or 1)))
             rec = self._daily_rec(user)
             rec["in"] += int(tokens_in or 0)
             rec["out"] += int(tokens_out or 0)

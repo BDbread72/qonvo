@@ -7,6 +7,7 @@
 - ParseResults: parse()의 반환값 (컨텍스트 + 남은 reader + 오류들).
 """
 
+from .errors import CommandSyntaxError
 from .suggestions import StringRange
 
 
@@ -162,7 +163,7 @@ class CommandContextBuilder:
                         return SuggestionContext(prev, node_range.start)
                     prev = parsed.node
                 if prev is None:
-                    raise RuntimeError("Can't find node before cursor")
+                    raise CommandSyntaxError("Can't find node before cursor")
                 return SuggestionContext(prev, self.range.start)
         raise RuntimeError("Can't find node before cursor")
 

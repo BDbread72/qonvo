@@ -347,7 +347,15 @@ class ServerMixin:
         self._applying_remote_op = True
         try:
             for op in ops:
-                self._apply_remote_op(op)
+                # 잘못된 op 하나가 배치 전체/앱을 죽이지 않게 per-op 방어
+                # (ops 는 서버/네트워크가 보낸 값 — 비dict·핸들러 예외 가능)
+                if not isinstance(op, dict):
+                    continue
+                try:
+                    self._apply_remote_op(op)
+                except Exception as e:
+                    logger.warning("원격 op 적용 실패 — 건너뜀: type=%s (%s)",
+                                   op.get("op_type"), e)
         finally:
             self._applying_remote_op = False
 
