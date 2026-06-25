@@ -62,6 +62,9 @@ _serialization.py    ← collect_data / restore_data
 _server_mixin.py     ← ServerMixin: 서버모드 sync/op적용/첨부다운로드/이미지리프레시
 server_client.py     ← ServerClient(WebSocket) + AttachmentDownloadThread (클라 측)
 connect_dialog.py    ← ConnectDialog(host/port/wss) + BoardSelectDialog
+node_title.py        ← 모든 노드 공통 편집형 이름표 (아래 "Node naming" 참조)
+chat_commands.py     ← 협업 채팅 `/명령어` (vendored `src/mccmd/` Brigadier 엔진 사용)
+board_screenshot.py  ← 캔버스 PNG 저장/클립보드 (Ctrl+Shift+P, ui.py glue)
 ```
 
 **Model plugins** (`model_plugin.py`): `ModelPlugin` ABC → `configure()`, `chat()`. `PluginRegistry` auto-discovers plugins from `plugins/` directory. `ProviderRouter` transparently routes chat calls to the correct plugin.
@@ -84,7 +87,9 @@ All node widgets inherit `QWidget` + `BaseNode` mixin, wrapped in `NodeProxyWidg
 | ID Key | Categories |
 |--------|------------|
 | `id` | nodes, function_nodes, round_tables, repository_nodes, texts, group_frames |
-| `node_id` | sticky_notes, buttons, checklists, image_cards, file_nodes, dimensions, prompt_nodes, markdown_nodes, nixi_nodes, ups_nodes, rmv_nodes, switch_nodes, latch_nodes, and_gates, or_gates, not_gates, xor_gates, bulb_nodes |
+| `node_id` | sticky_notes, buttons, checklists, image_cards, file_nodes, dimensions, prompt_nodes, markdown_nodes, nixi_nodes, number_nodes, math_nodes, switch_nodes, latch_nodes, and_gates, or_gates, not_gates, xor_gates, bulb_nodes |
+
+> ⚠️ 이 표는 자주 어긋난다 — 권위는 `lazy_loader.py:ID_KEY_MAP` (예: `ups_nodes`/`rmv_nodes`는 1.4.0에서 제거됨). 코드 작성 시 표가 아니라 상수를 grep 할 것.
 
 ID key mapping is definitive in `lazy_loader.py:ID_KEY_MAP` — 직접 나열하지 말고 그 상수를 참조할 것 (자주 추가됨).
 
@@ -93,6 +98,11 @@ ID key mapping is definitive in `lazy_loader.py:ID_KEY_MAP` — 직접 나열하
 **FileNode → AI**: `FileNodeItem` 은 임의 파일 다수를 담고 TYPE_FILE 출력 포트로 챗 노드에 물린다. 챗 노드(`chat_node.py:_collect_all_inputs`)는 소스에 `get_resolved_paths()` 가 있으면 전체 목록을 첨부로 확장한다. 첨부 영속은 이미지와 동일(UUID 복사 + basename 해석).
 
 `logic_nodes.py`: switch/latch + and/or/not/xor/bulb 게이트 (시그널 회로용).
+
+### Node naming · Chat commands · Screenshot (1.4.0)
+- **Node naming** (`node_title.py`): 모든 노드가 동일한 편집형 이름표를 갖는다. 헤더 있는 노드는 헤더 안 `NodeTitleEdit`(QLineEdit), 없는 노드는 `NodeTitleItem`(QGraphicsItem) 폴백. 메타는 **중앙 표가 아니라** 각 노드 클래스 속성(`TITLE_NAME`/`TITLE_COLOR`/`WANTS_TITLE`, 기본값은 `BaseNode`/`SceneItemMixin`)으로 산다. commit → `plugin.rename_node()` **단일 경로**가 영속+서버sync 처리. 새 노드에 이름표를 붙이려면 클래스 속성만 오버라이드.
+- **Chat commands** (`chat_commands.py` + vendored `src/mccmd/`): 협업 채팅에서 `/`로 시작하면 명령. `mccmd`는 Minecraft Brigadier 포팅(자동완성·사용법 힌트·권한 게이트). `ChatCommandController`가 qonvo 명령(`/help`·`/clear`·`/create`·`/move`)과 앱 컨텍스트를 배선. 솔로+서버 양쪽. 주무대는 `view.py`.
+- **Screenshot** (`board_screenshot.py`): `Ctrl+Shift+P` → `ui.py:_take_screenshot` → `open_screenshot_dialog`. 보이는 화면(`view.grab`) 또는 보드 전체(`scene.render`), 드래그 영역 크롭, 타인 커서 이름 `Guest N` 익명화(`CursorLayer.set_anonymized`). 저장 폴더 settings `screenshot_dir`.
 
 ### Port & Edge System
 - `PortItem` — typed connection points (TYPE_BOOLEAN, TYPE_STRING, TYPE_FILE)
@@ -168,6 +178,7 @@ src/server/
   oauth.py       Mattermost(merri) OAuth2 → 1회용 토큰 발급
   board_store.py Board(권위 doc + oplog + attachments) / BoardManager(lazy 캐시)
   ai_runner.py   build_router() + run_ai() — ProviderRouter 헤드리스 재사용(CLI와 동일)
+  ai_policy.py   AI 거버넌스 — 레벨별 모델권한/레이트/동시/1일쿼타 + 사용량회계(app.py가 authorize/begin/end 호출)
   session.py     Session(연결) + Registry(보드별 멤버십·브로드캐스트)
   app.py         QonvoServer — aiohttp WS 라우팅 + 첨부 HTTP + UPnP 수명주기
   console.py     운영 콘솔(list/say/kick/op/save/stop), tty일 때만 기동
@@ -191,6 +202,8 @@ op_type: node_add/remove/move/prop, edge_add/remove, chat_append.
 
 **권한 (Minecraft BE 방식)**: Visitor(0) 읽기전용(op/AI 거부) / Member(1) 편집+AI / Operator(2) 관리.
 `config.toml [server] default_level/allow_guests`, `[users] <name>=<level>` 오버라이드.
+
+**AI 거버넌스 (`ai_policy.py`)**: 서버가 운영자 API 키로 AI를 대행하므로, Member 이상이 무엇을 얼마나 돌릴 수 있는지를 레벨별로 통제(모델 허용/이미지 게이트/preferred 상한/분당 레이트/동시 실행/1일 토큰 쿼타). 1일 카운터는 `usage_state.json`에 영속(재시작에도 유지), 감사 로그는 `usage.jsonl`에 요청당 1줄. **knob 기본값 전부 0=무제한** → 설정 전엔 기존 동작 그대로(하위호환). `config.toml [ai_policy.member]`/`[ai_policy.operator]`에서 켠다. `_lock`으로 asyncio 루프 스레드 ↔ 콘솔 스레드 보호.
 
 **외부 접속 — 포트포워딩 없이 (UPnP)**: 서버 시작 시 `upnp.py`가 라우터(IGD)에 포트개방을
 요청하고 주기 갱신, 종료 시 해제(`config.toml [network] upnp/public_host/upnp_lease`). 라우터가
@@ -261,6 +274,7 @@ from v.settings import get_setting, set_setting, get_api_keys
 - **`__main__.py`에 main.py와 동일한 WMI 우회 필수** (aiohttp가 Win/Py3.14에서 hang)
 - **ssh로 `pkill -f "패턴"`**: 패턴이 ssh 명령줄 자신에 있으면 자기 셸을 죽임(exit 255). `[c]loudflared` 브래킷 트릭 쓰거나 스크립트 내부 stop 사용
 - **`http_token`은 WS 세션 수명**: 연결이 끊기면 폐기되므로 첨부 다운로드/업로드는 접속 유지 중에만 동작
+- **헬스 엔드포인트는 루트 `/`** (`app.py: add_get("/", self._health)`) — `/health`는 404. `curl http://host:9700/` → `{version, protocol, min_protocol, boards, online, auth:{merri,guests}}`. 배포 후 버전 확인은 여기로.
 
 ## Storage & Save Logic Rules (MANDATORY)
 
@@ -323,6 +337,16 @@ main              ← X.0.0 릴리스만 (beta-1.0.0, beta-2.0.0, ...)
 1. `build.toml`의 version(`beta-X.Y.Z`)만 업데이트 — 빌드번호 `+B`는 자동이라 손대지 않음
 2. 커밋 + 태그 (`beta-X.Y.Z`, 빌드번호 제외)
 3. push (브랜치 + 태그)
+
+### 릴리스 & 배포
+공식 사이트(`site/`)는 `build.toml`이 아니라 **GitHub Releases**(`api.github.com/repos/BDbread72/qonvo/releases` 최신 `tag_name`)를 읽는다 → build.toml만 올리면 사이트 안 바뀜, **Release를 만들어야** 바뀐다(기존 방문자는 localStorage 10분 캐시 지연).
+
+1. `build.toml` 버전 올림 → `git add -A && git commit && git push`.
+2. **push 권한**: 기본 git 자격증명 계정이 `BDbread72/qonvo` 쓰기 권한이 없으면 403 → `gh auth switch --user BDbread72` 후 push/release, 끝나고 원복.
+3. **exe 빌드**: PowerShell에서 `& C:\pro\qonvo\crack.bat`(call 연산자 — `cmd /c`는 PS 래핑에서 실패). 빌드 전 실행 중 `qonvo.exe` 없는지 확인(파일 잠금).
+4. **서버 zip 재생성** (`qonvo-server-dist.zip`, 전용 스크립트 없음): 기존 zip의 `qonvo-server/src/` 파일목록을 현재 내용으로 미러 + **신규 server 모듈 반드시 추가**(없으면 서버 기동 크래시 — 예: `server/ai_policy.py`는 app.py가 import). ⚠️ Windows `Compress-Archive`(PS 5.1)는 **백슬래시 구분자**라 Linux에서 깨짐 → **Python `zipfile` + `arcname.replace("\\","/")`** 로 만들 것(`zip` 명령은 Git Bash에 없음).
+5. `gh release create beta-X.Y.Z --repo BDbread72/qonvo --target <branch> -t "beta-X.Y.Z" -F RELEASE-beta-X.Y.Z.md --prerelease qonvo.exe qonvo-server-dist.zip`.
+6. **라이브 서버 배포는 릴리스와 별개**: 릴리스 zip이 새 버전이어도 운영 중인 서버(예: `ssh home:~/qonvo/`)는 자동 갱신 안 됨 → `tar czf - src build.toml | ssh home 'cd ~/qonvo && tar xzf -'` + 삭제 파일 수동 `rm` + `~/qonvo/qonvo-server.sh restart`. 검증은 헬스 루트 `/`의 `version`.
 
 ## Command Interpretation (사용자 명령 해석)
 

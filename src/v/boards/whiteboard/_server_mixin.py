@@ -378,9 +378,13 @@ class ServerMixin:
                 node.set_tokens(tokens_in, tokens_out)
             if images:
                 node.set_image_response(text, images)
+                # 로컬 경로(_chat_workers._on_image_payload)와 동일하게 images 를 전달해야
+                # 자동 다음노드 생성/이미지카드 전파가 동작한다. (없으면 images=None 으로
+                # 들어가 _auto_create_next_node 의 `and images` 가드가 막혀 전파가 끊김)
+                self._emit_complete_signal(node, images)
             else:
                 node.set_response(text, done=True)
-            self._emit_complete_signal(node)
+                self._emit_complete_signal(node)
 
     def _prepare_server_input_files(self, files):
         """입력 이미지(로컬 경로)를 서버 첨부로 업로드하고 'attachments/<name>' 참조로 변환.
