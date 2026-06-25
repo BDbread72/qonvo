@@ -287,12 +287,43 @@ function FloatNode({ children, style, className = 'node-card', delay = 0 }) {
   )
 }
 
-export default function App() {
-  const [guide, setGuide] = useState('앱')
-  const [releases, setReleases] = useState(DEFAULT_RELEASES)
+// One release row — reused by the landing (latest only) and the full history page.
+function ReleaseItem({ r, i, latest = false }) {
+  return (
+    <Reveal i={Math.min(i, 3)} className="rel-item">
+      <div className="rel-side">
+        <span className="rel-ver">{r.version}</span>
+        {r.date && <span className="rel-date">{r.date}</span>}
+        {latest && <span className="rel-latest">최신</span>}
+      </div>
+      <div className="rel-main">
+        {r.title && <h3>{r.title}</h3>}
+        {r.notes?.length > 0 && (
+          <ul className="rel-notes">
+            {r.notes.map((n, k) =>
+              n.h ? <li key={k} className="rel-head">{n.h}</li> : <li key={k}>{n.t}</li>
+            )}
+          </ul>
+        )}
+        <div className="rel-dl">
+          {r.downloads?.map((d) => (
+            <a key={d.file} className="rel-dlbtn" href={d.file} target="_blank" rel="noreferrer">
+              {DL_LABEL[d.kind] || d.kind}{d.size && <span>{d.size}</span>}
+            </a>
+          ))}
+          {r.html_url && (
+            <a className="rel-more" href={r.html_url} target="_blank" rel="noreferrer">GitHub에서 보기 ↗</a>
+          )}
+        </div>
+      </div>
+    </Reveal>
+  )
+}
 
-  // Pull the release list from GitHub. Cache in localStorage (10 min) so we
-  // don't hammer the unauthenticated API (60 req/hr/IP); fall back gracefully.
+// 출시 목록을 GitHub Releases 에서 가져오는 훅. 랜딩/히스토리 두 뷰가 공유한다.
+// localStorage 에 10분 캐시(미인증 API 60req/시간 보호) + 폴백 처리.
+function useReleases() {
+  const [releases, setReleases] = useState(DEFAULT_RELEASES)
   useEffect(() => {
     const KEY = 'qonvo_releases_v1'
     try {
@@ -313,6 +344,110 @@ export default function App() {
       })
       .catch(() => {})
   }, [])
+  return releases
+}
+
+// 현재 해시가 가리키는 라우트. 정적 서빙에서도 동작하도록 해시 기반.
+function getRoute() {
+  return (typeof location !== 'undefined' && location.hash.startsWith('#/releases')) ? 'releases' : 'home'
+}
+
+function useRoute() {
+  const [route, setRoute] = useState(getRoute())
+  useEffect(() => {
+    const on = () => {
+      setRoute(getRoute())
+      // 라우트 전환 시 항상 상단에서 시작
+      if (getRoute() === 'releases') window.scrollTo(0, 0)
+    }
+    window.addEventListener('hashchange', on)
+    return () => window.removeEventListener('hashchange', on)
+  }, [])
+  return route
+}
+
+// 공용 상단 내비게이션. 랜딩은 앵커, 히스토리에서는 홈으로 되돌아가는 링크를 노출한다.
+function Nav({ home = true }) {
+  return (
+    <nav className="nav">
+      <div className="container nav-inner">
+        <a className="brand" href={home ? '#top' : './'}>
+          <img src="./icon.png" alt="Qonvo" /> Qonvo
+        </a>
+        <div className="nav-links">
+          {home ? (
+            <>
+              <a href="#features">기능</a>
+              <a href="#download">다운로드</a>
+              <a href="#/releases">릴리스</a>
+              <a href="#guide">가이드</a>
+              <a href="#download" className="nav-cta">받기</a>
+            </>
+          ) : (
+            <>
+              <a href="./">홈</a>
+              <a href="./#download">다운로드</a>
+              <a href="./#guide">가이드</a>
+              <a href="./#download" className="nav-cta">받기</a>
+            </>
+          )}
+        </div>
+      </div>
+    </nav>
+  )
+}
+
+function Footer({ version }) {
+  return (
+    <footer>
+      <div className="container foot-inner">
+        <a className="brand" href="./"><img src="./icon.png" alt="" style={{ width: 24, height: 24, borderRadius: 6 }} /> Qonvo</a>
+        <div className="foot-links">
+          <a href="./#features">기능</a>
+          <a href="./#download">다운로드</a>
+          <a href="#/releases">릴리스</a>
+          <a href="./#guide">가이드</a>
+        </div>
+        <div style={{ fontSize: 13 }}>{version} · © 2026 Qonvo</div>
+      </div>
+    </footer>
+  )
+}
+
+// 전체 버전 히스토리 — 별도 경로(#/releases). 메인에 다 쌓지 않고 여기서만 전부 그린다.
+function ReleasesPage() {
+  const releases = useReleases()
+  const VERSION = releases[0]?.version
+  return (
+    <>
+      <div className="bg-grid" />
+      <div className="bg-glow" />
+      <Nav home={false} />
+      <section id="releases" style={{ paddingTop: 120 }}>
+        <div className="container">
+          <div className="sec-head">
+            <Reveal><div className="eyebrow">Releases</div></Reveal>
+            <Reveal i={1}><h2 className="sec-title">버전 히스토리</h2></Reveal>
+            <Reveal i={2}><p className="sec-sub">출시한 모든 버전의 변경점과 다운로드. 최신은 <a href="./#download" style={{ color: 'var(--accent, #3b86ff)' }}>홈</a>에서 바로 받을 수 있습니다.</p></Reveal>
+          </div>
+          <div className="rel-list">
+            {releases.map((r, i) => (
+              <ReleaseItem key={r.version} r={r} i={i} latest={i === 0} />
+            ))}
+          </div>
+        </div>
+      </section>
+      <Footer version={VERSION} />
+    </>
+  )
+}
+
+export default function App() {
+  const route = useRoute()
+  const [guide, setGuide] = useState('앱')
+  const releases = useReleases()
+
+  if (route === 'releases') return <ReleasesPage />
 
   const latest = releases[0]
   const VERSION = latest.version
@@ -326,20 +461,7 @@ export default function App() {
       <div className="bg-grid" />
       <div className="bg-glow" />
 
-      <nav className="nav">
-        <div className="container nav-inner">
-          <a className="brand" href="#top">
-            <img src="./icon.png" alt="Qonvo" /> Qonvo
-          </a>
-          <div className="nav-links">
-            <a href="#features">기능</a>
-            <a href="#download">다운로드</a>
-            <a href="#releases">릴리스</a>
-            <a href="#guide">가이드</a>
-            <a href="#download" className="nav-cta">받기</a>
-          </div>
-        </div>
-      </nav>
+      <Nav home={true} />
 
       <header className="hero" id="top">
         <div className="container">
@@ -469,42 +591,15 @@ export default function App() {
         <div className="container">
           <div className="sec-head">
             <Reveal><div className="eyebrow">Releases</div></Reveal>
-            <Reveal i={1}><h2 className="sec-title">버전 히스토리</h2></Reveal>
-            <Reveal i={2}><p className="sec-sub">출시한 버전만 골라 기록합니다. 각 버전의 변경점과 다운로드를 한곳에서.</p></Reveal>
+            <Reveal i={1}><h2 className="sec-title">최신 버전</h2></Reveal>
+            <Reveal i={2}><p className="sec-sub">가장 최근 출시만 여기 둡니다. 지난 버전들은 전체 히스토리에서.</p></Reveal>
           </div>
           <div className="rel-list">
-            {releases.map((r, i) => (
-              <Reveal key={r.version} i={Math.min(i, 3)} className="rel-item">
-                <div className="rel-side">
-                  <span className="rel-ver">{r.version}</span>
-                  {r.date && <span className="rel-date">{r.date}</span>}
-                  {i === 0 && <span className="rel-latest">최신</span>}
-                </div>
-                <div className="rel-main">
-                  {r.title && <h3>{r.title}</h3>}
-                  {r.notes?.length > 0 && (
-                    <ul className="rel-notes">
-                      {r.notes.map((n, k) =>
-                        n.h
-                          ? <li key={k} className="rel-head">{n.h}</li>
-                          : <li key={k}>{n.t}</li>
-                      )}
-                    </ul>
-                  )}
-                  <div className="rel-dl">
-                    {r.downloads?.map((d) => (
-                      <a key={d.file} className="rel-dlbtn" href={d.file} target="_blank" rel="noreferrer">
-                        {DL_LABEL[d.kind] || d.kind}{d.size && <span>{d.size}</span>}
-                      </a>
-                    ))}
-                    {r.html_url && (
-                      <a className="rel-more" href={r.html_url} target="_blank" rel="noreferrer">GitHub에서 보기 ↗</a>
-                    )}
-                  </div>
-                </div>
-              </Reveal>
-            ))}
+            {latest && <ReleaseItem r={latest} i={0} latest />}
           </div>
+          <Reveal i={1} style={{ textAlign: 'center', marginTop: 28 }}>
+            <a className="btn btn-ghost" href="#/releases">전체 버전 히스토리 →</a>
+          </Reveal>
         </div>
       </section>
 
@@ -523,18 +618,7 @@ export default function App() {
         </div>
       </section>
 
-      <footer>
-        <div className="container foot-inner">
-          <a className="brand" href="#top"><img src="./icon.png" alt="" style={{ width: 24, height: 24, borderRadius: 6 }} /> Qonvo</a>
-          <div className="foot-links">
-            <a href="#features">기능</a>
-            <a href="#download">다운로드</a>
-            <a href="#releases">릴리스</a>
-            <a href="#guide">가이드</a>
-          </div>
-          <div style={{ fontSize: 13 }}>{VERSION} · © 2026 Qonvo</div>
-        </div>
-      </footer>
+      <Footer version={VERSION} />
     </>
   )
 }
