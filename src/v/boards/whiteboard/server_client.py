@@ -70,7 +70,7 @@ class ServerClient(QObject):
     user_joined = pyqtSignal(str, int)
     user_left = pyqtSignal(str)
     server_message = pyqtSignal(str)
-    error_received = pyqtSignal(str, str)
+    error_received = pyqtSignal(str, str, str)  # code, message, node_id("" 가능)
     ai_progress = pyqtSignal(str, str)
     ai_complete = pyqtSignal(str, dict)
     presence_received = pyqtSignal(list)   # [{user, level, ping, cursor, color, sid}]
@@ -421,6 +421,7 @@ class ServerClient(QObject):
             self.error_received.emit(
                 msg.get("code", ""),
                 msg.get("message", ""),
+                str(msg.get("node_id", "")),
             )
 
         elif msg_type == "pong":
@@ -587,10 +588,10 @@ class AttachmentDownloadThread(QThread):
                 ok += 1
                 self.progress.emit(i, total)
                 continue
+            tmp = dest_path + ".part"
             try:
                 url = (f"{self._base}/board/{quote(self._board_id)}/attach/{quote(name)}"
                        f"?t={self._token}")
-                tmp = dest_path + ".part"
                 with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as out:
                     while True:
                         chunk = r.read(262144)
@@ -601,6 +602,12 @@ class AttachmentDownloadThread(QThread):
                 ok += 1
             except Exception as e:
                 logger.debug("attachment download failed %s: %s", name, e)
+                # 부분 다운로드(.part) 잔재 정리 — 안 지우면 디스크에 쌓임.
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
             self.progress.emit(i, total)
 
         self.finished_dl.emit(ok, total)

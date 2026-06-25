@@ -16,7 +16,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from v.logger import get_logger
 
@@ -45,7 +45,8 @@ _LIST_CATEGORIES = {
     "markdown_nodes", "buttons", "checklists", "repository_nodes", "nixi_nodes",
     "switch_nodes", "latch_nodes", "and_gates",
     "or_gates", "not_gates", "xor_gates", "bulb_nodes", "texts", "group_frames",
-    "image_cards", "file_nodes", "dimensions", "edges", "functions_library",
+    "image_cards", "file_nodes", "dimensions", "number_nodes", "math_nodes",
+    "edges", "functions_library",
 }
 
 # 보드 id 안전화 (경로 조작 방지)
@@ -247,22 +248,32 @@ class Board:
                     }
             return {"type": "sync", "seq": self.seq, "snapshot": json.loads(json.dumps(self.doc))}
 
-    def apply_ops(self, ops: List[dict], author: str) -> int:
-        """op 들을 권위 문서에 적용하고 새 seq 를 반환한다."""
+    def apply_ops(self, ops: List[dict], author: str) -> Tuple[int, List[dict]]:
+        """op 들을 권위 문서에 적용하고 (새 seq, 실제 적용된 op 목록) 을 반환한다.
+
+        ⚠️ 적용에 실패(예외)한 op 은 seq 증가/oplog 기록/브로드캐스트에서 **제외**한다.
+        예전엔 실패해도 seq 를 올리고 원본 ops 전체를 브로드캐스트해, 서버 권위 doc 엔
+        안 먹은 op 이 다른 클라엔 적용되어 문서가 발산했다(seq 갭/유령 op).
+        """
         with self._lock:
             records = []
+            applied: List[dict] = []
             for op in ops:
                 try:
                     self._apply_one(op)
-                except Exception:
-                    pass  # 개별 op 실패는 무시(브로드캐스트는 계속)
+                except Exception as e:
+                    logger.warning("op 적용 실패 — 제외: type=%s target=%s (%s)",
+                                   op.get("op_type"), op.get("target"), e)
+                    continue
                 self.seq += 1
                 record = {"seq": self.seq, "op": op, "author": author}
                 self._oplog.append(record)
                 records.append(record)
-            self._append_oplog(records)
-            self._dirty = True
-            return self.seq
+                applied.append(op)
+            if records:
+                self._append_oplog(records)
+                self._dirty = True
+            return self.seq, applied
 
     # ---- op 적용 (권위 문서 갱신) ---------------------------------------
     def _list_of(self, category: str) -> List[dict]:

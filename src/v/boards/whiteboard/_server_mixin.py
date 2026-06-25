@@ -26,6 +26,8 @@ class ServerMixin:
         'ChecklistWidget': 'checklists',
         'RepositoryNodeWidget': 'repository_nodes',
         'NixiNodeWidget': 'nixi_nodes',
+        'NumberNodeWidget': 'number_nodes',
+        'MathNodeWidget': 'math_nodes',
         'SwitchNodeWidget': 'switch_nodes',
         'LatchNodeWidget': 'latch_nodes',
         'AndGateWidget': 'and_gates',
@@ -37,6 +39,7 @@ class ServerMixin:
         'GroupFrameItem': 'group_frames',
         'ImageCardItem': 'image_cards',
         'DimensionItem': 'dimensions',
+        'FileNodeItem': 'file_nodes',
     }
 
     def _node_category(self, node) -> str:
@@ -55,6 +58,7 @@ class ServerMixin:
         client.ai_complete.connect(self._on_ai_complete)
         client.presence_received.connect(self._on_presence_cursors)
         client.chat_received.connect(self._on_chat_bubble)
+        client.error_received.connect(self._on_ai_error)
         # 라이브 커서 레이어 (뷰 drawForeground 에서 그림)
         from .cursor_layer import CursorLayer
         self._cursor_layer = CursorLayer(self.view)
@@ -143,14 +147,23 @@ class ServerMixin:
             self._log_chat("나", text, "#7fd1ff")
 
     def _on_chat_bubble(self, msg: dict):
-        """채팅 수신 → 해당 사용자 커서 위 말풍선 + 히스토리 로그."""
-        me = self._server_client.username if self._server_client else ""
-        user = msg.get("user", "")
-        color = msg.get("color", "#888")
-        text = msg.get("text", "")
-        if getattr(self, '_cursor_layer', None) is not None:
-            self._cursor_layer.add_bubble(user, color, text, is_self=(user == me))
-        self._log_chat(user, text, color)
+        """채팅 수신 → 해당 사용자 커서 위 말풍선 + 히스토리 로그.
+
+        ⚠️ Qt 슬롯의 미방어 예외 = 앱 즉사. 누락/None 페이로드(예: color=None →
+        QColor(None))에도 죽지 않도록 전체 방어 + `or` 폴백으로 None 제거.
+        """
+        try:
+            if not isinstance(msg, dict):
+                return
+            me = self._server_client.username if self._server_client else ""
+            user = msg.get("user") or ""
+            color = msg.get("color") or "#888"
+            text = msg.get("text") or ""
+            if getattr(self, '_cursor_layer', None) is not None:
+                self._cursor_layer.add_bubble(user, color, text, is_self=(user == me))
+            self._log_chat(user, text, color)
+        except Exception:
+            pass
 
     def _on_presence_cursors(self, users: list):
         # 체크리스트 담당자 메뉴 등에서 쓰도록 최신 접속자 목록 캐시
@@ -305,8 +318,14 @@ class ServerMixin:
                     continue
                 if getattr(item, '_loading', False):
                     continue  # 로딩 중 → 건드리지 않음
-                if getattr(item, '_pixmap', None) is None:  # 미로드/실패한 것만 재시도
+                # 미로드/실패한 것만 재시도. ⚠️ _pixmap 은 항상 QPixmap() 객체라
+                # `is None` 은 절대 참이 안 됨 → 빈(isNull) 픽스맵으로 판정해야 한다.
+                # (이 버그로 첨부 다운로드 후에도 _load_failed 가 리셋 안 돼
+                #  저해상 preview_b64 블러가 영영 남았음)
+                pm = getattr(item, '_pixmap', None)
+                if pm is None or pm.isNull():
                     item._load_failed = False
+                    item._full_loaded = False
                     item._start_load()
             except Exception:
                 pass
@@ -385,6 +404,28 @@ class ServerMixin:
             else:
                 node.set_response(text, done=True)
                 self._emit_complete_signal(node)
+
+    def _on_ai_error(self, code: str, message: str, node_id: str = ""):
+        """서버가 ai_complete 없이 error 만 보낸 경우(권한/쿼타/모델 비허용/router 실패)
+        요청 노드가 '생성 중…' 스피너로 영구 정지하던 문제를 해제한다.
+
+        ⚠️ ui.py 의 _on_server_error 가 상태바 메시지를 별도로 띄우므로 여기선 노드만 푼다.
+        node_id 가 없으면(연결 단계 오류 등) 조용히 무시. Qt 슬롯이라 전체 방어.
+        """
+        try:
+            if not node_id or not str(node_id).isdigit():
+                return
+            node = self.app.nodes.get(int(node_id))
+            if node is None:
+                return
+            from .checklist import ChecklistWidget
+            if isinstance(node, ChecklistWidget):
+                if hasattr(node, 'set_ai_busy'):
+                    node.set_ai_busy(False)
+            elif hasattr(node, 'set_response'):
+                node.set_response(f"⚠️ {message}", done=True)
+        except Exception:
+            pass
 
     def _prepare_server_input_files(self, files):
         """입력 이미지(로컬 경로)를 서버 첨부로 업로드하고 'attachments/<name>' 참조로 변환.
@@ -568,6 +609,9 @@ class ServerMixin:
             "group_frames": self.add_group_frame,
             "image_cards": self.add_image_card,
             "file_nodes": self.add_file_node,
+            "number_nodes": self.add_number,
+            "math_nodes": self.add_math,
+            "dimensions": self.add_dimension_item,
         }
         add_fn = add_map.get(category)
         if add_fn:
@@ -583,12 +627,12 @@ class ServerMixin:
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies):
+                  self.nixi_proxies, self.number_proxies, self.math_proxies):
             if node_id in d:
                 self.delete_proxy_item(d[node_id])
                 return
         for d in (self.image_card_items, self.dimension_items,
-                  self.text_items, self.group_frame_items):
+                  self.text_items, self.group_frame_items, self.file_node_items):
             if node_id in d:
                 self._delete_scene_item(d[node_id], d)
                 return
@@ -601,12 +645,12 @@ class ServerMixin:
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies):
+                  self.nixi_proxies, self.number_proxies, self.math_proxies):
             if node_id in d:
                 d[node_id].setPos(QPointF(x, y))
                 return
         for d in (self.image_card_items, self.dimension_items,
-                  self.text_items, self.group_frame_items):
+                  self.text_items, self.group_frame_items, self.file_node_items):
             if node_id in d:
                 d[node_id].setPos(QPointF(x, y))
                 return

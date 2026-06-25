@@ -322,6 +322,15 @@ class CursorLayer(QObject):
         self._cursors.clear()
         self._bubbles.clear()
 
+    def remove_user(self, name: str):
+        """특정 사용자의 커서/말풍선을 즉시 제거(user_leave 수신 시 호출).
+
+        기존엔 다음 presence 브로드캐스트의 diff 로만 정리돼, 브로드캐스트가
+        늦거나 누락되면 나간 사용자의 유령 커서가 남았다.
+        """
+        self._remove_cursor(name)
+        self._remove_bubble(name)
+
     # ---- 내부 ----------------------------------------------------------
     def _apply_select(self, c, sel):
         if sel:

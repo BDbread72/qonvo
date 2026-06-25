@@ -1897,6 +1897,14 @@ class MainWindow(QMainWindow):
 
     def _on_server_user_left(self, user: str):
         self.statusBar().showMessage(f"{user} left", 5000)
+        # 나간 사용자의 라이브 커서/말풍선 즉시 제거(다음 presence 브로드캐스트 대기 X).
+        try:
+            cp = self.current_plugin
+            cl = getattr(cp, '_cursor_layer', None) if cp else None
+            if cl is not None:
+                cl.remove_user(user)
+        except Exception:
+            pass
 
     def _on_server_disconnected(self, reason: str):
         from PyQt6.QtWidgets import QMessageBox
@@ -1913,7 +1921,8 @@ class MainWindow(QMainWindow):
     def _on_server_message(self, text: str):
         self.statusBar().showMessage(f"[Server] {text}", 8000)
 
-    def _on_server_error(self, code: str, message: str):
+    def _on_server_error(self, code: str, message: str, node_id: str = ""):
+        # 노드 해제(스피너 풀기)는 plugin._on_ai_error 가 별도로 처리. 여긴 상태바 안내만.
         self.statusBar().showMessage(f"Error: {code} - {message}", 8000)
 
     def _load_board(self):

@@ -160,6 +160,11 @@ class QonvoServer:
         res = await self._oauth.validate_token(token)
         if not res:
             return ""
+        # 만료 항목 스윕(무한 증가 방지 — 예전엔 만료돼도 dict 에서 안 빠졌음).
+        if len(self._merri_user_cache) > 64:
+            self._merri_user_cache = {
+                k: v for k, v in self._merri_user_cache.items() if v[1] > now
+            }
         self._merri_user_cache[token] = (res[0], now + 300)
         return res[0]
 
@@ -437,12 +442,14 @@ class QonvoServer:
         if not ops:
             return
         board = self.boards.get(sess.board_id)
-        new_seq = board.apply_ops(ops, sess.username)
-        await self.registry.broadcast(
-            sess.board_id,
-            {"type": "op", "ops": ops, "author": sess.username, "seq": new_seq},
-            exclude=sess,
-        )
+        new_seq, applied = board.apply_ops(ops, sess.username)
+        # 서버에 실제 적용된 op 만 브로드캐스트(실패 op 제외 → 클라 문서 발산 방지).
+        if applied:
+            await self.registry.broadcast(
+                sess.board_id,
+                {"type": "op", "ops": applied, "author": sess.username, "seq": new_seq},
+                exclude=sess,
+            )
 
     def _spawn_ai(self, sess: Session, data: dict) -> None:
         """AI 요청을 백그라운드 태스크로 실행한다.
@@ -469,10 +476,11 @@ class QonvoServer:
         task.add_done_callback(_done)
 
     async def _handle_ai(self, sess: Session, data: dict) -> None:
-        if sess.level < MEMBER:
-            await sess.send({"type": "error", "code": "perm", "message": "read-only (Visitor)"})
-            return
         node_id = str(data.get("node_id", ""))
+        if sess.level < MEMBER:
+            await sess.send({"type": "error", "code": "perm",
+                             "message": "read-only (Visitor)", "node_id": node_id})
+            return
         params = data.get("params", {}) or {}
         model = params.get("model") or self.default_model
         message = params.get("message", "")
@@ -498,13 +506,14 @@ class QonvoServer:
             is_image = False
         ok, reason, count = self.policy.authorize(sess.username, sess.level, model, count, is_image)
         if not ok:
-            await sess.send({"type": "error", "code": "limit", "message": reason})
+            await sess.send({"type": "error", "code": "limit", "message": reason, "node_id": node_id})
             return
 
         try:
             router = self._ensure_router()
         except Exception as e:
-            await sess.send({"type": "error", "code": "ai", "message": f"router init failed: {e}"})
+            await sess.send({"type": "error", "code": "ai",
+                             "message": f"router init failed: {e}", "node_id": node_id})
             return
 
         loop = asyncio.get_running_loop()

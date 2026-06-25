@@ -524,8 +524,8 @@ class NodeFactoryMixin:
     def _on_file_node_changed(self, item):
         self._notify_modified()
 
-    def add_dimension_item(self, pos: Optional[QPointF] = None):
-        node_id = self._next_id()
+    def add_dimension_item(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
+        node_id = self._next_id(node_id)
         if pos is None:
             pos = self._cursor_scene_pos()
         item = DimensionItem(pos.x(), pos.y())
