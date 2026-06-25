@@ -43,7 +43,7 @@ def _atomic_write_text(tmp: Path, dst: Path, text: str) -> None:
 _LIST_CATEGORIES = {
     "nodes", "function_nodes", "round_tables", "sticky_notes", "prompt_nodes",
     "markdown_nodes", "buttons", "checklists", "repository_nodes", "nixi_nodes",
-    "ups_nodes", "rmv_nodes", "switch_nodes", "latch_nodes", "and_gates",
+    "switch_nodes", "latch_nodes", "and_gates",
     "or_gates", "not_gates", "xor_gates", "bulb_nodes", "texts", "group_frames",
     "image_cards", "file_nodes", "dimensions", "edges", "functions_library",
 }
@@ -309,6 +309,9 @@ class Board:
                     if _as_id(e.get("source_node_id")) != tid
                     and _as_id(e.get("target_node_id")) != tid
                 ]
+            names = self.doc.get("node_names")
+            if isinstance(names, dict):
+                names.pop(str(tid), None)
         elif t == "node_move":
             n = self._find_node(target)
             if n is not None:
@@ -326,6 +329,18 @@ class Board:
                     key = data.get("key")
                     if key:
                         n[key] = data.get("value")
+        elif t == "node_rename":
+            # 통합 노드 이름 — doc 상단 node_names dict 에 보관(str id 키, 클라 포맷과 동일).
+            # 늦게 합류한 멤버는 full sync 의 이 dict 로 이름을 복원한다.
+            names = self.doc.get("node_names")
+            if not isinstance(names, dict):
+                names = {}
+                self.doc["node_names"] = names
+            nm = (data.get("name") or "").strip()
+            if nm:
+                names[str(_as_id(target))] = nm
+            else:
+                names.pop(str(_as_id(target)), None)
         elif t == "edge_add":
             edges = self._list_of("edges")
             if not _edge_exists(edges, data):

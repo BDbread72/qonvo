@@ -7,6 +7,10 @@ from .base_node import BaseNode
 
 class ButtonNodeWidget(QWidget, BaseNode):
 
+    # 버튼은 자기 라벨(title_label, 더블클릭 편집)을 이미 가짐 → 공용 이름표 생략.
+    TITLE_NAME = "Button"
+    WANTS_TITLE = False
+
     signal_triggered = pyqtSignal()
 
     def __init__(self, node_id, on_signal=None, on_modified=None):

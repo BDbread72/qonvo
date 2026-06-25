@@ -325,6 +325,9 @@ class RoundTableWorker(QThread):
 class RoundTableWidget(QWidget, BaseNode):
     """라운드 테이블 노드 위젯"""
 
+    TITLE_NAME = "Round Table"
+    TITLE_COLOR = "#2ecc71"
+
     def __init__(self, node_id, on_send=None, on_modified=None):
         super().__init__()
         self.init_base_node(node_id=node_id, on_modified=on_modified)
@@ -374,9 +377,7 @@ class RoundTableWidget(QWidget, BaseNode):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(12, 0, 8, 0)
 
-        self.title_label = QLabel(f"#{node_id} Round Table")
-        self.title_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 12px;")
-        header_layout.addWidget(self.title_label)
+        # 노드 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 표시.
         header_layout.addStretch()
 
         # 설정 버튼

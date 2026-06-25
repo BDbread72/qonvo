@@ -26,8 +26,6 @@ class ServerMixin:
         'ChecklistWidget': 'checklists',
         'RepositoryNodeWidget': 'repository_nodes',
         'NixiNodeWidget': 'nixi_nodes',
-        'UpsNodeWidget': 'ups_nodes',
-        'RmvNodeWidget': 'rmv_nodes',
         'SwitchNodeWidget': 'switch_nodes',
         'LatchNodeWidget': 'latch_nodes',
         'AndGateWidget': 'and_gates',
@@ -109,19 +107,50 @@ class ServerMixin:
                                       "w": round(w, 1), "h": round(h, 1)}
         self._server_client.update_selection(sel)
 
+    def ensure_cursor_layer(self):
+        """커서 레이어 보장(솔로 포함) — 내 말풍선/명령 출력 표시용."""
+        if getattr(self, '_cursor_layer', None) is None:
+            try:
+                from .cursor_layer import CursorLayer
+                self._cursor_layer = CursorLayer(self.view)
+                if self.view is not None:
+                    self.view._cursor_layer = self._cursor_layer
+            except Exception:
+                return None
+        return self._cursor_layer
+
+    def show_self_bubble(self, text: str, color: str = "#7fd88f"):
+        """내 커서 위에 말풍선 표시(명령 출력/솔로 채팅). 자동 페이드."""
+        cl = self.ensure_cursor_layer()
+        if cl is not None and text:
+            cl.add_bubble("나", color, text, is_self=True)
+
+    def _log_chat(self, user: str, text: str, color: str):
+        """채팅 한 줄을 뷰의 히스토리 로그에 기록(말풍선과 별개)."""
+        v = getattr(self, 'view', None)
+        if v is not None and hasattr(v, 'add_chat_log'):
+            try:
+                v.add_chat_log(user, text, color)
+            except Exception:
+                pass
+
     def send_chat_message(self, text: str):
-        """뷰의 채팅 입력 → 서버로 전송."""
+        """뷰의 채팅 입력 → 서버 전송(에코로 말풍선+로그), 솔로면 직접 말풍선+로그."""
         if self._server_client and self._server_client.is_connected:
-            self._server_client.send_chat(text)
+            self._server_client.send_chat(text)   # 에코가 _on_chat_bubble 로 돌아옴
+        else:
+            self.show_self_bubble(text, "#7fd1ff")
+            self._log_chat("나", text, "#7fd1ff")
 
     def _on_chat_bubble(self, msg: dict):
-        """채팅 수신 → 해당 사용자 커서 위 말풍선."""
-        if getattr(self, '_cursor_layer', None) is None:
-            return
+        """채팅 수신 → 해당 사용자 커서 위 말풍선 + 히스토리 로그."""
         me = self._server_client.username if self._server_client else ""
         user = msg.get("user", "")
-        self._cursor_layer.add_bubble(user, msg.get("color", "#888"),
-                                      msg.get("text", ""), is_self=(user == me))
+        color = msg.get("color", "#888")
+        text = msg.get("text", "")
+        if getattr(self, '_cursor_layer', None) is not None:
+            self._cursor_layer.add_bubble(user, color, text, is_self=(user == me))
+        self._log_chat(user, text, color)
 
     def _on_presence_cursors(self, users: list):
         # 체크리스트 담당자 메뉴 등에서 쓰도록 최신 접속자 목록 캐시
@@ -500,6 +529,12 @@ class ServerMixin:
             self._remote_remove_edge(data)
         elif op_type == "chat_append":
             self._remote_chat_append(target, data)
+        elif op_type == "node_rename":
+            try:
+                # 부수효과 없이 적용(서버로 재전송 안 함 → 에코 방지).
+                self._set_node_name(int(target), data.get("name", ""))
+            except Exception:
+                pass
 
     def _remote_add_node(self, target: str, data: dict):
         category = data.get("_category", "nodes")
@@ -525,8 +560,6 @@ class ServerMixin:
             "checklists": self.add_checklist,
             "repository_nodes": self.add_repository,
             "nixi_nodes": self.add_nixi,
-            "ups_nodes": self.add_ups,
-            "rmv_nodes": self.add_rmv,
             "texts": self.add_text_item,
             "group_frames": self.add_group_frame,
             "image_cards": self.add_image_card,
@@ -546,7 +579,7 @@ class ServerMixin:
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.nixi_proxies):
             if node_id in d:
                 self.delete_proxy_item(d[node_id])
                 return
@@ -564,7 +597,7 @@ class ServerMixin:
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.nixi_proxies):
             if node_id in d:
                 d[node_id].setPos(QPointF(x, y))
                 return
@@ -793,6 +826,10 @@ class ServerMixin:
                 lambda: self._start_attachment_sync(self._board_name))
         if not self._attach_resync_timer.isActive():
             self._attach_resync_timer.start()
+
+    def _send_node_rename_op(self, node_id: int, name: str):
+        """노드 이름 변경을 다른 멤버에게 전파(plugin.rename_node 에서 호출)."""
+        self._send_op("node_rename", node_id, {"name": name})
 
     def _send_node_remove_op(self, node_id):
         if not self.server_mode or self._applying_remote_op:

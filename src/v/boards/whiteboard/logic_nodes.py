@@ -21,6 +21,13 @@ class _LogicNodeBase(QWidget, BaseNode):
     _title = ""
     _color = "#888"
 
+    # 게이트는 자기 타입 라벨(_title)을 노드 면에 이미 표시 → 공용 이름표 생략.
+    WANTS_TITLE = False
+
+    @property
+    def TITLE_NAME(self):
+        return self._title or "Gate"
+
     def __init__(self, node_id, on_signal=None, on_modified=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)

@@ -14,6 +14,8 @@ run_coroutine_threadsafe 로 서버 루프에 위임한다.
   adduser <u> <p> [level]   로컬 계정 추가
   whitelist add|remove|list [user]   화이트리스트 관리
   ban <user> / pardon <user> / banlist   밴 관리
+  usage           오늘 AI 사용량(유저별 토큰/요청/동시) + 레벨별 한도
+  plugins         로드된 모델 플러그인(모델 수·키 수)
   save            모든 보드 즉시 저장
   stop / quit     서버 종료
 """
@@ -119,6 +121,10 @@ class Console:
         elif cmd == "banlist":
             bl = auth_mod.list_banned()
             print("  " + ("\n  ".join(bl) if bl else "(none)"))
+        elif cmd == "usage":
+            self._cmd_usage()
+        elif cmd == "plugins":
+            self._cmd_plugins()
         else:
             print(f"unknown command: {cmd} (try 'help')")
 
@@ -133,6 +139,51 @@ class Console:
             print("  " + ("\n  ".join(wl) if wl else "(none)"))
         else:
             print("usage: whitelist add|remove|list [user]")
+
+    def _cmd_usage(self) -> None:
+        """오늘 AI 사용량(유저별) + 레벨별 한도를 출력한다."""
+        policy = getattr(self._server, "policy", None)
+        if policy is None:
+            print("(정책 비활성)")
+            return
+        rows = policy.snapshot()
+        if not rows:
+            print("오늘 AI 사용 없음")
+        else:
+            print(f"  {'user':18} {'req':>5} {'tok in':>10} {'tok out':>10} {'live':>5}  top model")
+            for r in rows:
+                print(f"  {r['user']:18} {r['req']:>5} {r['tokens_in']:>10,} "
+                      f"{r['tokens_out']:>10,} {r['active']:>5}  {r['top_model']}")
+        lim = policy.limits_view()
+        print("  한도(0=무제한):")
+        for lvl in ("member", "operator"):
+            d = lim.get(lvl, {})
+            models = d.get("models") or ["*"]
+            mstr = "전체" if "*" in models else ",".join(models)
+            print(f"    {lvl:9} models={mstr} image={'O' if d.get('allow_image', True) else 'X'} "
+                  f"rate/min={d.get('rate_per_min', 0)} conc={d.get('concurrent', 0)} "
+                  f"daily_tok={d.get('daily_tokens', 0)} max_count={d.get('max_count', 8)}")
+
+    def _cmd_plugins(self) -> None:
+        """로드된 모델 플러그인과 모델/키 수를 출력한다(키 값은 노출 안 함)."""
+        try:
+            from v.model_plugin import PluginRegistry
+            reg = PluginRegistry.instance()
+        except Exception as e:
+            print(f"플러그인 레지스트리 접근 실패: {e}")
+            return
+        discovered = reg.get_discovered_plugins()
+        if not discovered:
+            print("발견된 플러그인 없음")
+            return
+        for p in discovered:
+            loaded = p.get("enabled")
+            inst = reg._plugins.get(p["id"]) if loaded else None
+            keys = len(getattr(inst, "_api_keys", []) or []) if inst else 0
+            mark = "●" if loaded else "○"
+            print(f"  {mark} {p['id']:18} {p['name']:12} models={len(p.get('models', {}))} "
+                  f"keys={keys} v{p.get('version', '?')}")
+        print("  (● 활성/키 주입됨, ○ 발견만 됨)")
 
     def _set_level(self, args, level: int) -> None:
         if not args:

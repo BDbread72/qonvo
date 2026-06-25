@@ -122,8 +122,6 @@ class WhiteBoardPlugin(
 
         self.repository_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.nixi_proxies: Dict[int, QGraphicsProxyWidget] = {}
-        self.ups_proxies: Dict[int, QGraphicsProxyWidget] = {}
-        self.rmv_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.switch_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.latch_proxies: Dict[int, QGraphicsProxyWidget] = {}
         self.and_gate_proxies: Dict[int, QGraphicsProxyWidget] = {}
@@ -138,6 +136,11 @@ class WhiteBoardPlugin(
         self.image_card_items: Dict[int, ImageCardItem] = {}
         self.file_node_items: Dict[int, FileNodeItem] = {}
         self.dimension_items: Dict[int, DimensionItem] = {}
+
+        # 모든 노드 공통 편집형 이름표(node_title.NodeTitleItem). node_names 는 사용자가
+        # 바꾼 이름만(미설정이면 타입 기본명). node_title_items 는 화면 아이템 참조.
+        self.node_names: Dict[int, str] = {}
+        self.node_title_items: Dict[int, Any] = {}
 
         self._edges: List[EdgeItem] = []
         self._workers: List[Any] = []
@@ -276,9 +279,80 @@ class WhiteBoardPlugin(
         self.proxies[node_id] = proxy
         type_dict[node_id] = proxy
         self.app.nodes[node_id] = widget
+        self._attach_node_title(proxy, widget, node_id)
         self._send_node_add_op(node_id, widget, pos)
         self._notify_modified()
         return proxy
+
+    def _attach_node_title(self, host_item, obj, node_id: int) -> None:
+        """노드에 편집형 이름을 붙인다 — 헤더가 있으면 헤더 바 *안*에 일체화, 없으면 자식 아이템.
+
+        host_item: floating 폴백의 부모가 될 QGraphicsItem(proxy/이미지·파일 아이템 등).
+        obj: 타입/색 판별 + 헤더 보유 여부 확인용 위젯·아이템 인스턴스.
+        이름은 node_names 오버라이드가 있으면 그걸, 없으면 타입 기본명을 쓴다.
+        """
+        from .node_title import (NodeTitleItem, NodeTitleEdit, default_name_for,
+                                  title_color_for, wants_title)
+        try:
+            # 자기 라벨을 이미 가진 노드(버튼·로직 게이트 등)는 공용 이름표를 붙이지 않음.
+            if not wants_title(obj):
+                return
+            name = self.node_names.get(node_id) or default_name_for(obj)
+            color = title_color_for(obj)
+            header = getattr(obj, "header", None)
+            lay = header.layout() if header is not None else None
+            if lay is not None:
+                # 헤더 바 맨 앞에 이름칸 삽입 → 노드의 일부처럼 보임(일체화).
+                title = NodeTitleEdit(node_id, name, self.rename_node, color)
+                lay.insertWidget(0, title, 1)
+                self.node_title_items[node_id] = title
+            else:
+                # 헤더 없는 노드(이미지·파일·디멘션·그룹·게이트) — 노드 위에 자식으로.
+                title = NodeTitleItem(node_id, name, self.rename_node, color, parent=host_item)
+                self.node_title_items[node_id] = title
+        except Exception:
+            pass
+
+    def _set_node_name(self, node_id: int, name: str) -> None:
+        """이름을 부수효과 없이 적용(node_names + 이름표 + 위젯 미러). 로드/마이그레이션/원격용."""
+        name = (name or "").strip()[:60]
+        if not name:
+            return
+        self.node_names[node_id] = name
+        item = self.node_title_items.get(node_id)
+        if item is not None:
+            item.set_name(name)
+        node = self.app.nodes.get(node_id)
+        if node is not None:
+            # 일부 노드(체크리스트 등)가 내보내기/표시에 쓰도록 위젯에도 미러링.
+            try:
+                node._display_name = name
+            except Exception:
+                pass
+
+    def rename_node(self, node_id: int, name: str) -> None:
+        """이름표 편집 commit 시 호출. 저장 + (서버모드면) sync."""
+        name = (name or "").strip()[:60]
+        if not name:
+            return
+        self._set_node_name(node_id, name)
+        self._notify_modified()
+        # 서버모드: 원격 적용 중이 아니면 다른 멤버에게 전파.
+        if getattr(self, "server_mode", False) and not getattr(self, "_applying_remote_op", False):
+            try:
+                self._send_node_rename_op(node_id, name)
+            except Exception:
+                pass
+
+    def get_node_name(self, node_id: int) -> str:
+        """현재 표시 이름(오버라이드 또는 타입 기본명)."""
+        if node_id in self.node_names:
+            return self.node_names[node_id]
+        node = self.app.nodes.get(node_id)
+        if node is not None:
+            from .node_title import default_name_for
+            return default_name_for(node)
+        return ""
 
     def _add_port(self, port_type, parent, **kwargs) -> PortItem:
         port = PortItem(port_type, parent, **kwargs)
@@ -525,7 +599,7 @@ class WhiteBoardPlugin(
             edge.update_path()
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
-                  self.checklist_proxies, self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.checklist_proxies, self.nixi_proxies):
             for proxy in d.values():
                 node = proxy.widget()
                 if node and hasattr(node, "reposition_ports"):
@@ -638,9 +712,11 @@ class WhiteBoardPlugin(
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.nixi_proxies):
             d.pop(node_id, None)
         self.app.nodes.pop(node_id, None)
+        self.node_names.pop(node_id, None)
+        self.node_title_items.pop(node_id, None)  # 이름표는 proxy 자식이라 함께 제거됨
         self._node_data_cache.pop(node_id, None)
         self._dirty_node_ids.discard(node_id)
         if self.scene:

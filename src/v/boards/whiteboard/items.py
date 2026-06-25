@@ -46,6 +46,11 @@ class SceneItemMixin:
 
     HANDLE_SIZE = 10
 
+    # ── 공용 이름표(node_title) 메타데이터 — 각 아이템이 오버라이드 ──
+    TITLE_NAME = "Node"     # 기본 표시 이름(타입명)
+    TITLE_COLOR = None      # 제목 글자색(None → node_title 기본색)
+    WANTS_TITLE = True      # 공용 편집형 이름표를 붙일지
+
     # ── itemChange (MRO로 상속) ───────────────────────────
 
     def itemChange(self, change, value):
@@ -812,6 +817,9 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
 class ImageCardItem(SceneItemMixin, QGraphicsItem):
     """이미지 카드 아이템 - 보드에 이미지를 배치"""
 
+    TITLE_NAME = "Image"
+    WANTS_TITLE = False     # 이미지 카드는 이름표를 붙이지 않음
+
     _board_temp_dir: str | None = None
     _nanobanana_ratio_cache: list[str] | None = None  # 나노바나나 비율 클래스 캐시
 
@@ -1264,6 +1272,8 @@ class FileNodeItem(SceneItemMixin, QGraphicsItem):
     경로를 basename 으로 해석한다. 출력 포트(TYPE_FILE)로 챗 노드에 연결하면
     담긴 파일 전부가 첨부로 전달된다.
     """
+
+    TITLE_NAME = "Files"
 
     _board_temp_dir: str | None = None
 
@@ -1803,6 +1813,8 @@ class GroupEditDialog(QDialog):
 
 
 class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
+
+    TITLE_NAME = "Group"
 
     LABEL_HEIGHT = 24
 

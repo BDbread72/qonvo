@@ -47,6 +47,8 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
     더블클릭하면 DimensionBoardWindow가 열려서 내부 보드를 편집할 수 있음.
     """
 
+    TITLE_NAME = "Dimension"
+
     def __init__(self, x: float, y: float, width: float = 200, height: float = 150):
         super().__init__()
         self.setPos(x, y)
@@ -176,7 +178,7 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
         "latch_nodes", "and_gates", "or_gates", "not_gates",
         "xor_gates", "bulb_nodes", "prompt_nodes", "markdown_nodes",
         "checklists", "repository_nodes", "nixi_nodes",
-        "ups_nodes", "rmv_nodes", "texts", "group_frames",
+        "texts", "group_frames",
     )
 
     def _get_node_count(self) -> int:

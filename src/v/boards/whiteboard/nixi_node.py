@@ -77,6 +77,8 @@ class NixiTube(QWidget):
 
 class NixiNodeWidget(QWidget, BaseNode):
 
+    TITLE_NAME = "Nixi"
+
     def __init__(self, node_id, on_modified=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -114,12 +116,7 @@ class NixiNodeWidget(QWidget, BaseNode):
         h_layout = QHBoxLayout(self.header)
         h_layout.setContentsMargins(10, 0, 10, 0)
 
-        title = QLabel(f"NIXI #{self.node_id}")
-        title.setStyleSheet(
-            "color: #3a1800; font-family: 'Courier New', monospace;"
-            " font-size: 8px; font-weight: bold; letter-spacing: 2px; border: none;"
-        )
-        h_layout.addWidget(title)
+        # 이름은 공용 편집형 이름표(node_title)가 헤더에 표시 — 타입+#id 배지 제거.
         h_layout.addStretch()
         layout.addWidget(self.header)
 

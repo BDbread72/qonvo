@@ -95,6 +95,28 @@ GUI 메뉴: **File → Connect to Server** (`Ctrl+Shift+C`)
 `config.toml [server] default_level`, `allow_guests` 로 신규/게스트 정책 제어.
 `config.toml [users] <name> = <level>` 로 레벨 오버라이드 가능.
 
+## AI 거버넌스 (`[ai_policy]`)
+
+서버가 **운영자의 API 키로 AI 를 대행**하므로, 접속자(Member 이상)가 무엇을 얼마나
+돌릴지 레벨별로 통제한다. `0 = 무제한`(기본 — 설정 전엔 기존 동작 그대로). Visitor 는
+항상 AI 거부. 변경 후 서버 재시작.
+
+```toml
+[ai_policy.member]      # 또는 [ai_policy.operator]
+models = ["*"]          # 허용 모델 id 목록. ["*"]=전체. 예: ["gemini-2.5-flash"]
+allow_image = true      # 이미지 생성 모델 허용(비용 큼). false 면 이 레벨은 이미지 생성 불가
+rate_per_min = 0        # 분당 최대 요청수
+concurrent = 0          # 동시 AI 실행 상한
+daily_tokens = 0        # 1일 토큰(in+out) 상한
+max_count = 8           # preferred 후보 동시생성 상한(요청 1건당 비용배수)
+```
+
+거부 시 클라에 `error {code:"limit"}` 가 가고, `count`(preferred 후보 수)는 레벨
+`max_count` 로 클램프된다. 사용량은 **항상 집계**되어 콘솔 `usage` / 웹 관리자(/admin)
+"오늘 AI 사용량" 카드에 유저별 토큰·요청·동시 실행이 표시된다. 1일 카운터는
+`server/usage_state.json` 에 영속(재시작에도 쿼타 유지), 요청별 감사 로그는
+`server/usage.jsonl` 에 1줄씩 append.
+
 ## 계정 연동 (Mattermost / merri OAuth2)
 
 `config.toml [oauth.mattermost]` 에서 `enabled = true` 후 `base_url`,
@@ -131,12 +153,16 @@ WS `auth` 는 비밀번호 또는 발급 토큰을 모두 받는다(`auth.Authen
 ## 운영 콘솔 명령
 
 `help / list / boards / say <msg> / kick <user> / op <user> / deop <user> /
-adduser <u> <p> [lvl] / save / stop`
+adduser <u> <p> [lvl] / whitelist / ban / pardon / usage / plugins / save / stop`
+
+- `usage` — 오늘 유저별 AI 사용량(토큰/요청/동시) + 레벨별 한도
+- `plugins` — 로드된 모델 플러그인(모델 수·주입 키 수, 키 값은 미노출)
 
 ## 테스트
 
 ```bash
-python tests/test_server.py     # 인증/join/op브로드캐스트/delta/권한/영속화 9개 체크
+python tests/test_server.py      # 인증/join/op/delta/권한/영속화 23개 체크
+python tests/test_ai_policy.py   # AI 거버넌스(모델/이미지/레이트/동시/쿼타/영속) 9개 체크
 ```
 
 ## 알려진 한계 (v1)

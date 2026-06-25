@@ -13,6 +13,10 @@ class SwitchNodeWidget(QWidget, BaseNode):
     - 버튼 노드와 유사한 패턴(드래그, 직렬화) 적용
     """
 
+    # 자기 ON/OFF 라벨을 이미 가진 신호 노드 → 공용 이름표 생략.
+    TITLE_NAME = "Switch"
+    WANTS_TITLE = False
+
     def __init__(self, node_id, on_signal=None, on_modified=None):
         """스위치 노드 위젯을 초기화한다."""
         super().__init__()

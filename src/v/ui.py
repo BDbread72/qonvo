@@ -345,6 +345,11 @@ class MainWindow(QMainWindow):
         self.action_search_history.triggered.connect(self._open_history_search)
         self.action_search_history.setEnabled(False)
 
+        self.action_screenshot = view_menu.addAction("보드 스크린샷…")
+        self.action_screenshot.setShortcut("Ctrl+Shift+P")
+        self.action_screenshot.triggered.connect(self._take_screenshot)
+        self.action_screenshot.setEnabled(False)
+
         # 노드 메뉴 (보드 로드 후 활성화)
         self.node_menu = menubar.addMenu(t("menu.node"))
 
@@ -768,12 +773,21 @@ class MainWindow(QMainWindow):
         view = self.current_plugin.create_view()
         self.setCentralWidget(view)
         self.current_plugin.on_modified = self.mark_modified
+        # 보드 로드 직후 캔버스에 키보드 포커스 — 처음부터 Enter(채팅)·단축키가 먹게
+        try:
+            view.setFocus()
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, view.setFocus)   # 표시 완료 후 한 번 더(확실히)
+        except Exception:
+            pass
 
         self.action_reset_view.setEnabled(True)
         self.action_reset_zoom.setEnabled(True)
         self.action_add_node.setEnabled(True)
         self.action_search_history.setEnabled(True)
         self.action_export_folder.setEnabled(True)
+        if getattr(self, 'action_screenshot', None) is not None:
+            self.action_screenshot.setEnabled(True)
         self._update_title()
 
     def _add_node(self):
@@ -791,6 +805,20 @@ class MainWindow(QMainWindow):
     def _open_history_search(self):
         if self.current_plugin and hasattr(self.current_plugin, 'open_history_search'):
             self.current_plugin.open_history_search()
+
+    def _take_screenshot(self):
+        """현재 보드 캔버스를 스크린샷(저장/복사). 협업 중이면 타인 커서 이름 익명화 옵션."""
+        plugin = self.current_plugin
+        view = getattr(plugin, 'view', None) if plugin else None
+        if view is None:
+            QMessageBox.information(self, t("info.no_board_title"), t("info.no_board_message"))
+            return
+        from v.boards.whiteboard.board_screenshot import open_screenshot_dialog
+        board_name = getattr(plugin, '_board_name', '') or self._current_filepath or "board"
+        if isinstance(board_name, str):
+            import os as _os
+            board_name = _os.path.splitext(_os.path.basename(board_name))[0]
+        open_screenshot_dialog(view, board_name, self)
 
     def _center_view(self):
         if not self.current_plugin:
@@ -1669,6 +1697,8 @@ class MainWindow(QMainWindow):
             self._user_overlay.set_users(users)
             self._dbg_overlay.set(users=len(users))
             self._position_server_overlays()
+        if getattr(self, '_chat_panel', None) is not None:
+            self._chat_panel.set_presence(users)
 
     def _follow_user(self, username: str):
         """F1 목록에서 사용자 클릭 → 그 사람 커서 위치로 화면 이동(따라가기)."""
@@ -1690,14 +1720,17 @@ class MainWindow(QMainWindow):
         if getattr(self, '_dbg_overlay', None) is not None:
             self._dbg_overlay.set(ping=ms)
 
-    def _setup_chat_dock(self, client):
-        """서버 채팅 패널(우측 도크) 생성·표시."""
+    def _setup_chat_dock(self, client=None):
+        """채팅·명령 패널(우측 도크) 생성. 솔로/서버 공통 — client 는 서버 입장 시만.
+
+        client=None 이면 솔로 모드(채팅은 로컬 에코, 명령은 전부 동작).
+        """
         from PyQt6.QtWidgets import QDockWidget
         from v.boards.whiteboard.chat_panel import ChatPanel
 
         if getattr(self, '_chat_dock', None) is None:
-            self._chat_panel = ChatPanel(self)
-            self._chat_dock = QDockWidget("채팅 로그", self)
+            self._chat_panel = ChatPanel(ui=self)
+            self._chat_dock = QDockWidget("채팅 · 명령", self)
             self._chat_dock.setWidget(self._chat_panel)
             self._chat_dock.setObjectName("server_chat")
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._chat_dock)
@@ -1708,6 +1741,11 @@ class MainWindow(QMainWindow):
             self._sc_f2 = QShortcut(QKeySequence("F2"), self)
             self._sc_f2.activated.connect(
                 lambda: self._chat_dock.setVisible(not self._chat_dock.isVisible()))
+
+        # 명령 컨트롤러에 현재 서버 클라이언트 연결(권한/핑/채팅 라우팅).
+        # 솔로면 None — 컨트롤러는 그때 전권(Operator)으로 동작.
+        if getattr(self, '_chat_panel', None) is not None:
+            self._chat_panel.set_client(client)
 
     def _send_chat(self, text):
         if getattr(self, '_server_client', None) is not None:
@@ -1775,6 +1813,9 @@ class MainWindow(QMainWindow):
             w = getattr(self, ov, None)
             if w is not None:
                 w.hide()
+        # 채팅 패널은 유지하되 솔로로 되돌림(클라 해제 → 평문은 로컬 에코, 명령 전권)
+        if getattr(self, '_chat_panel', None) is not None:
+            self._chat_panel.set_client(None)
         if getattr(self, '_chat_dock', None) is not None:
             self._chat_dock.hide()
 
@@ -1844,7 +1885,7 @@ class MainWindow(QMainWindow):
         self._current_filepath = None
         self._modified = False
         for act in ('action_reset_view', 'action_reset_zoom', 'action_add_node',
-                    'action_search_history', 'action_export_folder'):
+                    'action_search_history', 'action_export_folder', 'action_screenshot'):
             a = getattr(self, act, None)
             if a is not None:
                 a.setEnabled(False)

@@ -17,6 +17,11 @@ class BaseNode:
                 # ... rest of initialization
     """
 
+    # ── 공용 이름표(node_title) 메타데이터 — 각 노드가 오버라이드 ──
+    TITLE_NAME = "Node"     # 기본 표시 이름(타입명)
+    TITLE_COLOR = None      # 제목 글자색(None → node_title 기본색)
+    WANTS_TITLE = True      # 공용 편집형 이름표를 붙일지(자기 라벨 가진 노드는 False)
+
     def __init__(self, *args, **kwargs):
         """Empty __init__ for proper MRO chain in multiple inheritance."""
         super().__init__(*args, **kwargs)

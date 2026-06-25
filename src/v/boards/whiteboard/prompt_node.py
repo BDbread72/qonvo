@@ -19,6 +19,9 @@ class PromptNodeWidget(QWidget, BaseNode):
 
     is_prompt_node = True
 
+    TITLE_NAME = "Prompt"
+    TITLE_COLOR = "#e0d0f0"
+
     def __init__(self, title="", body="", on_modified=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -118,17 +121,8 @@ class PromptNodeWidget(QWidget, BaseNode):
         self.priority_spin.valueChanged.connect(self._on_change)
         header_layout.addWidget(self.priority_spin)
 
-        self.title_edit = QLineEdit(title)
-        self.title_edit.setPlaceholderText("Prompt")
-        self.title_edit.setStyleSheet("""
-            QLineEdit {
-                background: transparent; border: none;
-                color: #e0d0f0; font-size: 12px; font-weight: bold;
-                padding: 0;
-            }
-        """)
-        self.title_edit.textChanged.connect(self._on_change)
-        header_layout.addWidget(self.title_edit, 1)
+        # 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 표시 — 헤더 제목칸 제거.
+        header_layout.addStretch(1)
 
         layout.addWidget(self.header)
 
@@ -294,7 +288,6 @@ class PromptNodeWidget(QWidget, BaseNode):
             "y": self.proxy.pos().y() if self.proxy else 0,
             "width": self.width(),
             "height": self.height(),
-            "title": self.title_edit.text(),
             "body": self.body_edit.toPlainText(),
             "role": self.role_combo.currentData(),  # 역할
             "enabled": self._prompt_enabled,  # 활성 상태
@@ -304,11 +297,7 @@ class PromptNodeWidget(QWidget, BaseNode):
     def apply_sync_data(self, data):
         """원격 편집을 제자리 반영(시그널 차단 → 에코 방지)."""
         # 내가 편집 중(포커스)인 칸엔 원격 텍스트를 적용하지 않는다(커서 튐/되돌림 방지).
-        title = data.get("title", "")
-        if not self.title_edit.hasFocus() and self.title_edit.text() != title:
-            self.title_edit.blockSignals(True)
-            self.title_edit.setText(title)
-            self.title_edit.blockSignals(False)
+        # 이름은 node_rename op 로 별도 동기화됨(여기선 본문만).
         body = data.get("body", "")
         if not self.body_edit.hasFocus() and self.body_edit.toPlainText() != body:
             self.body_edit.blockSignals(True)

@@ -108,8 +108,6 @@ class SerializationMixin:
         from .checklist import ChecklistWidget
         from .repository_node import RepositoryNodeWidget
         from .nixi_node import NixiNodeWidget
-        from .ups_node import UpsNodeWidget
-        from .rmv_node import RmvNodeWidget
         from .number_node import NumberNodeWidget
         from .math_node import MathNodeWidget
         from .items import TextItem, GroupFrameItem
@@ -123,7 +121,7 @@ class SerializationMixin:
             "edges": [], "pins": [], "texts": [], "sticky_notes": [],
             "prompt_nodes": [], "markdown_nodes": [], "image_cards": [], "checklists": [],
             "group_frames": [], "dimensions": [], "nixi_nodes": [],
-            "ups_nodes": [], "rmv_nodes": [], "number_nodes": [], "math_nodes": [],
+            "number_nodes": [], "math_nodes": [],
             "file_nodes": [],
             "next_id": self.app._next_id,
             "system_prompt": self.system_prompt,
@@ -150,8 +148,6 @@ class SerializationMixin:
             ChecklistWidget: "checklists",
             RepositoryNodeWidget: "repository_nodes",
             NixiNodeWidget: "nixi_nodes",
-            UpsNodeWidget: "ups_nodes",
-            RmvNodeWidget: "rmv_nodes",
             NumberNodeWidget: "number_nodes",
             MathNodeWidget: "math_nodes",
             TextItem: "texts",
@@ -307,6 +303,10 @@ class SerializationMixin:
         from v.model_plugin import PluginRegistry
         data["plugins_used"] = PluginRegistry.instance().get_used_plugin_ids(used_models)
 
+        # 모든 노드 공통 편집형 이름(타입 기본명에서 바뀐 것만). lazy 미생성 노드의 이름도
+        # node_names 에 남아있어 그대로 보존된다(app.nodes 로 필터하지 말 것 — 유실 위험).
+        data["node_names"] = {str(k): v for k, v in self.node_names.items()}
+
         return data
 
     def _owner_node_id(self, owner):
@@ -323,7 +323,6 @@ class SerializationMixin:
         "not_gates": "node_id", "xor_gates": "node_id", "bulb_nodes": "node_id",
         "checklists": "node_id", "image_cards": "node_id",
         "dimensions": "node_id", "nixi_nodes": "node_id",
-        "ups_nodes": "node_id", "rmv_nodes": "node_id",
         "number_nodes": "node_id", "math_nodes": "node_id",
         "file_nodes": "node_id",
     }
@@ -341,8 +340,6 @@ class SerializationMixin:
         from .checklist import ChecklistWidget
         from .repository_node import RepositoryNodeWidget
         from .nixi_node import NixiNodeWidget
-        from .ups_node import UpsNodeWidget
-        from .rmv_node import RmvNodeWidget
         from .number_node import NumberNodeWidget
         from .math_node import MathNodeWidget
         from .items import TextItem, GroupFrameItem, ImageCardItem, FileNodeItem
@@ -389,10 +386,6 @@ class SerializationMixin:
                 return ("repository_nodes", node_id, widget.get_data())
             elif isinstance(widget, NixiNodeWidget):
                 return ("nixi_nodes", node_id, widget.get_data())
-            elif isinstance(widget, UpsNodeWidget):
-                return ("ups_nodes", node_id, widget.get_data())
-            elif isinstance(widget, RmvNodeWidget):
-                return ("rmv_nodes", node_id, widget.get_data())
             elif isinstance(widget, NumberNodeWidget):
                 return ("number_nodes", node_id, widget.get_data())
             elif isinstance(widget, MathNodeWidget):
@@ -602,7 +595,7 @@ class SerializationMixin:
                           self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                           self.xor_gate_proxies, self.bulb_proxies,
                           self.checklist_proxies, self.repository_proxies,
-                          self.nixi_proxies, self.ups_proxies, self.rmv_proxies,
+                          self.nixi_proxies,
                           self.number_proxies, self.math_proxies):
                     d.pop(nid, None)
             elif isinstance(item, FileNodeItem):
@@ -663,8 +656,6 @@ class SerializationMixin:
         from .function_types import FunctionDefinition
         from .chat_node import ChatNodeWidget
         from .items import ImageCardItem, FileNodeItem
-        from .ups_node import UpsNodeWidget
-        from .rmv_node import RmvNodeWidget
 
         plugins_used = data.get("plugins_used", [])
         if plugins_used:
@@ -693,8 +684,6 @@ class SerializationMixin:
             ChatNodeWidget._board_temp_dir = str(_temp)
             ImageCardItem._board_temp_dir = str(_temp)
             FileNodeItem._board_temp_dir = str(_temp)
-            UpsNodeWidget._board_temp_dir = str(_temp)
-            RmvNodeWidget._board_temp_dir = str(_temp)
 
         for edge in list(self._edges):
             self.remove_edge(edge)
@@ -702,7 +691,7 @@ class SerializationMixin:
             for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                       self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                       self.checklist_proxies, self.repository_proxies,
-                      self.nixi_proxies, self.ups_proxies, self.rmv_proxies,
+                      self.nixi_proxies,
                       self.number_proxies, self.math_proxies):
                 for proxy in d.values():
                     self._remove_ports_and_edges(self._collect_ports(proxy))
@@ -744,10 +733,6 @@ class SerializationMixin:
                 self.scene.removeItem(proxy)
             for proxy in list(self.nixi_proxies.values()):
                 self.scene.removeItem(proxy)
-            for proxy in list(self.ups_proxies.values()):
-                self.scene.removeItem(proxy)
-            for proxy in list(self.rmv_proxies.values()):
-                self.scene.removeItem(proxy)
             for proxy in list(self.number_proxies.values()):
                 self.scene.removeItem(proxy)
             for proxy in list(self.math_proxies.values()):
@@ -781,10 +766,10 @@ class SerializationMixin:
 
         self.repository_proxies.clear()
         self.nixi_proxies.clear()
-        self.ups_proxies.clear()
-        self.rmv_proxies.clear()
         self.number_proxies.clear()
         self.math_proxies.clear()
+        self.node_names.clear()
+        self.node_title_items.clear()
         self.text_items.clear()
         self.group_frame_items.clear()
         self.image_card_items.clear()
@@ -799,6 +784,18 @@ class SerializationMixin:
         for func_data in data.get("functions_library", []):
             func_def = FunctionDefinition.from_dict(func_data)
             self.functions_library[func_def.function_id] = func_def
+
+        # 통합 노드 이름 — 노드가 생성(materialize)되기 전에 채워둬야 이름표가 즉시 올바른
+        # 이름으로 뜬다. 옛 보드(node_names 없음)는 _materialize_single 의 per-node title
+        # 마이그레이션이 대신 채운다.
+        nn = {}
+        for k, v in (data.get("node_names") or {}).items():
+            try:
+                nn[int(k)] = str(v)
+            except Exception:
+                pass
+        self.node_names = nn
+        self.node_title_items = {}
 
         self._lazy_mgr.reset()
         self._lazy_mgr.ingest_data(data)

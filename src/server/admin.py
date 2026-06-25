@@ -181,12 +181,18 @@ class AdminPanel:
             "whitelisted": n in wl,
         } for n in sorted(names)]
 
+        try:
+            usage = self.s.policy.snapshot()
+        except Exception:
+            usage = []
+
         return web.json_response({
             "server": self.s.name,
             "online": len(online_names),
             "whitelist_mode": bool(self.s.auth.whitelist_enabled),
             "boards": boards,
             "users": users,
+            "usage": usage,
         })
 
     async def _board_delete(self, req: web.Request) -> web.Response:
@@ -334,6 +340,11 @@ tr:hover td{background:#23262b}
 
   <div class="card"><h2>보드</h2><table id="boards"><thead><tr><th>ID</th><th>노드</th><th>첨부</th><th>접속</th><th></th></tr></thead><tbody></tbody></table></div>
 
+  <div class="card"><h2>오늘 AI 사용량</h2>
+    <div class="muted" style="margin-bottom:8px">서버가 당신 키로 대행한 AI 실행. 토큰 합계 내림차순. 한도는 config.toml [ai_policy] 에서 조정.</div>
+    <table id="usage"><thead><tr><th>사용자</th><th>요청</th><th>토큰(in)</th><th>토큰(out)</th><th>실행중</th><th>주 모델</th></tr></thead><tbody></tbody></table>
+  </div>
+
   <div class="card"><h2>공지</h2>
     <div class="row"><input id="say" placeholder="전체 공지 메시지" style="flex:1"><button class="sm pri" onclick="say()">공지</button></div>
   </div>
@@ -379,6 +390,11 @@ async function load(){
   $('#srv').textContent=d.server; $('#stat').textContent=`접속 ${d.online}명 · 보드 ${d.boards.length}개`+(d.whitelist_mode?' · 화이트리스트 ON':'');
   $('#boards tbody').innerHTML = d.boards.map(b=>`<tr><td>${esc(b.id)}</td><td>${b.nodes}</td><td>${b.attachments}</td><td>${b.online}</td>
     <td class="row"><button class="sm" onclick="ren('${esc(b.id)}')">이름변경</button><button class="sm danger" onclick="delb('${esc(b.id)}')">삭제</button></td></tr>`).join('')||'<tr><td colspan=5 class=muted>보드 없음</td></tr>';
+  const fmt = n => (n||0).toLocaleString();
+  $('#usage tbody').innerHTML = (d.usage||[]).map(u=>`<tr><td>${esc(u.user)}</td><td>${u.req}</td>
+    <td>${fmt(u.tokens_in)}</td><td>${fmt(u.tokens_out)}</td>
+    <td>${u.active>0?`<span class="pill on">${u.active}</span>`:'0'}</td><td>${esc(u.top_model)}</td></tr>`).join('')
+    ||'<tr><td colspan=6 class=muted>오늘 사용 없음</td></tr>';
   USERS = d.users || [];
   renderUsers();
 }

@@ -25,6 +25,9 @@ STICKY_COLORS = {
 class StickyNoteWidget(QWidget, BaseNode):
     """?????? ???"""
 
+    TITLE_NAME = "Sticky"
+    TITLE_COLOR = "#444444"   # 헤더가 밝음 → 어두운 글자
+
     def __init__(self, title="", body="", color="yellow", on_modified=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -50,18 +53,8 @@ class StickyNoteWidget(QWidget, BaseNode):
         header_layout.setContentsMargins(8, 2, 4, 2)
         header_layout.setSpacing(3)
 
-        # ???
-        self.title_edit = QLineEdit(title)
-        self.title_edit.setPlaceholderText("???")
-        self.title_edit.setStyleSheet("""
-            QLineEdit {
-                background: transparent; border: none;
-                color: #333; font-size: 12px; font-weight: bold;
-                padding: 0;
-            }
-        """)
-        self.title_edit.textChanged.connect(self._on_change)
-        header_layout.addWidget(self.title_edit, 1)
+        # 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 노드 위에 표시 — 헤더 제목칸 제거.
+        header_layout.addStretch(1)
 
         # ??? ??? ??? (??? ??? ???)
         self._palette_btn = QPushButton()
@@ -174,7 +167,6 @@ class StickyNoteWidget(QWidget, BaseNode):
             "y": self.proxy.pos().y() if self.proxy else 0,
             "width": self.width(),
             "height": self.height(),
-            "title": self.title_edit.text(),
             "body": self.body_edit.toPlainText(),
             "color": self.color,
         }
@@ -182,11 +174,7 @@ class StickyNoteWidget(QWidget, BaseNode):
     def apply_sync_data(self, data):
         """원격 편집을 제자리 반영(시그널 차단 → 에코 방지)."""
         # 내가 편집 중(포커스)인 칸엔 원격 텍스트를 적용하지 않는다(커서 튐/되돌림 방지).
-        title = data.get("title", "")
-        if not self.title_edit.hasFocus() and self.title_edit.text() != title:
-            self.title_edit.blockSignals(True)
-            self.title_edit.setText(title)
-            self.title_edit.blockSignals(False)
+        # 이름은 node_rename op 로 별도 동기화됨(여기선 본문만).
         body = data.get("body", "")
         if not self.body_edit.hasFocus() and self.body_edit.toPlainText() != body:
             self.body_edit.blockSignals(True)

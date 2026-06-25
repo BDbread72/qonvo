@@ -21,6 +21,17 @@ from .search_bar import SearchBarWidget
 from v.theme import Theme
 
 
+def _strip_chat_code(text: str, error: bool = False):
+    """초간단 §색코드 해석. 반환 (color, text). error 면 빨강 우선."""
+    text = text or ""
+    if text.startswith("§e"):
+        text = text[2:]
+        return ("#ff8888" if error else "#e6c200"), text
+    if text.startswith("§"):
+        text = text[1:]
+    return ("#ff8888" if error else "#7fd88f"), text
+
+
 class WhiteboardView(QGraphicsView):
     """줌/팬 가능한 화이트보드 뷰"""
 
@@ -43,7 +54,9 @@ class WhiteboardView(QGraphicsView):
 
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
-        self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontAdjustForAntialiasing)
+        # ⚠️ DontAdjustForAntialiasing 는 켜지 말 것 — 켜면 Qt 가 dirty 영역을 AA(2px) 만큼
+        # 넓히지 않아서, 안티앨리어싱된 아이템(라이브 커서·노드·엣지·점선 선택박스)이
+        # 움직일 때 옛 위치의 가장자리 픽셀이 안 지워져 '잔상'이 남는다. 페인터 상태 절약만 유지.
         self.setOptimizationFlag(QGraphicsView.OptimizationFlag.DontSavePainterState)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -686,10 +699,34 @@ class WhiteboardView(QGraphicsView):
                 except Exception:
                     pass
 
+    def _track_self_cursor(self) -> bool:
+        """내 커서 위치를 보고할지 — 서버모드거나, 솔로라도 말풍선 레이어가 있으면(채팅용)."""
+        plg = self.plugin
+        if plg is None or not hasattr(plg, 'report_cursor'):
+            return False
+        return (getattr(plg, 'server_mode', False)
+                or getattr(plg, '_cursor_layer', None) is not None)
+
+    def _seed_self_cursor(self):
+        """채팅 열 때 현재 마우스 위치를 내 말풍선 기준점으로 시드(솔로 첫 말풍선이 중앙에
+        뜨던 문제 방지). 레이어가 없으면 만들어 이후 마우스 이동도 추적되게 한다."""
+        plg = self.plugin
+        if plg is None:
+            return
+        cl = plg.ensure_cursor_layer() if hasattr(plg, 'ensure_cursor_layer') \
+            else getattr(plg, '_cursor_layer', None)
+        if cl is None:
+            return
+        from PyQt6.QtGui import QCursor
+        vp = self.viewport()
+        pos = vp.mapFromGlobal(QCursor.pos())
+        if vp.rect().contains(pos):
+            sp = self.mapToScene(pos)
+            cl.set_self(sp.x(), sp.y())
+
     def _poll_report_cursor(self):
         """전역 커서를 주기적으로 보고(노드 위에서도 동작 — mouseMoveEvent 사각지대 보완)."""
-        if not (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
-                and hasattr(self.plugin, 'report_cursor')):
+        if not self._track_self_cursor():
             return
         # 자리비움(다른 앱으로 alt-tab)이면 위치를 갱신하지 않음 — 다른 앱 위의 마우스가
         # 보드 좌표로 잘못 전송돼 커서가 엉뚱하게 움직이는 것을 방지(마지막 위치 유지)
@@ -717,9 +754,9 @@ class WhiteboardView(QGraphicsView):
             pass
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        # 라이브 커서: 서버모드면 보드 좌표를 서버에 보고(전송 throttle 은 클라가 처리)
-        if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
-                and hasattr(self.plugin, 'report_cursor')):
+        # 라이브 커서: 서버모드면 서버 보고 + 내 말풍선 위치. 솔로라도 말풍선 레이어가
+        # 있으면 내 위치만 갱신(채팅 말풍선이 커서를 따라가게).
+        if self._track_self_cursor():
             try:
                 # 방사형 메뉴 중엔 워프된 중앙이 아니라 원래 위치를 보낸다(남들 눈에 안 튀게)
                 if self.radial_menu and getattr(self, '_original_scene_pos', None) is not None:
@@ -806,22 +843,82 @@ class WhiteboardView(QGraphicsView):
         else:
             self.plugin.report_selection(rect.x(), rect.y(), rect.width(), rect.height())
 
+    # ── 게임식 채팅/명령 입력창 (하단 중앙) — 솔로/서버 공통 ──
+    def _ensure_cmd_controller(self):
+        """채팅 명령 컨트롤러(1개) 지연 생성. 채팅=말풍선, /clear=말풍선비우기로 배선."""
+        if getattr(self, '_cmd_controller', None) is None:
+            try:
+                from .chat_commands import ChatCommandController
+                ctrl = ChatCommandController(self.window())
+                ctrl.set_chat_sink(self._chat_sink)
+                ctrl.set_clear_sink(self._clear_bubbles)
+                self._cmd_controller = ctrl
+            except Exception:
+                self._cmd_controller = None
+        return getattr(self, '_cmd_controller', None)
+
+    def _sync_cmd_controller(self):
+        """입력창 열 때마다 현재 서버/솔로 상태를 컨트롤러에 반영."""
+        ctrl = self._ensure_cmd_controller()
+        if ctrl is None:
+            return
+        plg = self.plugin
+        client = getattr(plg, '_server_client', None) if plg is not None else None
+        if client is not None and getattr(client, 'is_connected', False):
+            ctrl.set_client(client)
+            ctrl.set_presence(getattr(plg, '_last_presence', []) or [])
+        else:
+            ctrl.set_client(None)
+
+    def _chat_sink(self, text: str):
+        """평문 채팅(및 /say·/me) → 말풍선/서버 전송."""
+        if self.plugin is not None and hasattr(self.plugin, 'send_chat_message'):
+            self.plugin.send_chat_message(text)
+
+    def _clear_bubbles(self):
+        cl = getattr(self.plugin, '_cursor_layer', None) if self.plugin is not None else None
+        if cl is not None:
+            cl.clear()
+        log = getattr(self, '_chat_log', None)
+        if log is not None:
+            log.clear()
+
     def _open_chat_input(self):
-        """게임식 채팅 입력창(하단 중앙)을 띄운다."""
-        from PyQt6.QtWidgets import QLineEdit
+        """게임식 채팅/명령 입력창(하단 중앙)을 띄운다."""
+        from .chat_panel import CommandInput
+        from PyQt6.QtWidgets import QLabel
         if getattr(self, '_chat_input', None) is None:
-            self._chat_input = QLineEdit(self)
-            self._chat_input.setPlaceholderText("메시지 입력 후 Enter  (Esc 취소)")
-            self._chat_input.setStyleSheet(
-                "QLineEdit { background:#26262b; color:#eee; border:2px solid #0d6efd;"
-                " border-radius:10px; padding:9px 14px; font-size:14px; }")
-            # Return 은 eventFilter 에서 직접 처리(consume) → 뷰 keyPressEvent 로 전파돼
-            # 채팅창이 즉시 재오픈되던 버그 방지. 그래서 returnPressed 는 연결하지 않는다.
-            self._chat_input.installEventFilter(self)
-        w = min(420, max(280, self.width() - 80))
+            ci = CommandInput(self)
+            ci.setPlaceholderText("메시지 또는 /명령어   ·   Enter 전송, Esc 취소")
+            # 마인크래프트식: 반투명 검정 바, 큰 흰 글씨, 하단 가로 전체
+            ci.setStyleSheet(
+                "QLineEdit { background:rgba(0,0,0,0.55); color:#ffffff;"
+                " border:1px solid rgba(255,255,255,0.18); border-radius:4px;"
+                " padding:11px 15px; font-size:15px; }"
+                "QLineEdit:focus { border-color:rgba(120,170,255,0.6); }")
+            ci.set_controller(self._ensure_cmd_controller())
+            ci.set_hint_callback(self._update_chat_hint)
+            ci.submit_chat.connect(self._on_chat_submit)
+            ci.submit_command.connect(self._on_command_submit)
+            ci.escaped.connect(self._close_chat_input)
+            ci.focus_out.connect(self._on_chat_focus_out)
+            self._chat_input = ci
+            self._chat_hint = QLabel(self)
+            self._chat_hint.setTextFormat(Qt.TextFormat.RichText)
+            self._chat_hint.setStyleSheet(
+                "color:#c8ccd2; background:rgba(0,0,0,0.4);"
+                " border-radius:3px; padding:2px 8px;"
+                " font-family:Consolas,monospace; font-size:13px;")
+            self._chat_hint.hide()
+
+        self._sync_cmd_controller()
+        self._seed_self_cursor()   # 내 말풍선 기준점 = 현재 마우스(중앙 튐 방지)
+        self._ensure_chat_log().pin()   # Enter = 이전 대화 스크롤백 펼치기
+        w = self.width() - 24          # 하단 가로 거의 전체(마크식)
+        x = 12
         self._chat_input.setFixedWidth(w)
-        self._chat_input.move((self.width() - w) // 2, self.height() - 64)
-        # 이미 떠 있던(연속 채팅 유지) 입력창이면 입력 중 텍스트를 지우지 않고 포커스만.
+        self._chat_input.move(x, self.height() - 52)
+        self._chat_hint.move(x + 6, self.height() - 52 - 24)
         if not self._chat_input.isVisible():
             self._chat_input.clear()
         self._chat_input.show()
@@ -829,46 +926,104 @@ class WhiteboardView(QGraphicsView):
         self._chat_input.setFocus()
         self._report_cursor_state()   # 입력 중 표시
 
-    def _send_chat_input(self):
+    def _on_chat_submit(self, text: str):
+        # 먼저 입력창 닫기/유지 결정 → 메시지는 그 상태로 로그에 (닫혔으면 새 메시지 페이드)
+        self._after_chat_submit()
+        self._chat_sink(text)
+
+    def _on_command_submit(self, cmd: str):
+        # 먼저 입력 닫기/유지 → 결과는 닫힌 상태면 '새 메시지'로 잠깐 떴다 페이드
+        self._after_chat_submit()
+        ctrl = self._ensure_cmd_controller()
+        if ctrl is None:
+            self._show_self_lines(["명령 시스템을 쓸 수 없습니다"], error=True)
+            return
+        try:
+            res = ctrl.execute(cmd)
+        except Exception as ex:
+            self._show_self_lines([f"명령 오류: {ex}"], error=True)
+            return
+        if res.failed:
+            known = ctrl.command_names()
+            self._show_self_lines([self._friendly_cmd_error(cmd, res.error, known)], error=True)
+        elif res.messages:
+            self._show_self_lines(list(res.messages))
+
+    @staticmethod
+    def _friendly_cmd_error(cmd: str, err, known: set) -> str:
+        """mccmd 영문 오류를 친절한 한글 안내로. 아는 명령이면 사용법, 아니면 오타 안내."""
+        name = cmd.split()[0].lstrip("/") if cmd.split() else ""
+        if name and name in known:
+            return f"§e'/{name}' 사용법이 안 맞아요.§r  /help {name} 로 확인하세요"
+        return f"§e'/{name}' 는 모르는 명령이에요.§r  /help 로 목록을 보세요"
+
+    def _ensure_chat_log(self):
+        if getattr(self, '_chat_log', None) is None:
+            from .chat_panel import ChatLog
+            self._chat_log = ChatLog(self)
+        return self._chat_log
+
+    def add_chat_log(self, user: str, text: str, color: str = "#8fd1ff"):
+        """채팅 한 줄을 히스토리 로그에 기록(말풍선과 별개의 스크롤백)."""
+        self._ensure_chat_log().add_chat(user, text, color)
+
+    def _show_self_lines(self, lines, error: bool = False):
+        """명령 결과/오류 = **시스템 피드백** → 채팅 로그(말풍선 아님 — 사람 말과 구분).
+        §색코드는 로그가 해석. error 면 기본색(코드 없는 부분)을 빨강으로."""
+        log = self._ensure_chat_log()
+        base = "#ff8888" if error else "#cfd3dc"
+        for ln in lines:
+            if ln and ln.strip():
+                log.add_system(ln, base)
+
+    def _after_chat_submit(self):
+        """전송 후 — stay-open 이면 유지, 아니면 닫기."""
         ci = getattr(self, '_chat_input', None)
         if ci is None:
             return
-        text = ci.text().strip()
-        if text and self.plugin is not None and hasattr(self.plugin, 'send_chat_message'):
-            self.plugin.send_chat_message(text)
-        # 설정: 연속 채팅 유지 — Enter 후에도 입력창을 닫지 않고 계속 입력(Esc 로 닫기).
         from v.settings import get_setting
         if get_setting("chat_stay_open", False):
             ci.clear()
-            ci.setFocus()              # 창 유지 + 포커스 유지(연속 입력)
-            # 커서 상태는 '입력 중' 그대로 유지
+            ci.setFocus()
         else:
-            ci.hide()
-            self.setFocus()
-            self._report_cursor_state()   # 입력 종료
+            self._close_chat_input()
 
-    def eventFilter(self, obj, event):
-        from PyQt6.QtCore import QEvent
-        if obj is getattr(self, '_chat_input', None):
-            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-                self._chat_input.hide()
-                self.setFocus()
-                self._report_cursor_state()
-                return True
-            # Return/Enter 는 여기서 전송 처리하고 **소비**한다(return True) → 부모 뷰의
-            # keyPressEvent 로 전파돼 채팅창이 다시 열리는 것을 막는다.
-            if (event.type() == QEvent.Type.KeyPress
-                    and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
-                self._send_chat_input()
-                return True
-            if event.type() == QEvent.Type.FocusOut:
-                # 연속 채팅 유지(stay-open) 모드면 포커스가 빠져도 닫지 않는다 —
-                # 전송 시 잠깐 포커스가 튀어 입력창이 닫혀버리던 버그. 닫기는 Esc 로만.
-                from v.settings import get_setting
-                if not get_setting("chat_stay_open", False):
-                    self._chat_input.hide()
-                    self._report_cursor_state()
-        return super().eventFilter(obj, event)
+    def _close_chat_input(self):
+        ci = getattr(self, '_chat_input', None)
+        if ci is not None:
+            ci.hide()
+        if getattr(self, '_chat_hint', None) is not None:
+            self._chat_hint.hide()
+        if getattr(self, '_chat_log', None) is not None:
+            self._chat_log.unpin()   # 스크롤백 접고 잠깐 보이다 페이드
+        self.setFocus()
+        self._report_cursor_state()
+
+    def _on_chat_focus_out(self):
+        from v.settings import get_setting
+        if get_setting("chat_stay_open", False):
+            return
+        # 완성 클릭 등으로 잠깐 포커스가 튀는 경우를 흡수(되돌아오면 유지)
+        def _check():
+            ci = getattr(self, '_chat_input', None)
+            if ci is not None and ci.isVisible() and not ci.hasFocus():
+                self._close_chat_input()
+        QTimer.singleShot(120, _check)
+
+    def _update_chat_hint(self, ghost: str, typed: str = ""):
+        lbl = getattr(self, '_chat_hint', None)
+        if lbl is None:
+            return
+        if not ghost:
+            lbl.hide()
+            return
+        import html as _html
+        lbl.setText(
+            f"<span style='color:#9aa'>/{_html.escape(typed)}</span>"
+            f"<span style='color:#5a5a5a'>{_html.escape(ghost)}</span>")
+        lbl.adjustSize()
+        lbl.raise_()
+        lbl.show()
 
     def drawForeground(self, painter: QPainter, rect: QRectF):
         """선택 영역 + 프록시 선택 표시 그리기 (라이브 커서는 별도 오버레이 위젯)"""
@@ -897,10 +1052,9 @@ class WhiteboardView(QGraphicsView):
 
     def keyPressEvent(self, event: QKeyEvent):
         """키 이벤트 처리"""
-        # Enter → 서버 채팅 입력창 (게임처럼). 텍스트 입력 중이 아닐 때만.
+        # Enter → 채팅/명령 입력창 (게임처럼). 솔로·서버 공통, 텍스트 입력 중이 아닐 때만.
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if (self.plugin is not None and getattr(self.plugin, 'server_mode', False)
-                    and not self._has_focused_input()):
+            if self.plugin is not None and not self._has_focused_input():
                 self._open_chat_input()
                 event.accept()
                 return

@@ -292,6 +292,27 @@ class CursorLayer(QObject):
         if self._cursors and not self._timer.isActive():
             self._timer.start()
 
+    def set_anonymized(self, on: bool):
+        """스크린샷용 — 타인 커서 이름표를 'Guest 1·2…'로 바꾸거나(on) 실제 이름으로 복원(off).
+
+        _cursors 는 본인 제외 타 사용자만 담는다. 정렬 순서로 번호를 매겨 캡처마다 동일하게.
+        다음 presence 갱신이 오면 실제 이름으로 덮어쓰지만, 캡처는 동기(grab)라 그 전에 끝난다.
+        """
+        names = sorted(self._cursors.keys(), key=str.lower)
+        for i, nm in enumerate(names, 1):
+            c = self._cursors.get(nm)
+            if not c:
+                continue
+            label = f"Guest {i}" if on else c["name"]
+            try:
+                c["item"].set_label(label, c["state"], c["color"])
+            except Exception:
+                continue
+
+    def others_count(self) -> int:
+        """현재 보이는 타 사용자 커서 수(익명화 옵션 활성 판단용)."""
+        return len(self._cursors)
+
     def clear(self):
         self._timer.stop()
         for name in list(self._cursors.keys()):

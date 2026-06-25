@@ -27,6 +27,8 @@ blockquote { border-left: 3px solid #555; padding-left: 8px; color: #999; }
 class MarkdownNodeWidget(QWidget, BaseNode):
     """마크다운 편집/미리보기 전환이 가능한 노드 위젯."""
 
+    TITLE_NAME = "Markdown"
+
     def __init__(self, on_modified=None):
         """위젯을 초기화하고 UI 구성 요소를 배치한다."""
         super().__init__()

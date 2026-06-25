@@ -380,8 +380,6 @@ _SUMMARY_CATS = {
     "xor_gates": "XOR gate",
     "bulb_nodes": "Bulb",
     "nixi_nodes": "Nixi",
-    "ups_nodes": "Upscale",
-    "rmv_nodes": "BG Remove",
     "group_frames": "Group Frame",
 }
 

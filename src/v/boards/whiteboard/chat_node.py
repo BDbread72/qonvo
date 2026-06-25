@@ -472,6 +472,8 @@ class ChatLogWindow(QWidget):
 class ChatNodeWidget(QWidget, BaseNode):
     """Chat node with model selection and streaming response."""
 
+    TITLE_NAME = "Chat"
+
     # 보드별 이미지 임시 폴더 (plugin이 설정)
     _board_temp_dir: str | None = None
 
@@ -571,9 +573,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(12, 0, 8, 0)
 
-        title = QLabel(f"#{self.node_id}")
-        title.setStyleSheet(f"color: {Theme.TEXT_SECONDARY}; font-weight: bold; font-size: 12px;")
-        header_layout.addWidget(title)
+        # 노드 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 노드 위에 표시한다.
         header_layout.addStretch()
 
         self.btn_pin = QPushButton("P")

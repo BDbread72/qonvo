@@ -67,6 +67,10 @@ class QonvoServer:
         self.default_model = config.get("ai", {}).get("default_model", "gemini-2.5-flash")
         self.chat_log_enabled = bool(config.get("chat", {}).get("log", True))
 
+        # AI 실행 거버넌스 — 레벨별 모델/이미지/레이트/동시/쿼타 + 사용량 회계.
+        from .ai_policy import AIPolicy
+        self.policy = AIPolicy(config)
+
         net = config.get("network", {})
         self.upnp_enabled = bool(net.get("upnp", True))
         self.public_host = net.get("public_host", "") or ""
@@ -482,9 +486,20 @@ class QonvoServer:
         files = self._resolve_input_files(board_id, files)
 
         try:
-            count = max(1, min(int(params.get("count", 1)), 8))
+            count = int(params.get("count", 1))
         except Exception:
             count = 1
+
+        # ── 거버넌스 게이트: 모델 허용/이미지/레이트/동시/쿼타 + count 클램프 ──
+        try:
+            from v.model_plugin import is_image_model
+            is_image = is_image_model(model)
+        except Exception:
+            is_image = False
+        ok, reason, count = self.policy.authorize(sess.username, sess.level, model, count, is_image)
+        if not ok:
+            await sess.send({"type": "error", "code": "limit", "message": reason})
+            return
 
         try:
             router = self._ensure_router()
@@ -495,72 +510,84 @@ class QonvoServer:
         loop = asyncio.get_running_loop()
         from .ai_runner import run_ai
 
-        # preferred: N개 후보를 동시 생성해 요청자에게만 candidates 로 보낸다(선택은 클라가).
-        if count > 1:
-            logger.info("ai_request(preferred x%d) sid=%s node=%s model=%s", count, sess.id, node_id, model)
-            tasks = [
-                loop.run_in_executor(
-                    None,
-                    lambda: run_ai(router, model, message, files, system_prompt, options, None),
-                )
-                for _ in range(count)
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            candidates = []
-            for r in results:
-                if isinstance(r, dict):
-                    candidates.append({
-                        "text": r.get("text", ""), "images": r.get("images", []),
-                        "tokens_in": r.get("tokens_in", 0), "tokens_out": r.get("tokens_out", 0),
-                        "error": r.get("error"),
-                    })
-                else:
-                    candidates.append({"text": "", "images": [], "error": str(r)})
-            await sess.send({"type": "ai_complete", "node_id": node_id,
-                             "result": {"candidates": candidates}})
-            return
-
-        accum: list[str] = []
-
-        def on_chunk(text: str):
-            accum.append(text)
-            snapshot = "".join(accum)
-            asyncio.run_coroutine_threadsafe(
-                self.registry.broadcast(
-                    board_id, {"type": "ai_progress", "node_id": node_id, "chunk": snapshot}
-                ),
-                loop,
-            )
-
-        logger.info("ai_request sid=%s node=%s model=%s", sess.id, node_id, model)
-        result = await loop.run_in_executor(
-            None,
-            lambda: run_ai(router, model, message, files, system_prompt, options, on_chunk),
-        )
-
-        # AI 생성 이미지를 서버 첨부 파일로 저장하고 상대경로로 doc 에 기록.
-        # (base64 를 doc 에 넣으면 snapshot 비대 + 재접속 시 경로 미해석 → 파일로 영속)
-        rel_refs = self._persist_ai_images(board_id, result.get("images", []))
+        # 동시/레이트 카운트 시작 — 완료(또는 예외) 시 반드시 end() 로 회계.
+        self.policy.begin(sess.username)
+        tin = tout = 0
         try:
-            self.boards.get(board_id).append_assistant_message(
-                node_id, result.get("text", ""), rel_refs
-            )
-        except Exception:
-            pass
+            # preferred: N개 후보를 동시 생성해 요청자에게만 candidates 로 보낸다(선택은 클라가).
+            if count > 1:
+                logger.info("ai_request(preferred x%d) sid=%s user=%s node=%s model=%s",
+                            count, sess.id, sess.username, node_id, model)
+                tasks = [
+                    loop.run_in_executor(
+                        None,
+                        lambda: run_ai(router, model, message, files, system_prompt, options, None),
+                    )
+                    for _ in range(count)
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                candidates = []
+                for r in results:
+                    if isinstance(r, dict):
+                        tin += int(r.get("tokens_in", 0) or 0)
+                        tout += int(r.get("tokens_out", 0) or 0)
+                        candidates.append({
+                            "text": r.get("text", ""), "images": r.get("images", []),
+                            "tokens_in": r.get("tokens_in", 0), "tokens_out": r.get("tokens_out", 0),
+                            "error": r.get("error"),
+                        })
+                    else:
+                        candidates.append({"text": "", "images": [], "error": str(r)})
+                await sess.send({"type": "ai_complete", "node_id": node_id,
+                                 "result": {"candidates": candidates}})
+                return
 
-        # 라이브 표시는 base64 즉시 전송(다운로드 왕복 없이 바로 보이게)
-        await self.registry.broadcast(
-            board_id,
-            {"type": "ai_complete", "node_id": node_id, "result": {
-                "text": result.get("text", ""),
-                "images": result.get("images", []),
-                "tokens_in": result.get("tokens_in", 0),
-                "tokens_out": result.get("tokens_out", 0),
-                "error": result.get("error"),
-            }},
-        )
-        if result.get("error"):
-            await sess.send({"type": "error", "code": "ai", "message": result["error"]})
+            accum: list[str] = []
+
+            def on_chunk(text: str):
+                accum.append(text)
+                snapshot = "".join(accum)
+                asyncio.run_coroutine_threadsafe(
+                    self.registry.broadcast(
+                        board_id, {"type": "ai_progress", "node_id": node_id, "chunk": snapshot}
+                    ),
+                    loop,
+                )
+
+            logger.info("ai_request sid=%s user=%s node=%s model=%s",
+                        sess.id, sess.username, node_id, model)
+            result = await loop.run_in_executor(
+                None,
+                lambda: run_ai(router, model, message, files, system_prompt, options, on_chunk),
+            )
+            tin += int(result.get("tokens_in", 0) or 0)
+            tout += int(result.get("tokens_out", 0) or 0)
+
+            # AI 생성 이미지를 서버 첨부 파일로 저장하고 상대경로로 doc 에 기록.
+            # (base64 를 doc 에 넣으면 snapshot 비대 + 재접속 시 경로 미해석 → 파일로 영속)
+            rel_refs = self._persist_ai_images(board_id, result.get("images", []))
+            try:
+                self.boards.get(board_id).append_assistant_message(
+                    node_id, result.get("text", ""), rel_refs
+                )
+            except Exception:
+                pass
+
+            # 라이브 표시는 base64 즉시 전송(다운로드 왕복 없이 바로 보이게)
+            await self.registry.broadcast(
+                board_id,
+                {"type": "ai_complete", "node_id": node_id, "result": {
+                    "text": result.get("text", ""),
+                    "images": result.get("images", []),
+                    "tokens_in": result.get("tokens_in", 0),
+                    "tokens_out": result.get("tokens_out", 0),
+                    "error": result.get("error"),
+                }},
+            )
+            if result.get("error"):
+                await sess.send({"type": "error", "code": "ai", "message": result["error"]})
+        finally:
+            self.policy.end(sess.username, model, tin, tout, count)
 
     def _resolve_input_files(self, board_id: str, files) -> list:
         """클라가 보낸 입력 파일 참조를 서버 보드의 실제 첨부 경로로 해석한다.

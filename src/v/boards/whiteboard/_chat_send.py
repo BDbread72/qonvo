@@ -457,7 +457,7 @@ class ChatSendMixin:
             return
 
         current_items = [it.get("text", "") for it in node.get_items() if it.get("text")]
-        goal = node.title_edit.text().strip()
+        goal = (getattr(node, "_display_name", "") or "").strip()
         if kind == "breakdown":
             goal, ok = QInputDialog.getText(
                 self.view, "AI 분해", "목표를 입력하세요", text=goal)

@@ -15,8 +15,6 @@ from .round_table import RoundTableWidget
 from .checklist import ChecklistWidget
 from .repository_node import RepositoryNodeWidget
 from .nixi_node import NixiNodeWidget
-from .ups_node import UpsNodeWidget
-from .rmv_node import RmvNodeWidget
 from .switch_node import SwitchNodeWidget
 from .logic_nodes import LatchNodeWidget, AndGateWidget, OrGateWidget, NotGateWidget, XorGateWidget, BulbNodeWidget
 from .number_node import NumberNodeWidget
@@ -446,6 +444,10 @@ class NodeFactoryMixin:
         item.output_port = self._add_port(
             PortItem.OUTPUT, item, name="_default",
             index=0, total=1, data_type=out_type)
+        # 직접 그리는 아이템(이미지·파일·디멘션)도 동일한 편집형 이름표를 단다.
+        nid = getattr(item, "node_id", None)
+        if nid is not None:
+            self._attach_node_title(item, item, nid)
         QTimer.singleShot(0, item._reposition_own_ports)
 
     def add_image_card(
@@ -649,36 +651,6 @@ class NodeFactoryMixin:
             PortItem.OUTPUT, proxy, name="⚡ 완료",
             index=1, total=2, data_type=PortItem.TYPE_BOOLEAN)
 
-    def add_ups(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
-        node_id = self._next_id(node_id)
-        node = UpsNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
-        proxy = self._add_proxy(node, node_id, pos, self.ups_proxies)
-        self._create_signal_ports(proxy, node)
-        _orig_on_done = node._on_done
-        def _ups_done_hook():
-            _orig_on_done()
-            if node.output_port:
-                node.output_port.port_value = node.ai_response
-            self._emit_complete_signal(node)
-        node._on_done = _ups_done_hook
-        QTimer.singleShot(0, node.reposition_ports)
-        return proxy
-
-    def add_rmv(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
-        node_id = self._next_id(node_id)
-        node = RmvNodeWidget(node_id, on_modified=lambda nid=node_id: self._mark_node_dirty(nid))
-        proxy = self._add_proxy(node, node_id, pos, self.rmv_proxies)
-        self._create_signal_ports(proxy, node)
-        _orig_on_finished = node._on_finished
-        def _rmv_done_hook(result_path):
-            _orig_on_finished(result_path)
-            if node.output_port:
-                node.output_port.port_value = node.ai_response
-            self._emit_complete_signal(node)
-        node._on_finished = _rmv_done_hook
-        QTimer.singleShot(0, node.reposition_ports)
-        return proxy
-
     def add_text_item(self, pos: Optional[QPointF] = None, node_id: Optional[int] = None):
         node_id = self._next_id(node_id)
         if pos is None:
@@ -701,6 +673,7 @@ class NodeFactoryMixin:
         self.scene.addItem(item)
         self.group_frame_items[node_id] = item
         self.app.nodes[node_id] = item
+        self._attach_node_title(item, item, node_id)
         self._send_node_add_op(node_id, item, pos)
         self._notify_modified()
         return item
@@ -736,8 +709,6 @@ class NodeFactoryMixin:
                 ("image", "Image", lambda: self.add_image_card("", scene_pos)),
                 ("file", "Files", lambda: self.add_file_node(None, scene_pos)),
                 ("dimension", "Dimension", lambda: self.add_dimension_item(scene_pos)),
-                ("ups", "Upscale", lambda: self.add_ups(scene_pos)),
-                ("rmv", "Remove BG", lambda: self.add_rmv(scene_pos)),
             ]
         elif category == "signal":
             return [

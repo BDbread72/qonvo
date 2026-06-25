@@ -80,6 +80,7 @@ def _apply_op(op, a, b):
 
 class MathNodeWidget(QWidget, BaseNode):
 
+    TITLE_NAME = "Math"
     _COLOR = "#a0d911"
 
     def __init__(self, node_id, on_value_changed=None, on_modified=None):
@@ -122,11 +123,7 @@ class MathNodeWidget(QWidget, BaseNode):
         """)
         h_layout = QHBoxLayout(self.header)
         h_layout.setContentsMargins(10, 0, 10, 0)
-        title = QLabel(f"MATH #{self.node_id}")
-        title.setStyleSheet(
-            "color: #8fbf2c; font-family: 'Consolas', monospace;"
-            " font-size: 9px; font-weight: bold; letter-spacing: 1px; border: none; background: transparent;")
-        h_layout.addWidget(title)
+        # 이름은 공용 편집형 이름표(node_title)가 헤더에 표시 — 타입+#id 배지 제거.
         h_layout.addStretch()
         layout.addWidget(self.header)
 

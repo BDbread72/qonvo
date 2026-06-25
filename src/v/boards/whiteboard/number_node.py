@@ -41,6 +41,7 @@ def coerce_number(v, default=0):
 
 class NumberNodeWidget(QWidget, BaseNode):
 
+    TITLE_NAME = "Number"
     _COLOR = "#a0d911"  # Theme.PORT_NUMBER 와 동일
 
     def __init__(self, node_id, on_value_changed=None, on_modified=None):
@@ -80,11 +81,7 @@ class NumberNodeWidget(QWidget, BaseNode):
         """)
         h_layout = QHBoxLayout(self.header)
         h_layout.setContentsMargins(10, 0, 10, 0)
-        title = QLabel(f"NUM #{self.node_id}")
-        title.setStyleSheet(
-            f"color: {self._COLOR}; font-family: 'Consolas', monospace;"
-            " font-size: 9px; font-weight: bold; letter-spacing: 1px; border: none; background: transparent;")
-        h_layout.addWidget(title)
+        # 이름은 공용 편집형 이름표(node_title)가 헤더에 표시 — 타입+#id 배지 제거.
         h_layout.addStretch()
         layout.addWidget(self.header)
 

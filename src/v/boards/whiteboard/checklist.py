@@ -54,6 +54,8 @@ def _color_for(name: str) -> str:
 class ChecklistWidget(QWidget, BaseNode):
     """체크리스트 위젯"""
 
+    TITLE_NAME = "Checklist"
+
     def __init__(self, title="", items=None, on_modified=None,
                  on_complete=None, get_current_user=None, on_ai=None,
                  get_users=None):
@@ -102,16 +104,8 @@ class ChecklistWidget(QWidget, BaseNode):
         header_layout.setContentsMargins(8, 2, 4, 2)
         header_layout.setSpacing(4)
 
-        self.title_edit = QLineEdit(title or "Checklist")
-        self.title_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: transparent; border: none;
-                color: {Theme.TEXT_PRIMARY}; font-size: 12px; font-weight: bold;
-                padding: 0;
-            }}
-        """)
-        self.title_edit.textChanged.connect(self._on_change)
-        header_layout.addWidget(self.title_edit, 1)
+        # 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 표시 — 헤더 제목칸 제거.
+        header_layout.addStretch(1)
 
         # "내 작업만" 필터 토글
         self.filter_btn = QPushButton("◐")
@@ -508,7 +502,7 @@ class ChecklistWidget(QWidget, BaseNode):
         return items
 
     def get_markdown(self) -> str:
-        lines = [f"# {self.title_edit.text()}"]
+        lines = [f"# {getattr(self, '_display_name', None) or 'Checklist'}"]
         for rec in self._rows:
             box = "[x]" if rec["cb"].isChecked() else "[ ]"
             extra = []
@@ -528,22 +522,16 @@ class ChecklistWidget(QWidget, BaseNode):
             "y": self.proxy.pos().y() if self.proxy else 0,
             "width": self.width(),
             "height": self.height(),
-            "title": self.title_edit.text(),
             "items": self.get_items(),
         }
 
     # ──────────────────────────────────────────── 협업 동기화
 
     def apply_sync_data(self, data):
-        """원격 편집을 제자리 반영(에코 방지, 포커스 칸 skip, id 기준 머지)."""
+        """원격 편집을 제자리 반영(에코 방지, 포커스 칸 skip, id 기준 머지).
+        이름은 node_rename op 로 별도 동기화됨(여기선 항목만)."""
         self._suppress_emit = True
         try:
-            # 제목
-            title = data.get("title", "")
-            if not self.title_edit.hasFocus() and self.title_edit.text() != title:
-                self.title_edit.blockSignals(True)
-                self.title_edit.setText(title)
-                self.title_edit.blockSignals(False)
 
             incoming = data.get("items", [])
             incoming = [it for it in incoming if isinstance(it, dict)]

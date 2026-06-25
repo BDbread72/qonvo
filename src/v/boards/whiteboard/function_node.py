@@ -24,6 +24,8 @@ from .widgets import DraggableHeader, ResizeHandle
 class FunctionNodeWidget(QWidget, BaseNode):
     """함수 라이브러리에서 선택한 함수를 실행하는 노드"""
 
+    TITLE_NAME = "Function"
+
     def __init__(self, node_id, on_send=None, on_modified=None, on_open_library=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -83,11 +85,7 @@ class FunctionNodeWidget(QWidget, BaseNode):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(12, 0, 8, 0)
 
-        self.title_label = QLabel(f"#{self.node_id} Function")
-        self.title_label.setStyleSheet(
-            f"color: {Theme.TEXT_SECONDARY}; font-weight: bold; font-size: 12px;"
-        )
-        header_layout.addWidget(self.title_label)
+        # 노드 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 표시.
         header_layout.addStretch()
 
         self.btn_pin = QPushButton("P")

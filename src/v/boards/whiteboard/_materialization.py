@@ -105,8 +105,6 @@ class MaterializationMixin:
             'checklist': self.checklist_proxies,
             'repository': self.repository_proxies,
             'nixi': self.nixi_proxies,
-            'ups': self.ups_proxies,
-            'rmv': self.rmv_proxies,
             'number': self.number_proxies,
             'math': self.math_proxies,
             'image_card': self.image_card_items,
@@ -159,14 +157,19 @@ class MaterializationMixin:
             "file_nodes": self._materialize_file_node,
             "dimensions": self._materialize_dimension,
             "nixi_nodes": self._materialize_nixi_node,
-            "ups_nodes": self._materialize_ups_node,
-            "rmv_nodes": self._materialize_rmv_node,
             "number_nodes": self._materialize_number_node,
             "math_nodes": self._materialize_math_node,
         }
         handler = dispatch.get(category)
         if handler:
             handler(row)
+        # 옛 보드 마이그레이션: Prompt/Checklist/Sticky 가 per-node "title" 로 저장한 이름을
+        # 통합 node_names 로 옮긴다(이 카테고리들은 더 이상 헤더 제목칸을 안 씀). 새 보드는
+        # 상단 node_names 가 이미 채워져 있어 여기 안 걸린다.
+        if category in ("prompt_nodes", "checklists", "sticky_notes"):
+            old_title = (row.get("title") or "").strip()
+            if old_title and node_id not in self.node_names:
+                self._set_node_name(node_id, old_title)
 
     def _materialize_chat_node(self, row):
         proxy = self.add_node(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("id"))
@@ -261,7 +264,6 @@ class MaterializationMixin:
         node = proxy.widget()
         if row.get("width") and row.get("height"):
             node.resize(int(row["width"]), int(row["height"]))
-        node.title_edit.setText(row.get("title", ""))
         node.body_edit.setPlainText(row.get("body", ""))
         if row.get("color"):
             node._set_color(row["color"])
@@ -273,7 +275,6 @@ class MaterializationMixin:
         node = proxy.widget()
         if row.get("width") and row.get("height"):
             node.resize(int(row["width"]), int(row["height"]))
-        node.title_edit.setText(row.get("title", ""))
         node.body_edit.setPlainText(row.get("body", ""))
 
         role = row.get("role", "system")
@@ -606,38 +607,6 @@ class MaterializationMixin:
         if node.output_port:
             node.output_port.port_value = node._result
 
-    def _materialize_ups_node(self, row):
-        proxy = self.add_ups(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
-        if proxy is None:
-            return
-        node = proxy.widget()
-        if row.get("width") and row.get("height"):
-            node.resize(int(row["width"]), int(row["height"]))
-        scale = row.get("scale", 2)
-        node._scale = scale
-        idx = node.scale_combo.findData(scale)
-        if idx >= 0:
-            node.scale_combo.setCurrentIndex(idx)
-        node._last_result_path = row.get("last_result_path")
-        node.ai_response = node._last_result_path
-        if node._last_result_path:
-            node.status_label.setText("Done")
-            node.status_label.setStyleSheet("color: #27ae60; font-size: 10px; border: none; background: transparent;")
-            node._update_preview()
-
-    def _materialize_rmv_node(self, row):
-        proxy = self.add_rmv(QPointF(row.get("x", 0), row.get("y", 0)), node_id=row.get("node_id"))
-        if proxy is None:
-            return
-        node = proxy.widget()
-        if row.get("width") and row.get("height"):
-            node.resize(int(row["width"]), int(row["height"]))
-        node._last_result_path = row.get("last_result_path")
-        node.ai_response = node._last_result_path
-        if node._last_result_path:
-            node.status_label.setText("Done")
-            node._update_preview(node._last_result_path)
-
     def _materialize_visible_items(self):
         if not self._lazy_mgr.has_pending():
             self._lazy_mgr._active = False
@@ -729,8 +698,7 @@ class MaterializationMixin:
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                   self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
                   self.image_card_items, self.dimension_items, self.text_items,
-                  self.group_frame_items, self.nixi_proxies, self.ups_proxies,
-                  self.rmv_proxies):
+                  self.group_frame_items, self.nixi_proxies):
             if node_id in d:
                 return d[node_id]
         return None
@@ -766,7 +734,7 @@ class MaterializationMixin:
                   self.button_proxies, self.switch_proxies, self.latch_proxies,
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                   self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.nixi_proxies):
             for proxy in d.values():
                 node = proxy.widget()
                 if node:
@@ -794,7 +762,7 @@ class MaterializationMixin:
                   self.button_proxies, self.switch_proxies, self.latch_proxies,
                   self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies,
                   self.xor_gate_proxies, self.bulb_proxies, self.checklist_proxies, self.repository_proxies,
-                  self.nixi_proxies, self.ups_proxies, self.rmv_proxies):
+                  self.nixi_proxies):
             for proxy in d.values():
                 node = proxy.widget()
                 if node and hasattr(node, 'reposition_ports'):

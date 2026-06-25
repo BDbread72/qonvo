@@ -44,6 +44,9 @@ def _unique_path(folder: Path, name: str) -> Path:
 class RepositoryNodeWidget(QWidget, BaseNode):
     """자료함 노드 — 폴더 연결 및 파일 관리"""
 
+    TITLE_NAME = "Repository"
+    TITLE_COLOR = "#e67e22"
+
     def __init__(self, node_id, on_modified=None):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
@@ -88,11 +91,7 @@ class RepositoryNodeWidget(QWidget, BaseNode):
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(12, 0, 8, 0)
 
-        title = QLabel(f"#{self.node_id} 자료함")
-        title.setStyleSheet(
-            f"color: #e67e22; font-weight: bold; font-size: 12px;"
-        )
-        header_layout.addWidget(title)
+        # 노드 이름은 공용 편집형 이름표(node_title.NodeTitleItem)가 표시.
         header_layout.addStretch()
         layout.addWidget(self.header)
 

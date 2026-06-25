@@ -89,6 +89,27 @@ default_model = "gemini-2.5-flash"
 # 라이브 채팅(커서 말풍선)을 boards/<id>/chat.log (jsonl) 에 누적 기록할지 여부.
 log = true
 
+# ── AI 실행 거버넌스 ──────────────────────────────────────────────
+# 서버가 당신의 API 키로 AI 를 대행하므로, 접속자(Member 이상)가 무엇을 얼마나
+# 돌릴 수 있는지 레벨별로 제한한다. 0 = 무제한(기본). Visitor 는 항상 AI 거부.
+# 사용량은 항상 집계되어 콘솔 'usage' / 웹 관리자(/admin) 에 표시된다.
+# 변경 후 서버를 재시작하세요.
+[ai_policy.member]
+models = ["*"]        # 허용 모델 id 목록. ["*"] = 전체. 예: ["gemini-2.5-flash"]
+allow_image = true    # 이미지 생성 모델 허용 여부(비용 큼). false 면 Member 는 이미지 생성 불가
+rate_per_min = 0      # 분당 최대 요청수 (0=무제한)
+concurrent = 0        # 동시 AI 실행 상한 (0=무제한)
+daily_tokens = 0      # 1일 토큰(in+out) 상한 (0=무제한)
+max_count = 8         # preferred 후보 동시생성 상한(요청 1건당 비용배수)
+
+[ai_policy.operator]
+models = ["*"]
+allow_image = true
+rate_per_min = 0
+concurrent = 0
+daily_tokens = 0
+max_count = 8
+
 # 로컬 계정. 비밀번호는 평문 금지 — `python -m server adduser <name>` 로 추가하면
 # users.json 에 pbkdf2 해시로 저장됩니다. 아래 [users] 는 레벨 오버라이드 용도.
 # 예) operator 계정 레벨 지정:
@@ -127,6 +148,12 @@ _DEFAULTS: Dict[str, Any] = {
         "default_model": "gemini-2.5-flash",
     },
     "chat": {"log": True},
+    "ai_policy": {
+        "member": {"models": ["*"], "allow_image": True, "rate_per_min": 0,
+                   "concurrent": 0, "daily_tokens": 0, "max_count": 8},
+        "operator": {"models": ["*"], "allow_image": True, "rate_per_min": 0,
+                     "concurrent": 0, "daily_tokens": 0, "max_count": 8},
+    },
     "users": {},
     "oauth": {
         "mattermost": {
