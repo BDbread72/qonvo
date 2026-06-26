@@ -645,6 +645,10 @@ class PeopleWindow(QDialog):
         self._fetching: set = set()
         self._cur_posts: list = []
         self._rendered_ids: list = []
+        # DM 채널 id 는 사용자쌍마다 불변 → 캐시해 매 열기마다 direct_channel 왕복 제거.
+        self._dm_channel_cache: dict = {}   # uid -> channel_id
+        # 마지막 메시지 캐시 → 재열기 시 네트워크 기다리지 않고 즉시 렌더(매터모스트식).
+        self._posts_cache: dict = {}        # channel_id -> posts
         self._mode = "contacts"
         self._cur_user: Optional[dict] = None
         self._cur_channel = ""
@@ -966,11 +970,30 @@ class PeopleWindow(QDialog):
         self._attach_btn.setEnabled(True)
         self._close_thread()        # DM 전환 시 스레드 뷰 해제
         self._rendered_ids = None   # 첫 응답은 빈([])이어도 반드시 렌더
-        self._chat.set_placeholder("불러오는 중…")
-        self._run(lambda: self._client.direct_channel(self._me_id, uid), self._on_channel)
+
+        ch = self._dm_channel_cache.get(uid)
+        if ch:
+            # 채널 id 캐시 히트 → direct_channel 왕복 생략. 캐시된 메시지 즉시 렌더하고
+            # 백그라운드로 최신만 동기화(빈 화면 대기 없음 = 매터모스트처럼 즉각).
+            self._cur_channel = ch
+            cached = self._posts_cache.get(ch)
+            if cached:
+                self._force_scroll_bottom = True
+                self._cur_posts = cached
+                self._rendered_ids = [p.get("id") for p in cached]
+                self._render()
+            else:
+                self._chat.set_placeholder("불러오는 중…")
+            self._load_posts()      # 최신 동기화(같으면 _on_posts 가 재렌더 안 함)
+        else:
+            self._chat.set_placeholder("불러오는 중…")
+            self._run(lambda: self._client.direct_channel(self._me_id, uid), self._on_channel)
 
     def _on_channel(self, channel: dict):
-        self._cur_channel = channel.get("id", ""); self._load_posts()
+        self._cur_channel = channel.get("id", "")
+        if self._cur_user and self._cur_channel:
+            self._dm_channel_cache[self._cur_user.get("id", "")] = self._cur_channel
+        self._load_posts()
 
     def _load_posts(self):
         ch = self._cur_channel
@@ -986,6 +1009,8 @@ class PeopleWindow(QDialog):
         self._force_scroll_bottom = (self._rendered_ids is None)
         self._rendered_ids = ids
         self._cur_posts = posts
+        if self._cur_channel:
+            self._posts_cache[self._cur_channel] = posts   # 재열기 즉시렌더용 캐시
         self._render()
 
     def _cb(self) -> dict:
