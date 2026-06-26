@@ -786,6 +786,19 @@ class ChatNodeWidget(QWidget, BaseNode):
         )
         status_layout.addWidget(self._status_label)
 
+        # 인라인 응답 미리보기 — 스트리밍/최종 응답을 노드 면에 바로 보여준다.
+        # (예전엔 로그창을 열어야만 보여서 '진행상황이 안 뜬다'는 문제가 있었음)
+        self._response_view = QLabel("")
+        self._response_view.setWordWrap(True)
+        self._response_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._response_view.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._response_view.setStyleSheet(
+            f"color: {Theme.TEXT_SECONDARY}; font-size: 12px; "
+            f"background: transparent; padding: 2px;"
+        )
+        self._response_view.hide()
+        status_layout.addWidget(self._response_view, stretch=1)
+
         self._run_count_label = QLabel("")
         self._run_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._run_count_label.setStyleSheet(
@@ -878,6 +891,12 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._status_label.setText(t("chat.status_done"))
             self._status_label.setStyleSheet(
                 f"color: {Theme.ACCENT_SUCCESS}; font-size: 13px; font-weight: bold;"
+            )
+        elif state == "error":
+            # 실패를 성공('완료')과 똑같이 보이지 않게 빨간 '오류' 상태로 표시.
+            self._status_label.setText("⚠ " + t("chat.status_done"))
+            self._status_label.setStyleSheet(
+                f"color: {Theme.ACCENT_DANGER}; font-size: 13px; font-weight: bold;"
             )
 
         if count > 0:
@@ -1350,6 +1369,11 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self._history:
             self._history[-1]["response"] = response
 
+        # 인라인 응답 미리보기 갱신 — 스트리밍 중에도 즉시 보이게(진행상황 표시).
+        streaming_error = is_error if is_error is not None else \
+            bool(str(response or "").lstrip().startswith(("Error:", "⚠️")))
+        self._update_inline_response(response, is_error=streaming_error)
+
         if done:
             self._running = False
             self._stop_pulse()
@@ -1364,9 +1388,34 @@ class ChatNodeWidget(QWidget, BaseNode):
                 is_error = bool(str(response or "").lstrip().startswith(("Error:", "⚠️")))
             self._record_run(elapsed, is_error, str(response) if is_error else "")
             self._set_meta_port_values(elapsed)
-            self._update_status("done")
+            self._update_status("error" if is_error else "done")
             if self._send_queue:
                 QTimer.singleShot(0, self._process_queue)
+
+    def _update_inline_response(self, text, is_error=False):
+        """노드 면의 인라인 응답 미리보기를 갱신한다(길면 말미만 표시)."""
+        view = getattr(self, "_response_view", None)
+        if view is None:
+            return
+        try:
+            s = str(text or "")
+            # 너무 길면 노드가 비대해지므로 말미 600자만(스트리밍 최신 부분이 보이게)
+            if len(s) > 600:
+                s = "…" + s[-600:]
+            if not s.strip():
+                view.hide()
+                return
+            color = Theme.ACCENT_DANGER if is_error else Theme.TEXT_SECONDARY
+            view.setStyleSheet(
+                f"color: {color}; font-size: 12px; background: transparent; padding: 2px;"
+            )
+            view.setText(s)
+            view.show()
+            # 응답이 생겼으면 'View Log' 버튼도 노출
+            if hasattr(self, "_btn_log") and self._history:
+                self._btn_log.show()
+        except Exception:
+            pass
 
     def _record_run(self, elapsed, is_error, error_msg=""):
         """실행 메트릭을 노드 상태 + 마지막 history 항목에 기록(분석용 단일 진실원)."""

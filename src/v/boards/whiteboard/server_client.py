@@ -86,6 +86,11 @@ class ServerClient(QObject):
         self._board_id = ""
         self._applying_remote = False
         self._last_seq: int = 0
+        # join 시 sync/delta 수신 전에 도착한 op 는 버퍼링했다가 sync seq 보다
+        # 큰 것만 재생한다(동시 접속 시 op-before-sync 경쟁으로 인한 발산/유실 방지).
+        self._join_synced: bool = True
+        self._op_buffer: list = []
+        self._my_ai_nodes: set = set()  # 내가 AI 요청을 낸 node_id (요청자 판별용)
         self._http_token = ""   # 첨부 HTTP 전송용 토큰 (auth_ok 에서 수신)
         self._http_base = ""    # http(s)://host:port (ws url 에서 파생)
         self._server_models: dict = {}  # 서버가 돌릴 수 있는 모델 {id: name} (auth_ok)
@@ -175,6 +180,8 @@ class ServerClient(QObject):
         if self._board_id and self._board_id != board_id:
             self._last_seq = 0
         self._board_id = board_id
+        self._join_synced = False
+        self._op_buffer = []
         self._send({
             "type": "join_board",
             "board_id": board_id,
@@ -188,6 +195,9 @@ class ServerClient(QObject):
                         files: list | None = None, system_prompt: str = "",
                         options: dict | None = None, count: int = 1):
         """서버에 AI 요청을 전송한다. count>1 이면 preferred(N개 후보) 모드."""
+        # 내가 낸 요청 노드를 기록 → ai_complete 수신 시 그래프 부수효과(자동생성/신호)는
+        # 요청자만 실행(타 멤버 중복 카드/op 폭주 방지).
+        self._my_ai_nodes.add(str(node_id))
         self._send({
             "type": "ai_request",
             "node_id": str(node_id),
@@ -340,6 +350,23 @@ class ServerClient(QObject):
         if self._ws_thread and self._ws_thread.isRunning():
             self._ws_thread.send(json.dumps(msg, ensure_ascii=False))
 
+    def _flush_join_buffer(self, sync_seq: int):
+        """join sync/delta 수신 직후, 그 전에 버퍼링한 op 중 sync_seq 보다 큰 것만 재생.
+
+        sync_seq 이하 op 은 이미 스냅샷/delta 에 반영돼 있으므로 버린다(중복 적용 방지).
+        """
+        self._join_synced = True
+        buffered, self._op_buffer = self._op_buffer, []
+        for rec in buffered:
+            seq = rec.get("seq", 0)
+            if seq and seq <= sync_seq:
+                continue  # 이미 스냅샷에 포함됨
+            if seq:
+                self._last_seq = seq
+            ops = rec.get("ops", [])
+            if ops:
+                self.remote_ops.emit(ops, rec.get("author", ""))
+
     def _on_message(self, raw: str):
         """서버 메시지를 파싱해 유형별 시그널을 발생시킨다."""
         try:
@@ -378,6 +405,7 @@ class ServerClient(QObject):
             if seq:
                 self._last_seq = seq
             self.sync_received.emit(snapshot)
+            self._flush_join_buffer(seq)
 
         elif msg_type == "delta":
             ops = msg.get("ops", [])
@@ -386,11 +414,16 @@ class ServerClient(QObject):
                 self._last_seq = seq
             if ops:
                 self.remote_ops.emit(ops, "")
+            self._flush_join_buffer(seq)
 
         elif msg_type == "op":
             ops = msg.get("ops", [])
             author = msg.get("author", "")
             seq = msg.get("seq", 0)
+            if not self._join_synced:
+                # sync/delta 수신 전 도착한 op — 버퍼링했다가 sync seq 보다 큰 것만 재생
+                self._op_buffer.append({"ops": ops, "author": author, "seq": seq})
+                return
             if seq:
                 self._last_seq = seq
             if ops:
@@ -412,10 +445,14 @@ class ServerClient(QObject):
             )
 
         elif msg_type == "ai_complete":
-            self.ai_complete.emit(
-                msg.get("node_id", ""),
-                msg.get("result", {}),
-            )
+            node_id = msg.get("node_id", "")
+            result = msg.get("result", {})
+            # 요청자 판별: 서버 requester 플래그 또는 내가 보낸 요청 기록.
+            mine = bool(msg.get("requester")) or (node_id in self._my_ai_nodes)
+            self._my_ai_nodes.discard(node_id)
+            if isinstance(result, dict):
+                result = {**result, "_requester": mine}
+            self.ai_complete.emit(node_id, result)
 
         elif msg_type == "error":
             self.error_received.emit(

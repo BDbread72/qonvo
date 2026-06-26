@@ -450,8 +450,10 @@ class QonvoServer:
         # 다른 세션의 WS ping 에 PONG 을 못 해 'ping/pong timed out' 으로 끊긴다
         # (대형 보드 join 시 특히). executor 로 빼서 루프가 계속 돌게 한다.
         board = await loop.run_in_executor(None, self.boards.get, board_id)
+        # 멤버로 먼저 등록(이후 모든 op 를 빠짐없이 받게) → sync 전송. 등록과 sync
+        # 사이/도중에 도달하는 op 는 클라가 sync 수신 전까지 버퍼링했다가 sync 의 seq
+        # 보다 큰 것만 재생한다(server_client 의 _join_synced 버퍼). 발산/유실 방지.
         self.registry.join_board(sess, board.board_id)
-
         payload = await loop.run_in_executor(None, board.snapshot_for_join, last_seq)
         await sess.send(payload)
         if self.motd:
@@ -607,27 +609,44 @@ class QonvoServer:
 
             # AI 생성 이미지를 서버 첨부 파일로 저장하고 상대경로로 doc 에 기록.
             # (base64 를 doc 에 넣으면 snapshot 비대 + 재접속 시 경로 미해석 → 파일로 영속)
-            rel_refs = self._persist_ai_images(board_id, result.get("images", []))
             try:
+                rel_refs = self._persist_ai_images(board_id, result.get("images", []))
                 self.boards.get(board_id).append_assistant_message(
                     node_id, result.get("text", ""), rel_refs
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("ai persist failed node=%s: %s", node_id, e)
 
-            # 라이브 표시는 base64 즉시 전송(다운로드 왕복 없이 바로 보이게)
+            payload = {
+                "text": result.get("text", ""),
+                "images": result.get("images", []),
+                "tokens_in": result.get("tokens_in", 0),
+                "tokens_out": result.get("tokens_out", 0),
+                "error": result.get("error"),
+            }
+            # 그래프 부수효과(다운스트림 자동생성/신호)는 요청자만 실행해야 한다 →
+            # 요청자에겐 requester 플래그 포함, 나머지 멤버에겐 표시 전용으로 보낸다.
+            await sess.send({"type": "ai_complete", "node_id": node_id,
+                             "result": payload, "requester": True})
             await self.registry.broadcast(
                 board_id,
-                {"type": "ai_complete", "node_id": node_id, "result": {
-                    "text": result.get("text", ""),
-                    "images": result.get("images", []),
-                    "tokens_in": result.get("tokens_in", 0),
-                    "tokens_out": result.get("tokens_out", 0),
-                    "error": result.get("error"),
-                }},
+                {"type": "ai_complete", "node_id": node_id, "result": payload},
+                exclude=sess,
             )
             if result.get("error"):
-                await sess.send({"type": "error", "code": "ai", "message": result["error"]})
+                await sess.send({"type": "error", "code": "ai",
+                                 "message": result["error"], "node_id": node_id})
+        except Exception as e:
+            # run_ai 이후(persist/broadcast)에서 예외가 나도 요청자의 노드가
+            # 영원히 'running' 으로 멈추지 않게 종료 신호를 반드시 보낸다.
+            logger.warning("ai handler error node=%s: %s", node_id, e)
+            try:
+                await sess.send({"type": "ai_complete", "node_id": node_id,
+                                 "result": {"text": "", "images": [],
+                                            "error": f"server error: {e}"},
+                                 "requester": True})
+            except Exception:
+                pass
         finally:
             self.policy.end(sess.username, model, tin, tout, count)
 
@@ -728,6 +747,10 @@ class QonvoServer:
         await site.start()
         logger.info("Qonvo server listening on %s:%s", self.host, self.port)
         self._autosave_task = asyncio.ensure_future(self._autosave_loop())
+        # 라우터(provider 플러그인 import)를 미리 워밍한다. 안 하면 첫 접속자가
+        # auth_ok 안에서 build_router 의 수초짜리 import 비용을 전부 떠안아 9/18초
+        # 타임아웃에 걸려 '한 번에 접속 안 됨'이 난다(재시도는 캐시 히트로 성공).
+        self._prewarm_task = asyncio.ensure_future(self._available_models())
         if self.upnp_enabled:
             await self._setup_upnp()
 

@@ -265,6 +265,13 @@ class NodeFactoryMixin:
         if not hasattr(node, 'signal_output_port') or node.signal_output_port is None:
             return
         data = getattr(node, '_pass_data', None)
+        # 서버모드: 스위치 신호도 다른 클라에 전파(휘발성). 원격 재생 중이면 가드로 차단.
+        if getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False):
+            try:
+                self._send_op("node_signal", node_id,
+                              {"data": data} if isinstance(data, (str, int, float, bool)) else {})
+            except Exception:
+                pass
         self.emit_signal(node.signal_output_port, data=data)
 
     def _on_logic_signal(self, node_id):

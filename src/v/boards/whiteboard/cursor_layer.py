@@ -352,6 +352,20 @@ class CursorLayer(QObject):
             self._scene.removeItem(c["selitem"])
             c["selitem"] = None
             c["select"] = None
+            self._invalidate()
+
+    def _invalidate(self):
+        """뷰포트 전체를 강제 리페인트한다.
+
+        view 가 BoundingRectViewportUpdate + ItemIgnoresTransformations 라서
+        커서/말풍선 아이템을 removeItem/이동해도 Qt 가 더티 사각형을 정확히 못 잡아
+        픽셀 잔상(유령)이 남는다. 제거·이동 시 뷰포트를 통째로 갱신해 무조건 지운다.
+        """
+        try:
+            if self._view is not None:
+                self._view.viewport().update()
+        except Exception:
+            pass
 
     def _remove_cursor(self, name):
         c = self._cursors.pop(name, None)
@@ -361,12 +375,14 @@ class CursorLayer(QObject):
             self._scene.removeItem(c["item"])
         if c.get("selitem") is not None:
             self._scene.removeItem(c["selitem"])
+        self._invalidate()
 
     def _remove_bubble(self, user):
         lst = self._bubbles.pop(user, None)
         if lst and self._scene is not None:
             for entry in lst:
                 self._scene.removeItem(entry["item"])
+            self._invalidate()
 
     def _tick(self):
         moving = False
@@ -380,6 +396,7 @@ class CursorLayer(QObject):
             c["item"].setPos(cur[0], cur[1])
             moving = True
         now = time.monotonic()
+        bubble_removed = False
         for user in list(self._bubbles.keys()):
             lst = self._bubbles[user]
             kept = []
@@ -400,5 +417,10 @@ class CursorLayer(QObject):
                     self._restack(user)
                 else:
                     del self._bubbles[user]
+            if removed:
+                bubble_removed = True
+        # 커서가 움직였거나(보간) 말풍선이 제거됐으면 뷰포트를 강제 갱신해 잔상 제거.
+        if moving or bubble_removed:
+            self._invalidate()
         if not moving and not self._bubbles:
             self._timer.stop()

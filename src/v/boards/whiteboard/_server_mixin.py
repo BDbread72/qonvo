@@ -81,6 +81,7 @@ class ServerMixin:
                 self._server_client.ai_complete.disconnect(self._on_ai_complete)
                 self._server_client.presence_received.disconnect(self._on_presence_cursors)
                 self._server_client.chat_received.disconnect(self._on_chat_bubble)
+                self._server_client.error_received.disconnect(self._on_ai_error)
             except Exception:
                 pass
         if getattr(self, '_periodic_sync_timer', None) is not None:
@@ -191,6 +192,14 @@ class ServerMixin:
         board_id = self._server_client.board_id if self._server_client else ""
         if board_id:
             self._board_name = board_id
+
+        # 보드 전환/재싱크 시 이전 보드의 원격 커서·말풍선을 모두 지운다
+        # (안 지우면 다른 보드로 옮겨도 옛 커서 유령이 남는다).
+        if getattr(self, '_cursor_layer', None) is not None:
+            try:
+                self._cursor_layer.clear()
+            except Exception:
+                pass
 
         # 스냅샷 prime 캐시는 비활성(일부 노드 비는 문제) — 항상 서버 full sync 로 복원.
         # 첨부(이미지)만 백그라운드로 증분 다운로드한다.
@@ -304,9 +313,15 @@ class ServerMixin:
         if app is not None:
             for node in list(getattr(app, 'nodes', {}).values()):
                 try:
-                    if (isinstance(node, ChatNodeWidget) and hasattr(node, '_render_page')
-                            and hasattr(node, '_current_page')):
-                        node._render_page(node._current_page)
+                    # 채팅 노드 이미지는 로그창에만 렌더된다. 열려 있는 로그창이 있으면
+                    # 현재 페이지를 다시 그린다(_render_page/_current_page 는 ChatNodeWidget
+                    # 이 아니라 ChatLogWindow 의 속성 — 예전 코드는 노드에서 찾아 죽은 분기였음).
+                    if not isinstance(node, ChatNodeWidget):
+                        continue
+                    win = getattr(node, '_log_window', None)
+                    if (win is not None and hasattr(win, '_render_page')
+                            and hasattr(win, '_current_page')):
+                        win._render_page(win._current_page)
                 except Exception:
                     pass
         # 이미지 카드: 아직 못 불러온 것만 로드 시도.
@@ -403,15 +418,20 @@ class ServerMixin:
             tokens_out = result.get("tokens_out", 0)
             if tokens_in or tokens_out:
                 node.set_tokens(tokens_in, tokens_out)
+            # 그래프 부수효과(다운스트림 자동생성/신호 전파)는 요청자만 실행한다.
+            # 모든 멤버가 실행하면 각자 노드/op 를 만들어 카드 중복·문서 발산이 난다.
+            # 비요청자는 결과 표시만 한다.
+            is_requester = result.get("_requester", True)
             if images:
                 node.set_image_response(text, images)
-                # 로컬 경로(_chat_workers._on_image_payload)와 동일하게 images 를 전달해야
-                # 자동 다음노드 생성/이미지카드 전파가 동작한다. (없으면 images=None 으로
-                # 들어가 _auto_create_next_node 의 `and images` 가드가 막혀 전파가 끊김)
-                self._emit_complete_signal(node, images)
+                if is_requester:
+                    # 로컬 경로(_chat_workers._on_image_payload)와 동일하게 images 를 전달해야
+                    # 자동 다음노드 생성/이미지카드 전파가 동작한다.
+                    self._emit_complete_signal(node, images)
             else:
                 node.set_response(text, done=True)
-                self._emit_complete_signal(node)
+                if is_requester:
+                    self._emit_complete_signal(node)
 
     def _on_ai_error(self, code: str, message: str, node_id: str = ""):
         """서버가 ai_complete 없이 error 만 보낸 경우(권한/쿼타/모델 비허용/router 실패)
@@ -588,6 +608,30 @@ class ServerMixin:
                 self._set_node_name(int(target), data.get("name", ""))
             except Exception:
                 pass
+        elif op_type == "node_signal":
+            self._remote_node_signal(target, data)
+
+    def _remote_node_signal(self, target: str, data: dict):
+        """원격에서 버튼/스위치가 신호를 냈을 때, 로컬에서 같은 출력 신호를 재생한다.
+
+        재생은 _applying_remote_op 가드 안에서 일어나므로 (1) 신호 op 가 다시 서버로
+        나가지 않고(에코 방지) (2) 신호가 챗 노드에 닿아도 _handle_chat_send 가 막혀
+        AI 가 중복 실행되지 않는다(요청자 1명만 실행). 로컬 엣지 그래프가 게이트·전구
+        까지 알아서 전파한다.
+        """
+        try:
+            node_id = int(target) if str(target).isdigit() else None
+            if node_id is None:
+                return
+            node = self.app.nodes.get(node_id)
+            if node is None:
+                return
+            port = getattr(node, 'signal_output_port', None)
+            if port is None:
+                return
+            self.emit_signal(port, data=data.get("data"))
+        except Exception:
+            pass
 
     def _remote_add_node(self, target: str, data: dict):
         category = data.get("_category", "nodes")

@@ -92,6 +92,12 @@ class Board:
         self.doc: Dict[str, Any] = {}
         self._oplog: List[dict] = []  # [{seq, op, author}]
         self._dirty: bool = False     # 마지막 저장 이후 변경 여부
+        # seq 로 키된 캐시 — 여러 클라가 동시에 join 할 때(정적 보드) 매번 doc 를
+        # 다시 직렬화하며 _lock 을 길게 쥐는 것을 막는다(루프 프리즈/접속실패 방지).
+        self._snap_cache_seq: int = -1
+        self._snap_cache: Optional[dict] = None
+        self._node_count_cache_seq: int = -1
+        self._node_count_cache: int = 0
         self._load()
         # 신규 보드(스냅샷 없음)는 즉시 빈 스냅샷을 기록해 list_boards 에 노출
         if not self._snapshot_path().exists():
@@ -129,13 +135,17 @@ class Board:
                       if f.is_file() and not f.name.endswith(".tmp"))
 
     def node_count(self) -> int:
-        """보드의 노드 총수(엣지/라이브러리 제외)를 doc 에서 센다."""
+        """보드의 노드 총수(엣지/라이브러리 제외)를 doc 에서 센다. seq 로 캐시."""
         with self._lock:
+            if self._node_count_cache_seq == self.seq:
+                return self._node_count_cache
             total = 0
             for cat, v in self.doc.items():
                 if cat in ("edges", "functions_library") or not isinstance(v, list):
                     continue
                 total += len(v)
+            self._node_count_cache = total
+            self._node_count_cache_seq = self.seq
             return total
 
     # ---- 영속화 ---------------------------------------------------------
@@ -246,7 +256,13 @@ class Board:
                         "seq": self.seq,
                         "ops": [r["op"] for r in newer],
                     }
-            return {"type": "sync", "seq": self.seq, "snapshot": json.loads(json.dumps(self.doc))}
+            # full sync: doc 를 detach 복사해 seq 로 캐시. 동시 join 시 첫 1회만
+            # 직렬화하고 이후엔 같은 (불변) 스냅샷을 공유한다. 캐시 객체는 self.doc 와
+            # 분리돼 있어 lock 해제 후 send 직렬화 중 apply_ops 가 doc 를 바꿔도 안전.
+            if self._snap_cache_seq != self.seq or self._snap_cache is None:
+                self._snap_cache = json.loads(json.dumps(self.doc))
+                self._snap_cache_seq = self.seq
+            return {"type": "sync", "seq": self.seq, "snapshot": self._snap_cache}
 
     def apply_ops(self, ops: List[dict], author: str) -> Tuple[int, List[dict]]:
         """op 들을 권위 문서에 적용하고 (새 seq, 실제 적용된 op 목록) 을 반환한다.
@@ -259,6 +275,12 @@ class Board:
             records = []
             applied: List[dict] = []
             for op in ops:
+                # node_signal 은 휘발성(버튼/신호 펄스) — doc/oplog 에 남기지 않고
+                # 브로드캐스트만 한다. 영속하면 재접속/oplog 재생 시 옛 신호가 다시
+                # 발화하고 oplog 도 비대해진다.
+                if op.get("op_type") == "node_signal":
+                    applied.append(op)
+                    continue
                 try:
                     self._apply_one(op)
                 except Exception as e:

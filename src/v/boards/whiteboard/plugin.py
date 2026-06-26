@@ -1007,9 +1007,14 @@ class WhiteBoardPlugin(
         new_y = src_pos.y()
 
         if images:
-            img_path = images[0] if isinstance(images[0], str) else None
+            # ⚠️ 문자열이라도 실제 파일 경로일 때만 경로로 취급한다. 서버 모드에선
+            # images[0] 이 base64 문자열이라 그대로 경로로 쓰면 빈 카드가 된다(파일 미존재)
+            # → 디코드 분기로 떨어뜨려 temp 에 써야 한다.
+            import os
+            first = images[0]
+            img_path = first if (isinstance(first, str) and os.path.exists(first)) else None
             if not img_path:
-                import base64, uuid, os
+                import base64, uuid
                 from v.board import BoardManager
                 raw = images[0] if isinstance(images[0], bytes) else None
                 if raw is None and isinstance(images[0], str):

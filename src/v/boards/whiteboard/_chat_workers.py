@@ -600,6 +600,14 @@ class ChatWorkersMixin:
         if not hasattr(button_node, 'signal_output_port') or button_node.signal_output_port is None:
             return
         button_data = getattr(button_node, 'input_data', None)
+        # 서버모드: 버튼 신호를 다른 클라에 전파(휘발성 node_signal op). 원격 재생 중이면
+        # _send_op 가 가드로 막아 에코가 안 난다.
+        if getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False):
+            try:
+                self._send_op("node_signal", node_id,
+                              {"data": button_data} if isinstance(button_data, (str, int, float, bool)) else {})
+            except Exception:
+                pass
         self.emit_signal(button_node.signal_output_port, data=button_data)
 
     def open_system_prompt_dialog(self):

@@ -41,6 +41,12 @@ class ChatSendMixin:
         if node is None:
             return
 
+        # 원격 op(신호) 재생 중에는 AI 요청을 새로 내지 않는다 — 신호가 챗 노드에
+        # 닿아도 요청은 신호를 낸 클라(요청자) 한 명만 보내고, 결과는 서버가
+        # 모든 멤버에게 브로드캐스트한다. 안 막으면 멤버 수만큼 AI 가 중복 실행된다.
+        if getattr(self, '_applying_remote_op', False):
+            return
+
         if self.server_mode:
             self._handle_chat_send_server(node_id, node, model, message, files, prompt_entries)
             return

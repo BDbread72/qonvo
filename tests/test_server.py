@@ -219,6 +219,17 @@ async def run():
             assert hist == [{"role": "user", "content": "hi there"}], hist
             ok("chat_append appends to node history")
 
+            # 12b) node_signal — 휘발성: 다른 멤버에 브로드캐스트되지만 seq/doc/oplog 불변
+            seq_before = board.seq
+            oplog_before = len(board._oplog)
+            await send_op(wa, {"op_id": "sig1", "op_type": "node_signal", "target": "100",
+                               "data": {"data": True}})
+            sigb = await recv(wb)
+            assert sigb["type"] == "op" and sigb["ops"][0]["op_type"] == "node_signal", sigb
+            assert board.seq == seq_before, (board.seq, seq_before)
+            assert len(board._oplog) == oplog_before, (len(board._oplog), oplog_before)
+            ok("node_signal broadcast-only (no seq/doc/oplog change)")
+
             # 13) ping → pong (t 그대로 echo)
             await wa.send_str(json.dumps({"type": "ping", "t": 12345}))
             pong = await recv(wa)
@@ -297,7 +308,7 @@ async def run():
     return passed
 
 
-EXPECTED = 23
+EXPECTED = 24
 
 if __name__ == "__main__":
     result = asyncio.run(run())
