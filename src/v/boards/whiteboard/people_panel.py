@@ -313,13 +313,13 @@ class _Bubble(QWidget):
     """메시지 한 개 — 답글 미리보기 + 텍스트/첨부 + 반응 + 호버 액션(반응/답글)."""
 
     def __init__(self, post: dict, who: str, mine: bool, me_id: str,
-                 root_preview: str, cb: dict):
-        super().__init__()
+                 root_preview: str, cb: dict, parent=None):
+        super().__init__(parent)   # parent 지정 → 생성 순간 top-level 창으로 안 깜빡임
         self._post = post; self._cb = cb
         pid = post.get("id", "")
         outer = QHBoxLayout(self); outer.setContentsMargins(2, 1, 2, 1); outer.setSpacing(4)
 
-        colw = QWidget(); col = QVBoxLayout(colw); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(3)
+        colw = QWidget(self); col = QVBoxLayout(colw); col.setContentsMargins(0, 0, 0, 0); col.setSpacing(3)
         bubble = QFrame()
         bg = "#2b5278" if mine else "#36393f"
         bubble.setStyleSheet(f"QFrame{{background:{bg};border-radius:12px;}}")
@@ -350,7 +350,7 @@ class _Bubble(QWidget):
         col.addWidget(bubble, 0, Qt.AlignmentFlag.AlignRight if mine else Qt.AlignmentFlag.AlignLeft)
 
         # 반응 줄
-        rwrap = QWidget(); self._react_row = QHBoxLayout(rwrap)
+        rwrap = QWidget(self); self._react_row = QHBoxLayout(rwrap)
         self._react_row.setContentsMargins(2, 0, 2, 0); self._react_row.setSpacing(3)
         reactions = (post.get("metadata") or {}).get("reactions") or []
         groups: dict = {}
@@ -369,8 +369,9 @@ class _Bubble(QWidget):
         rwrap.setVisible(bool(groups))
         col.addWidget(rwrap)
 
-        # 호버 액션(반응 추가 / 답글)
-        self._actions = QWidget()
+        # 호버 액션(반응 추가 / 답글) — 부모를 지정해야 생성 순간 독립 창으로 깜빡이지 않음
+        # (예전엔 부모 없이 만들어 대화 전환 시 작은 빈 창이 깜빡였다)
+        self._actions = QWidget(self)
         ah = QHBoxLayout(self._actions); ah.setContentsMargins(0, 0, 0, 0); ah.setSpacing(2)
         for label, tip, fn in (("🙂", "반응", lambda: cb["on_pick"](post, self._actions)),
                                ("↩", "답글", lambda: cb["on_reply"](post))):
@@ -1020,7 +1021,9 @@ class PeopleWindow(QDialog):
     def _make_bubble(self, p: dict) -> "_Bubble":
         who = self._names.get(p.get("user_id", ""), "?")
         mine = p.get("user_id") == self._me_id
-        bubble = _Bubble(p, who, mine, self._me_id, "", self._cb())
+        # _chat._inner 를 부모로 → 레이아웃에 붙기 전에도 top-level 창으로 안 깜빡임
+        bubble = _Bubble(p, who, mine, self._me_id, "", self._cb(),
+                         parent=self._chat._inner)
         for f in (p.get("metadata") or {}).get("files", []) or []:
             fid = f.get("id", "")
             if not fid:
