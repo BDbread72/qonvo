@@ -479,9 +479,15 @@ class _Bubble(QLabel):
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self._role = role
+        self._cur_error = None   # 스타일 dedupe — 같은 상태면 setStyleSheet 재호출 안 함
         self.apply_style()
 
     def apply_style(self, error: bool = False):
+        # ⚠️ setStyleSheet 은 위젯 전체 re-polish 를 유발해 비싸다. 스트리밍 중 매 청크
+        # 호출되면 느려지므로, 스타일 상태(에러 여부)가 실제로 바뀔 때만 적용한다.
+        if self._cur_error == error:
+            return
+        self._cur_error = error
         if self._role == "user":
             bg = Theme.ACCENT_PRIMARY
             fg = "white"
@@ -521,6 +527,7 @@ class _ConversationView(QScrollArea):
         self._vbox.addStretch(1)
         self.setWidget(self._container)
         self._rows = []          # [(row_widget, user_bubble|None, ai_bubble), ...]
+        self._scroll_pending = False
         self._placeholder = QLabel("메시지를 입력해 대화를 시작하세요")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setStyleSheet(
@@ -546,8 +553,17 @@ class _ConversationView(QScrollArea):
         return row, b
 
     def _scroll_to_bottom(self):
-        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
-            self.verticalScrollBar().maximum()))
+        # 청크마다 singleShot 을 쌓지 않도록 1개만 예약(이벤트 루프당 1회 스크롤).
+        if self._scroll_pending:
+            return
+        self._scroll_pending = True
+        QTimer.singleShot(0, self._do_scroll)
+
+    def _do_scroll(self):
+        self._scroll_pending = False
+        sb = self.verticalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.maximum())
 
     def begin_turn(self, user_text):
         """새 턴 추가 — 사용자 말풍선 + (스트리밍용) 빈 AI 말풍선."""

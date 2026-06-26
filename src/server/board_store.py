@@ -11,6 +11,8 @@ UUID 파일명/원자적 저장(.tmp→replace) 규칙을 따른다. (CLAUDE.md 
 """
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import os
 import re
@@ -54,6 +56,10 @@ _SAFE = re.compile(r"[^A-Za-z0-9_.\-]")
 
 # oplog 가 이 크기를 넘으면 join 시 delta 대신 full sync 를 강제
 _MAX_DELTA_OPS = 5000
+
+# full sync 스냅샷 JSON 이 이 크기(바이트)를 넘으면 gzip+base64 로 압축해 전송한다.
+# (작은 보드는 압축 오버헤드만 늘고 이득이 적어 그대로 보냄 — 테스트 보드도 비압축 경로)
+_GZIP_SYNC_THRESHOLD = 32 * 1024
 
 
 def safe_board_id(board_id: str) -> str:
@@ -256,13 +262,21 @@ class Board:
                         "seq": self.seq,
                         "ops": [r["op"] for r in newer],
                     }
-            # full sync: doc 를 detach 복사해 seq 로 캐시. 동시 join 시 첫 1회만
-            # 직렬화하고 이후엔 같은 (불변) 스냅샷을 공유한다. 캐시 객체는 self.doc 와
-            # 분리돼 있어 lock 해제 후 send 직렬화 중 apply_ops 가 doc 를 바꿔도 안전.
+            # full sync: 전송 메시지를 seq 로 캐시(동시 join 시 1회만 구성·압축).
+            # 큰 보드(대화 히스토리 등 텍스트)는 gzip+base64 로 압축해 보낸다 — 채팅은
+            # 텍스트라 5~8배 줄어 '대화 로드가 네트워크 때문에 느리다'를 크게 완화한다.
+            # 클라(server_client._on_message)가 snapshot_gz 를 풀어 복원한다.
             if self._snap_cache_seq != self.seq or self._snap_cache is None:
-                self._snap_cache = json.loads(json.dumps(self.doc))
+                doc_json = json.dumps(self.doc, ensure_ascii=False)
+                if len(doc_json) > _GZIP_SYNC_THRESHOLD:
+                    gz = base64.b64encode(
+                        gzip.compress(doc_json.encode("utf-8"), 6)).decode("ascii")
+                    self._snap_cache = {"type": "sync", "seq": self.seq, "snapshot_gz": gz}
+                else:
+                    self._snap_cache = {"type": "sync", "seq": self.seq,
+                                        "snapshot": json.loads(doc_json)}
                 self._snap_cache_seq = self.seq
-            return {"type": "sync", "seq": self.seq, "snapshot": self._snap_cache}
+            return self._snap_cache
 
     def apply_ops(self, ops: List[dict], author: str) -> Tuple[int, List[dict]]:
         """op 들을 권위 문서에 적용하고 (새 seq, 실제 적용된 op 목록) 을 반환한다.

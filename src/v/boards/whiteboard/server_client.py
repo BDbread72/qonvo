@@ -400,7 +400,18 @@ class ServerClient(QObject):
             self.auth_fail.emit(msg.get("reason", "Unknown"))
 
         elif msg_type == "sync":
-            snapshot = msg.get("snapshot", {})
+            snapshot = msg.get("snapshot")
+            if snapshot is None and msg.get("snapshot_gz"):
+                # 서버가 큰 스냅샷을 gzip+base64 로 압축해 보냄 → WS 스레드에서 푼다
+                # (메인 스레드 블로킹 회피). 채팅 등 텍스트는 5~8배 작아져 로드가 빠르다.
+                try:
+                    import gzip as _gz, base64 as _b64
+                    _data = _gz.decompress(_b64.b64decode(msg["snapshot_gz"]))
+                    snapshot = json.loads(_data.decode("utf-8"))
+                except Exception:
+                    snapshot = {}
+            if snapshot is None:
+                snapshot = {}
             seq = msg.get("seq", 0)
             if seq:
                 self._last_seq = seq
