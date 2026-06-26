@@ -545,8 +545,15 @@ class _AddPeopleDialog(QDialog):
         self._timer.timeout.connect(self._do_search)
 
     def _run(self, fn, on_done):
+        def _safe(*a):
+            # 비동기 완료 콜백 도중 위젯이 삭제됐을 수 있다(재렌더/창닫힘) →
+            # 죽은 Qt 객체 접근 RuntimeError 로 앱이 죽지 않게 방어.
+            try:
+                on_done(*a)
+            except RuntimeError:
+                pass
         job = _Call(fn, self); self._jobs.add(job)
-        job.done.connect(on_done)
+        job.done.connect(_safe)
         job.done.connect(lambda *_: self._jobs.discard(job))
         job.fail.connect(lambda *_: self._jobs.discard(job))
         job.start()
@@ -761,8 +768,14 @@ class PeopleWindow(QDialog):
 
     # ---- 워커 ----------------------------------------------------------
     def _run(self, fn, on_done, on_fail=None):
+        def _safe(*a):
+            # 위와 동일 — 콜백 중 위젯 삭제 시 죽은 객체 접근으로 앱이 죽지 않게 방어.
+            try:
+                on_done(*a)
+            except RuntimeError:
+                pass
         job = _Call(fn, self); self._jobs.add(job)
-        job.done.connect(on_done)
+        job.done.connect(_safe)
         job.fail.connect(on_fail or (lambda m: None))
         job.done.connect(lambda *_: self._jobs.discard(job))
         job.fail.connect(lambda *_: self._jobs.discard(job))
@@ -1101,11 +1114,23 @@ class PeopleWindow(QDialog):
                 return r.read()
 
         def done(data):
-            img = QImage()
-            if data and img.loadFromData(data):
-                pm = QPixmap.fromImage(img).scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
-                                                   Qt.TransformationMode.SmoothTransformation)
-                label.setPixmap(pm)
+            # 비동기 로드가 끝나기 전에 패널이 다시 그려져 label 이 삭제됐을 수 있다
+            # (재렌더/창닫힘). 죽은 QLabel 에 setPixmap → RuntimeError → 슬롯 미처리
+            # 예외로 앱이 죽던 크래시. sip 로 생존 확인 + 전체 방어.
+            try:
+                from PyQt6 import sip
+                if sip.isdeleted(label):
+                    return
+            except Exception:
+                pass
+            try:
+                img = QImage()
+                if data and img.loadFromData(data):
+                    pm = QPixmap.fromImage(img).scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                                       Qt.TransformationMode.SmoothTransformation)
+                    label.setPixmap(pm)
+            except RuntimeError:
+                pass
         self._run(work, done)
 
     def _render(self):
