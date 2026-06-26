@@ -230,6 +230,24 @@ async def run():
             assert len(board._oplog) == oplog_before, (len(board._oplog), oplog_before)
             ok("node_signal broadcast-only (no seq/doc/oplog change)")
 
+            # 12c) 크래시/오류 보고 — POST /report → reports.jsonl 적재
+            from server.config import get_server_dir
+            rpath = get_server_dir() / "reports" / "reports.jsonl"
+            if rpath.exists():
+                rpath.unlink()
+            async with cs.post(f"http://127.0.0.1:{PORT}/report", json={
+                "kind": "crash", "summary": "ZeroDivisionError: division by zero",
+                "detail": "Traceback...\n  x = 1/0", "version": "beta-test",
+                "user": "alice", "server": BOARD,
+            }) as rr:
+                assert rr.status == 200, rr.status
+                assert (await rr.json()).get("ok") is True
+            assert rpath.exists(), "reports.jsonl not written"
+            rline = json.loads(rpath.read_text(encoding="utf-8").splitlines()[-1])
+            assert rline["kind"] == "crash" and rline["user"] == "alice", rline
+            assert "recv_ts" in rline and rline["server"] == BOARD, rline
+            ok("crash report POST /report stored")
+
             # 13) ping → pong (t 그대로 echo)
             await wa.send_str(json.dumps({"type": "ping", "t": 12345}))
             pong = await recv(wa)
@@ -308,7 +326,7 @@ async def run():
     return passed
 
 
-EXPECTED = 24
+EXPECTED = 25
 
 if __name__ == "__main__":
     result = asyncio.run(run())

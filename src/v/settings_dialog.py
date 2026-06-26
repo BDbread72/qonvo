@@ -366,6 +366,17 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self._separator())
 
+        layout.addWidget(self._section_label("진단"))
+        self.crash_report_check = QCheckBox("크래시·오류 보고를 서버로 전송")
+        self.crash_report_check.setChecked(bool(get_setting("crash_report_enabled", True)))
+        self.crash_report_check.setStyleSheet(self._check_style())
+        layout.addWidget(self.crash_report_check)
+        layout.addWidget(self._hint_label(
+            "앱이 크래시하거나 처리되지 않은 오류가 나면 그 스택트레이스를\n"
+            "접속한 서버로 보내 운영자가 원인을 파악하게 돕습니다(서버 미접속 시 다음 접속 때 전송)."))
+
+        layout.addWidget(self._separator())
+
         self.dev_check = QCheckBox(t("settings.developer_mode"))
         self.dev_check.setChecked(is_developer_mode())
         self.dev_check.setStyleSheet("""
@@ -424,6 +435,15 @@ class SettingsDialog(QDialog):
             self.experimental_mode_changed.emit(new_exp)
 
         set_setting("toggle_mode", self.toggle_mode_check.isChecked())
+
+        # 크래시·오류 보고 활성여부 → 리포터에 즉시 반영
+        crash_on = self.crash_report_check.isChecked()
+        set_setting("crash_report_enabled", crash_on)
+        try:
+            from v import crash_reporter
+            crash_reporter.set_context(enabled=crash_on)
+        except Exception:
+            pass
 
         # 협업(서버 모드) 설정
         set_setting("chat_stay_open", self.chat_stay_check.isChecked())

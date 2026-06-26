@@ -49,6 +49,14 @@ def _log_exception(exc_type, exc_value, exc_tb):
     except Exception:
         # 로거 초기화 실패 등은 무시
         pass
+    try:
+        # 크래시를 로컬 큐에 적어 다음 서버 접속 때 업로드(crash_reporter)
+        from v import crash_reporter
+        crash_reporter.report("crash", f"{exc_type.__name__}: {exc_value}",
+                              "".join(tb_lines))
+        crash_reporter.note_fatal()  # 세션 마커에 표시 → 다음 실행 중복 보고 방지
+    except Exception:
+        pass
 
 
 def _thread_exception(args):
@@ -59,6 +67,14 @@ def _thread_exception(args):
     msg = f"\n[{ts}] THREAD EXCEPTION (thread={thread_name})\n{''.join(tb_lines)}"
     _fault_log.write(msg)
     _fault_log.flush()
+    try:
+        # 스레드 예외는 앱을 즉사시키진 않으므로 보고만 하고 note_fatal 은 하지 않는다
+        # (이후 하드 종료가 나면 그건 별도의 unexpected_exit 로 잡혀야 함).
+        from v import crash_reporter
+        crash_reporter.report("thread", f"{args.exc_type.__name__}: {args.exc_value}",
+                              "".join(tb_lines))
+    except Exception:
+        pass
 
 
 def _unraisable_exception(hook_args):
@@ -71,6 +87,13 @@ def _unraisable_exception(hook_args):
     msg = f"\n[{ts}] UNRAISABLE EXCEPTION (object={obj_repr})\n{''.join(tb_lines)}"
     _fault_log.write(msg)
     _fault_log.flush()
+    try:
+        from v import crash_reporter
+        crash_reporter.report("unraisable",
+                              f"{type(hook_args.exc_value).__name__}: {hook_args.exc_value}",
+                              "".join(tb_lines))
+    except Exception:
+        pass
 
 
 # 전역 예외 훅 등록
@@ -84,5 +107,30 @@ from v import ui
 from v import app
 
 if __name__ == "__main__":
-    mapp = app.App()
-    ui.run_app(mapp)
+    # 크래시 리포터: 컨텍스트 설정 + 세션 센티넬 시작.
+    # begin_session 은 '지난 세션이 정상 종료됐는지'를 마커로 확인해, 정상 종료가
+    # 아니었으면(=segfault/강제종료/전원차단 등 예외 훅 미경유 비정상 종료) 보고를
+    # 큐에 넣는다. 이후 서버 접속 시 업로드된다.
+    try:
+        from v import crash_reporter
+        from v.board import _get_display_version
+        from v.settings import get_setting
+        _ver = _get_display_version() or ""
+        crash_reporter.set_context(
+            version=_ver, enabled=get_setting("crash_report_enabled", True))
+        crash_reporter.begin_session(_ver)
+    except Exception:
+        pass
+
+    try:
+        mapp = app.App()
+        ui.run_app(mapp)
+    finally:
+        # 여기까지 정상 도달 = Qt 이벤트 루프가 정상 종료됨 → 세션을 clean 으로 표시.
+        # (segfault/강제종료면 이 finally 가 실행 안 돼 마커가 unclean 으로 남아
+        #  다음 실행에서 비정상 종료로 감지된다.)
+        try:
+            from v import crash_reporter
+            crash_reporter.end_session()
+        except Exception:
+            pass

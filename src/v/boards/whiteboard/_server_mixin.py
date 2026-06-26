@@ -93,6 +93,12 @@ class ServerMixin:
         if getattr(self, 'view', None) is not None:
             self.view._cursor_layer = None
         self._server_client = None
+        # 크래시 리포터 업로드 대상 해제(연결 끊김 → 더 못 보냄)
+        try:
+            from v import crash_reporter
+            crash_reporter.clear_target()
+        except Exception:
+            pass
 
     def report_cursor(self, scene_x: float, scene_y: float, state: str = ""):
         """뷰의 마우스 이동을 서버에 커서 위치+상태로 보고한다(서버모드일 때).
@@ -210,6 +216,21 @@ class ServerMixin:
             self._applying_remote_op = False
 
         self._start_attachment_sync(board_id)
+
+        # 크래시/오류 리포터: 이 서버를 업로드 대상으로 등록하고 그동안 쌓인
+        # 로컬 보고를 백그라운드로 올린다(이전 세션 크래시 포함).
+        try:
+            from v import crash_reporter
+            from v.settings import get_setting
+            client = self._server_client
+            if client is not None and get_setting("crash_report_enabled", True):
+                crash_reporter.set_context(
+                    user=getattr(client, "username", "") or "", server=board_id)
+                if client.http_base:
+                    crash_reporter.set_target(client.http_base, client.http_token or "")
+                    crash_reporter.flush_async()
+        except Exception:
+            pass
 
     def _start_attachment_sync(self, board_id):
         """서버 첨부를 백그라운드로 증분 다운로드(이미 받은 건 건너뜀)."""

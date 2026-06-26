@@ -16,6 +16,7 @@ run_coroutine_threadsafe 로 서버 루프에 위임한다.
   ban <user> / pardon <user> / banlist   밴 관리
   usage           오늘 AI 사용량(유저별 토큰/요청/동시) + 레벨별 한도
   plugins         로드된 모델 플러그인(모델 수·키 수)
+  reports [N]     클라가 보낸 최근 크래시/오류 보고 N건(기본 20)
   save            모든 보드 즉시 저장
   stop / quit     서버 종료
 """
@@ -125,8 +126,40 @@ class Console:
             self._cmd_usage()
         elif cmd == "plugins":
             self._cmd_plugins()
+        elif cmd == "reports":
+            self._cmd_reports(args)
         else:
             print(f"unknown command: {cmd} (try 'help')")
+
+    def _cmd_reports(self, args) -> None:
+        """클라가 보낸 최근 크래시/오류 보고를 출력한다. usage: reports [N=20]"""
+        try:
+            n = int(args[0]) if args else 20
+        except Exception:
+            n = 20
+        import json as _json
+        from .config import get_server_dir
+        path = get_server_dir() / "reports" / "reports.jsonl"
+        if not path.exists():
+            print("(no reports)")
+            return
+        try:
+            lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        except Exception as e:
+            print(f"read error: {e}")
+            return
+        recent = lines[-n:]
+        print(f"--- 최근 {len(recent)}건 / 총 {len(lines)}건 ---")
+        for l in recent:
+            try:
+                r = _json.loads(l)
+            except Exception:
+                continue
+            print(f"  [{r.get('recv_ts','')}] {r.get('kind',''):10} "
+                  f"v{r.get('version','?')} user={r.get('user') or '-'} "
+                  f"board={r.get('server') or '-'}")
+            print(f"      {r.get('summary','')}")
+        print(f"(상세 트레이스백: {path})")
 
     def _cmd_whitelist(self, args) -> None:
         sub = args[0].lower() if args else "list"

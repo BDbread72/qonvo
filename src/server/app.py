@@ -93,6 +93,7 @@ class QonvoServer:
         self._app.router.add_get("/", self._health)
         self._app.router.add_get("/ws", self.ws_handler)
         self._app.router.add_get("/boards", self._boards_meta)   # 보드 목록 + 노드수
+        self._app.router.add_post("/report", self._crash_report)  # 클라 크래시/오류 수집
         # qonvo 전용 presence — 앱 켜짐/작업중 하트비트
         self._app.router.add_post("/presence", self._presence_beat)
         self._app.router.add_get("/presence/list", self._presence_list)
@@ -177,6 +178,62 @@ class QonvoServer:
             except Exception:
                 out.append({"id": bid, "nodes": 0, "attachments": 0, "online": online})
         return web.json_response({"boards": out})
+
+    async def _crash_report(self, request: web.Request) -> web.Response:
+        """클라가 보낸 크래시/오류 보고 1건을 reports/reports.jsonl 에 적는다.
+
+        인증은 강제하지 않는다(크래시는 인증 전후 아무때나 나며, 앱이 죽는 중이라
+        부드러운 수집이 우선). 대신 ①본문 크기 제한 ②파일 회전(상한 넘으면 새 파일)
+        ③필드 화이트리스트로 남용/디스크 폭주를 막는다.
+        """
+        try:
+            raw = await request.content.read(64 * 1024)  # 최대 64KB
+        except Exception:
+            return web.json_response({"error": "read"}, status=400)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("not an object")
+        except Exception:
+            return web.json_response({"error": "bad json"}, status=400)
+
+        # 화이트리스트 + 길이 클램프(서버가 신뢰 못 하는 입력)
+        def _s(v, n):
+            return str(v or "")[:n]
+        rec = {
+            "recv_ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "remote": request.remote or "",
+            "ts": _s(data.get("ts"), 40),
+            "kind": _s(data.get("kind"), 32),
+            "summary": _s(data.get("summary"), 500),
+            "detail": _s(data.get("detail"), 16000),
+            "version": _s(data.get("version"), 64),
+            "user": _s(data.get("user"), 64),
+            "server": _s(data.get("server"), 80),
+            "platform": _s(data.get("platform"), 80),
+            "session": _s(data.get("session"), 32),
+            "app_id": _s(data.get("app_id"), 40),
+        }
+        try:
+            import os as _os
+            from .config import get_server_dir
+            rdir = get_server_dir() / "reports"
+            rdir.mkdir(parents=True, exist_ok=True)
+            path = rdir / "reports.jsonl"
+            # 회전: 8MB 넘으면 .1 로 밀고 새로 시작(1세대만 보관)
+            try:
+                if path.exists() and path.stat().st_size > 8 * 1024 * 1024:
+                    _os.replace(path, rdir / "reports.jsonl.1")
+            except Exception:
+                pass
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            logger.warning("crash report: kind=%s ver=%s user=%s sum=%s",
+                           rec["kind"], rec["version"], rec["user"], rec["summary"][:120])
+        except Exception as e:
+            logger.warning("crash report write failed: %s", e)
+            return web.json_response({"error": "store"}, status=500)
+        return web.json_response({"ok": True})
 
     # ---- qonvo presence -------------------------------------------------
     async def _resolve_merri_user(self, token: str) -> str:

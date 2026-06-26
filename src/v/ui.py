@@ -2020,6 +2020,21 @@ def run_app(app: App):
 
     window = MainWindow(app)
     window.show()
+
+    # 크래시 리포터: 주기 하트비트(비정상 종료 '대략 시각' 기록) + 정상 종료 신호.
+    # aboutToQuit 는 정상 종료 경로에서만 발생 → 마커가 clean 으로 바뀐다.
+    # (segfault/강제종료면 발생 안 함 → 마커 unclean → 다음 실행에서 비정상 종료 감지)
+    try:
+        from v import crash_reporter
+        from PyQt6.QtCore import QTimer as _HBTimer
+        _hb_timer = _HBTimer(qapp)
+        _hb_timer.setInterval(20000)  # 20초마다 생존 갱신
+        _hb_timer.timeout.connect(crash_reporter.heartbeat)
+        _hb_timer.start()
+        qapp.aboutToQuit.connect(crash_reporter.end_session)
+    except Exception:
+        pass
+
     sys.exit(qapp.exec())
 
 
