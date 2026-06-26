@@ -18,7 +18,8 @@ import uuid
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QScrollArea, QFrame, QApplication, QSpinBox, QMenu,
+    QScrollArea, QFrame, QApplication, QSpinBox, QMenu, QLineEdit,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPainterPath
@@ -469,6 +470,149 @@ class ChatLogWindow(QWidget):
             pass
 
 
+class _Bubble(QLabel):
+    """말풍선 1개 — 사용자(오른쪽 강조)/AI(왼쪽). 단어 줄바꿈 + 선택 가능."""
+
+    def __init__(self, role: str):
+        super().__init__()
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        self._role = role
+        self.apply_style()
+
+    def apply_style(self, error: bool = False):
+        if self._role == "user":
+            bg = Theme.ACCENT_PRIMARY
+            fg = "white"
+        elif error:
+            bg = "#3a1e1e"
+            fg = Theme.ACCENT_DANGER
+        else:
+            bg = Theme.BG_INPUT
+            fg = Theme.TEXT_PRIMARY
+        self.setStyleSheet(
+            f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 10px; "
+            f"padding: 7px 10px; font-size: 12px; }}"
+        )
+
+
+class _ConversationView(QScrollArea):
+    """노드 면에 들어가는 채팅 트랜스크립트 — 전형적인 메신저식 말풍선 흐름.
+
+    핵심: 스트리밍 청크마다 마지막 AI 말풍선의 텍스트만 setText 로 갱신한다(전체 재생성
+    금지 = 깜빡임 없음). begin_turn 으로 턴을 추가하고, set_stream 으로 마지막 AI 응답을
+    갱신한다. 로드 시에만 set_history 로 1회 전체 구성한다.
+    """
+
+    _MAX_TURNS = 30   # 노드 면엔 최근 N턴만(나머지는 로그창에서)
+
+    def __init__(self):
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._container = QWidget()
+        self._container.setStyleSheet("background: transparent;")
+        self._vbox = QVBoxLayout(self._container)
+        self._vbox.setContentsMargins(8, 8, 8, 8)
+        self._vbox.setSpacing(6)
+        self._vbox.addStretch(1)
+        self.setWidget(self._container)
+        self._rows = []          # [(row_widget, user_bubble|None, ai_bubble), ...]
+        self._placeholder = QLabel("메시지를 입력해 대화를 시작하세요")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setStyleSheet(
+            f"color: {Theme.TEXT_DISABLED}; font-size: 11px; background: transparent;")
+        self._vbox.insertWidget(0, self._placeholder)
+
+    def _new_bubble_row(self, role, text):
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        b = _Bubble(role)
+        b.setText(text)
+        b.setMaximumWidth(10_000)
+        if role == "user":
+            h.addStretch(1)
+            h.addWidget(b, 0)
+        else:
+            h.addWidget(b, 0)
+            h.addStretch(1)
+        # 말풍선 폭은 컨테이너의 ~85% 까지(긴 글은 줄바꿈)
+        b.setMaximumWidth(max(120, int(self.width() * 0.82)))
+        return row, b
+
+    def _scroll_to_bottom(self):
+        QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(
+            self.verticalScrollBar().maximum()))
+
+    def begin_turn(self, user_text):
+        """새 턴 추가 — 사용자 말풍선 + (스트리밍용) 빈 AI 말풍선."""
+        if self._placeholder is not None:
+            self._placeholder.hide()
+        insert_at = self._vbox.count() - 1  # stretch 앞
+        urow = ubub = None
+        if user_text:
+            urow, ubub = self._new_bubble_row("user", user_text)
+            self._vbox.insertWidget(insert_at, urow)
+            insert_at += 1
+        arow, abub = self._new_bubble_row("ai", "")
+        abub.setText("●")
+        abub.apply_style()
+        self._vbox.insertWidget(insert_at, arow)
+        self._rows.append((urow, ubub, arow, abub))
+        self._trim()
+        self._scroll_to_bottom()
+
+    def set_stream(self, text, is_error=False):
+        """마지막 AI 말풍선 텍스트만 갱신(재생성 X). 활성 턴이 없으면 하나 만든다."""
+        if not self._rows:
+            self.begin_turn("")
+        _, _, _, abub = self._rows[-1]
+        abub.apply_style(error=is_error)
+        abub.setText(text if (text and text.strip()) else "●")
+        self._scroll_to_bottom()
+
+    def set_history(self, history):
+        """로드/복원 시 1회 전체 구성(최근 N턴)."""
+        for r in self._rows:
+            for w in (r[0], r[2]):
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+        self._rows = []
+        recent = list(history or [])[-self._MAX_TURNS:]
+        for entry in recent:
+            user = entry.get("user", "")
+            resp = entry.get("response", "")
+            err = bool(str(resp or "").lstrip().startswith(("Error:", "⚠️", "⚠")))
+            self.begin_turn(user)
+            if resp:
+                self.set_stream(resp, is_error=err)
+        if not recent and self._placeholder is not None:
+            self._placeholder.show()
+
+    def _trim(self):
+        while len(self._rows) > self._MAX_TURNS:
+            urow, ubub, arow, abub = self._rows.pop(0)
+            for w in (urow, arow):
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        # 폭 변하면 말풍선 최대폭 재계산(줄바꿈 갱신)
+        mw = max(120, int(self.width() * 0.82))
+        for _, ubub, _, abub in self._rows:
+            if ubub is not None:
+                ubub.setMaximumWidth(mw)
+            abub.setMaximumWidth(mw)
+
+
 class ChatNodeWidget(QWidget, BaseNode):
     """Chat node with model selection and streaming response."""
 
@@ -529,8 +673,8 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._archive_path = None
         self._archived_count = 0
 
-        self.setMinimumSize(280, 200)
-        self.resize(280, 200)
+        self.setMinimumSize(300, 280)
+        self.resize(320, 400)   # 채팅창처럼 세로로 넉넉하게(대화 트랜스크립트 공간)
         self.setStyleSheet(
             f"""
             ChatNodeWidget {{
@@ -784,20 +928,14 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._status_label.setStyleSheet(
             f"color: {Theme.TEXT_DISABLED}; font-size: 13px; font-weight: bold;"
         )
+        self._status_label.hide()   # 상태는 작은 캡션으로만(대화창이 주). 펄스 대신 typing dots.
         status_layout.addWidget(self._status_label)
 
-        # 인라인 응답 미리보기 — 스트리밍/최종 응답을 노드 면에 바로 보여준다.
-        # (예전엔 로그창을 열어야만 보여서 '진행상황이 안 뜬다'는 문제가 있었음)
-        self._response_view = QLabel("")
-        self._response_view.setWordWrap(True)
-        self._response_view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._response_view.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self._response_view.setStyleSheet(
-            f"color: {Theme.TEXT_SECONDARY}; font-size: 12px; "
-            f"background: transparent; padding: 2px;"
-        )
-        self._response_view.hide()
-        status_layout.addWidget(self._response_view, stretch=1)
+        # 인라인 대화 트랜스크립트 — 전형적인 채팅 서비스처럼 말풍선 흐름으로 보여준다.
+        # 스트리밍은 마지막 AI 말풍선만 갱신(전체 재생성 X = 깜빡임 없음).
+        self._conv = _ConversationView()
+        status_layout.addWidget(self._conv, stretch=1)
+        status_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self._run_count_label = QLabel("")
         self._run_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -839,22 +977,54 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._btn_pref_view.hide()
         status_layout.addWidget(self._btn_pref_view, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        layout.addWidget(self._status_area)
+        layout.addWidget(self._status_area, stretch=1)
 
-        # compose button (always visible, disabled only while running)
-        self.btn_input = QPushButton(t("button.compose"))
-        self.btn_input.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {Theme.ACCENT_PRIMARY}; color: white; border: none; padding: 10px;
-                font-weight: bold; border-bottom-left-radius: 9px; border-bottom-right-radius: 9px;
-            }}
+        # 인라인 작성줄 — 전형적인 채팅창처럼 노드 하단에 입력칸 + 보내기.
+        composer = QFrame()
+        composer.setStyleSheet(
+            f"QFrame {{ background-color: {Theme.BG_INPUT}; "
+            f"border-bottom-left-radius: 9px; border-bottom-right-radius: 9px; }}")
+        crow = QHBoxLayout(composer)
+        crow.setContentsMargins(8, 6, 8, 6)
+        crow.setSpacing(6)
+
+        # 멀티라인/첨부가 필요할 때 여는 확장 버튼(기존 모달 재사용)
+        self.btn_expand = QPushButton("＋")
+        self.btn_expand.setFixedSize(28, 28)
+        self.btn_expand.setToolTip("자세히 작성 / 파일 첨부")
+        self.btn_expand.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; color: {Theme.TEXT_TERTIARY};
+                font-size: 16px; border-radius: 4px; }}
+            QPushButton:hover {{ background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_PRIMARY}; }}
+        """)
+        self.btn_expand.clicked.connect(self._open_input)
+        crow.addWidget(self.btn_expand)
+
+        self.composer_input = QLineEdit()
+        self.composer_input.setPlaceholderText("메시지 입력…  (Enter 전송)")
+        self.composer_input.setStyleSheet(f"""
+            QLineEdit {{ background-color: {Theme.BG_TERTIARY}; color: {Theme.TEXT_PRIMARY};
+                border: 1px solid {Theme.NODE_BORDER}; border-radius: 14px; padding: 6px 12px;
+                font-size: 12px; }}
+            QLineEdit:focus {{ border-color: {Theme.ACCENT_PRIMARY}; }}
+        """)
+        self.composer_input.returnPressed.connect(self._on_composer_submit)
+        crow.addWidget(self.composer_input, 1)
+
+        # 보내기/중지 버튼(실행 중엔 ■ 로 바뀌어 취소)
+        self.btn_input = QPushButton("➤")
+        self.btn_input.setFixedSize(32, 32)
+        self.btn_input.setStyleSheet(f"""
+            QPushButton {{ background-color: {Theme.ACCENT_PRIMARY}; color: white; border: none;
+                border-radius: 16px; font-size: 14px; font-weight: bold; }}
             QPushButton:hover {{ background-color: {Theme.ACCENT_HOVER}; }}
             QPushButton:disabled {{ background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_DISABLED}; }}
-            """
-        )
-        self.btn_input.clicked.connect(self._open_input)
-        layout.addWidget(self.btn_input)
+        """)
+        self.btn_input.setToolTip(t("button.compose"))
+        self.btn_input.clicked.connect(self._on_send_button)
+        crow.addWidget(self.btn_input)
+
+        layout.addWidget(composer)
 
         self.tokens_label = QLabel("")
         self.tokens_label.setStyleSheet(f"color: {Theme.TEXT_DISABLED}; font-size: 10px; padding: 2px 10px;")
@@ -867,12 +1037,10 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.resize_handle.raise_()
 
         self._pulse_timer = QTimer()
-        self._pulse_timer.setInterval(30)
+        self._pulse_timer.setInterval(350)   # 타이핑 점 애니메이션(저빈도 — 깜빡임/부하 없음)
         self._pulse_timer.timeout.connect(self._pulse_tick)
-        self._pulse_phase = 0.0
         self._pulse_active = False
-        self._pulse_bg_color = None
-        self._pulse_border_color = None
+        self._typing_phase = 0
 
     def _update_status(self, state):
         """Update the status indicator: 'idle', 'running', or 'done'."""
@@ -1223,6 +1391,24 @@ class ChatNodeWidget(QWidget, BaseNode):
         dialog.activateWindow()
         dialog.exec()
 
+    def _on_composer_submit(self):
+        """인라인 작성줄에서 Enter — 텍스트 전송."""
+        text = self.composer_input.text().strip()
+        if not text:
+            return
+        self.composer_input.clear()
+        self._send(text, [])
+
+    def _on_send_button(self):
+        """보내기 버튼 — 실행 중이면 중지, 입력칸에 글이 있으면 전송, 없으면 모달."""
+        if self._running:
+            self._request_cancel()
+            return
+        if self.composer_input.text().strip():
+            self._on_composer_submit()
+        else:
+            self._open_input()
+
     def _request_cancel(self):
         self._send_queue.clear()
         if self.on_cancel:
@@ -1309,6 +1495,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             "prompt_entries": list(prompt_entries),
         })
         self._current_streaming = ""
+        self._conv.begin_turn(msg)   # 대화창에 사용자 말풍선 + 빈 AI 말풍선
 
         self._update_status("running")
         self.btn_input.setText("■")
@@ -1346,6 +1533,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             "prompt_entries": entry.get("prompt_entries", []),
         })
         self._current_streaming = ""
+        self._conv.begin_turn(entry["msg"])
 
         self._update_status("running")
         self.btn_input.setText("■")
@@ -1377,7 +1565,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         if done:
             self._running = False
             self._stop_pulse()
-            self.btn_input.setText(t("button.compose"))
+            self.btn_input.setText("➤")
             self.btn_input.setEnabled(True)
             self.model_combo.setEnabled(True)
             if self._history and (self.tokens_in or self.tokens_out):
@@ -1393,25 +1581,12 @@ class ChatNodeWidget(QWidget, BaseNode):
                 QTimer.singleShot(0, self._process_queue)
 
     def _update_inline_response(self, text, is_error=False):
-        """노드 면의 인라인 응답 미리보기를 갱신한다(길면 말미만 표시)."""
-        view = getattr(self, "_response_view", None)
-        if view is None:
+        """대화창의 마지막 AI 말풍선을 갱신한다(스트리밍 = 재생성 없이 텍스트만)."""
+        conv = getattr(self, "_conv", None)
+        if conv is None:
             return
         try:
-            s = str(text or "")
-            # 너무 길면 노드가 비대해지므로 말미 600자만(스트리밍 최신 부분이 보이게)
-            if len(s) > 600:
-                s = "…" + s[-600:]
-            if not s.strip():
-                view.hide()
-                return
-            color = Theme.ACCENT_DANGER if is_error else Theme.TEXT_SECONDARY
-            view.setStyleSheet(
-                f"color: {color}; font-size: 12px; background: transparent; padding: 2px;"
-            )
-            view.setText(s)
-            view.show()
-            # 응답이 생겼으면 'View Log' 버튼도 노출
+            conv.set_stream(str(text or ""), is_error=is_error)
             if hasattr(self, "_btn_log") and self._history:
                 self._btn_log.show()
         except Exception:
@@ -1590,54 +1765,32 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.on_modified()
 
     def _start_pulse(self):
-        self._pulse_phase = 0.0
+        # 깜빡임 원인이던 '노드 전체 배경 33fps 리페인트 + 스타일시트 스왑'을 제거.
+        # 대신 첫 청크 도착 전까지 마지막 AI 말풍선에 타이핑 점(●●●)만 부드럽게 돌린다.
         self._pulse_active = True
-        self.setStyleSheet("")
+        self._typing_phase = 0
         self._pulse_timer.start()
 
     def _stop_pulse(self):
         self._pulse_timer.stop()
         self._pulse_active = False
-        self._pulse_bg_color = None
-        self._pulse_border_color = None
-        self.setStyleSheet(
-            f"""
-            ChatNodeWidget {{
-                background-color: {Theme.BG_TERTIARY};
-                border: 3px solid {Theme.NODE_BORDER};
-                border-radius: 12px;
-            }}
-            """
-        )
 
     def _pulse_tick(self):
-        from v.constants import PULSE_PHASE_INCREMENT
-        self._pulse_phase += PULSE_PHASE_INCREMENT
-        v = (math.sin(self._pulse_phase) + 1) / 2
-
-        bg_start_r, bg_start_g, bg_start_b = Theme.PULSE_START
-        border_end_r, border_end_g, border_end_b = Theme.PULSE_END
-
-        br = int(90 + v * (border_end_r - 90))
-        bg = int(106 + v * (border_end_g - 106))
-        bb = int(122 + v * (border_end_b - 122))
-        bgb = int(bg_start_b + v * (46 - bg_start_b))
-        self._pulse_bg_color = QColor(bg_start_r, bg_start_g, bgb)
-        self._pulse_border_color = QColor(br, bg, bb)
-        self.update()
+        if not self._pulse_active:
+            return
+        # 실제 응답이 아직 안 들어왔을 때만 '생성 중' 점 애니메이션(전체 리페인트 없음).
+        if self._current_streaming and self._current_streaming.strip():
+            return
+        self._typing_phase = (self._typing_phase + 1) % 3
+        dots = "●" + " ●" * self._typing_phase
+        try:
+            self._conv.set_stream(dots)
+        except Exception:
+            pass
 
     def paintEvent(self, event):
-        if self._pulse_active and self._pulse_bg_color:
-            p = QPainter(self)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            path = QPainterPath()
-            path.addRoundedRect(1.5, 1.5, self.width() - 3, self.height() - 3, 12, 12)
-            p.fillPath(path, self._pulse_bg_color)
-            p.setPen(QPen(self._pulse_border_color, 3))
-            p.drawPath(path)
-            p.end()
-        else:
-            super().paintEvent(event)
+        # 펄스 오버레이 제거 — 스타일시트(둥근 배경/테두리)만으로 그린다(깜빡임 없음).
+        super().paintEvent(event)
 
     def pack_history(self, keep_recent=20):
         if len(self._history) <= keep_recent:
@@ -1845,6 +1998,12 @@ class ChatNodeWidget(QWidget, BaseNode):
                     "tokens_out": row.get("tokens_out", 0),
                     "model": row.get("model", ""),
                 }]
+            # 대화창을 로드된 히스토리로 1회 재구성(이후 스트리밍은 증분).
+            if getattr(self, "_conv", None) is not None:
+                try:
+                    self._conv.set_history(self._history)
+                except Exception:
+                    pass
         if "archive_path" in row:
             self._archive_path = row.get("archive_path")
             self._archived_count = row.get("archived_count", 0)
