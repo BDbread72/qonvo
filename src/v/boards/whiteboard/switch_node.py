@@ -157,3 +157,12 @@ class SwitchNodeWidget(QWidget, BaseNode):
         widget._apply_style()
         widget._apply_toggle_style()
         return widget
+
+    def apply_sync_data(self, data):
+        """원격 토글 상태를 제자리 적용(파괴-재생성 금지). toggle_btn 은 clicked 연결이라
+        setChecked 가 _on_toggle 을 다시 부르지 않는다(에코 없음)."""
+        self.is_on = data.get("is_on", True)
+        self.toggle_btn.setChecked(self.is_on)
+        self.toggle_btn.setText("ON" if self.is_on else "OFF")
+        self._apply_style()
+        self._apply_toggle_style()

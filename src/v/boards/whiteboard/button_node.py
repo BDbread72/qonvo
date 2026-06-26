@@ -132,3 +132,16 @@ class ButtonNodeWidget(QWidget, BaseNode):
         widget._label = label
         widget.title_label.setText(label)
         return widget
+
+    def apply_sync_data(self, data):
+        """원격 prop-sync 를 제자리 적용 — 표시만 갱신하고 신호는 재발화하지 않는다.
+
+        버튼 눌림(펄스)은 node_signal 레벨로 따로 전파되므로, click_count 변화로
+        여기서 신호를 다시 쏘면 안 된다(이중 발화 방지). 라벨만 동기화한다.
+        """
+        self.click_count = data.get("click_count", self.click_count)
+        self.input_data = data.get("input_data")
+        label = data.get("label")
+        if label is not None and label != self._label:
+            self._label = label
+            self.title_label.setText(label)

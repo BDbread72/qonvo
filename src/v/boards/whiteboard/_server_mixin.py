@@ -633,12 +633,13 @@ class ServerMixin:
             self._remote_node_signal(target, data)
 
     def _remote_node_signal(self, target: str, data: dict):
-        """원격에서 버튼/스위치가 신호를 냈을 때, 로컬에서 같은 출력 신호를 재생한다.
+        """원격에서 어떤 노드의 출력 포트 레벨이 바뀌었을 때, 로컬에서 같은 레벨을 적용한다.
 
-        재생은 _applying_remote_op 가드 안에서 일어나므로 (1) 신호 op 가 다시 서버로
-        나가지 않고(에코 방지) (2) 신호가 챗 노드에 닿아도 _handle_chat_send 가 막혀
-        AI 가 중복 실행되지 않는다(요청자 1명만 실행). 로컬 엣지 그래프가 게이트·전구
-        까지 알아서 전파한다.
+        '이벤트(펄스)'가 아니라 '레벨'을 적용하므로 멱등이다 — 유실·재정렬·중복에도
+        최종 상태가 수렴한다(같은 레벨이면 set_port_state 가 no-op). _applying_remote_op
+        가드 안이라 (1) 다시 서버로 안 나가고(에코 방지) (2) 신호가 챗 노드에 닿아도
+        _handle_chat_send 가 막혀 AI 중복 실행이 없다. 로컬 엣지 그래프가 게이트·전구까지
+        멱등 레벨로 전파한다.
         """
         try:
             node_id = int(target) if str(target).isdigit() else None
@@ -650,7 +651,8 @@ class ServerMixin:
             port = getattr(node, 'signal_output_port', None)
             if port is None:
                 return
-            self.emit_signal(port, data=data.get("data"))
+            powered = bool(data.get("powered", False))
+            self.set_port_state(port, powered, data.get("data"))
         except Exception:
             pass
 

@@ -769,8 +769,32 @@ class WhiteBoardPlugin(
         self._prop_depth += 1
         try:
             self._set_port_state_inner(source_port, powered, data)
+            # 서버모드: 이 출력 포트의 '레벨' 변화를 다른 클라에 전파한다(멱등).
+            # 이벤트(펄스)가 아니라 레벨을 보내므로 유실·재정렬에도 최종 상태가 수렴한다
+            # — 원격은 같은 레벨을 set_port_state 로 적용(또 멱등). 원격 적용 중이면 가드.
+            if getattr(self, 'server_mode', False) and not getattr(self, '_applying_remote_op', False):
+                self._send_signal_level(source_port, powered, data)
         finally:
             self._prop_depth -= 1
+
+    def _send_signal_level(self, source_port, powered, data=None):
+        """출력 포트 레벨 변화를 node_signal op(레벨)로 전송한다.
+
+        포트를 소유한 노드 id 로 키한다. 원격은 그 노드의 signal_output_port 에 같은
+        레벨을 적용한다(신호 노드의 불리언 출력 = signal_output_port). 멱등이라 안전.
+        """
+        try:
+            proxy = getattr(source_port, 'parent_proxy', None)
+            node = proxy.widget() if (proxy is not None and hasattr(proxy, 'widget')) else None
+            nid = getattr(node, 'node_id', None)
+            if nid is None:
+                return
+            payload = {"powered": bool(powered)}
+            if isinstance(data, (str, int, float, bool)):
+                payload["data"] = data
+            self._send_op("node_signal", nid, payload)
+        except Exception:
+            pass
 
     def _set_port_state_inner(self, source_port, powered, data):
         source_port.set_powered(powered)

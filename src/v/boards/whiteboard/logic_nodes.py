@@ -172,6 +172,20 @@ class LatchNodeWidget(_LogicNodeBase):
         w._output_on = w._latched
         return w
 
+    def apply_sync_data(self, data):
+        """원격 상태를 제자리 적용(파괴-재생성 금지) + 출력 레벨을 doc 상태로 재구동.
+
+        _output_on=None 으로 _set_output 의 가드를 무력화해 강제 재구동한다 — 출력
+        포트가 원격 레벨로 직접 구동돼 위젯의 _output_on 추적과 drift 했을 수 있으므로,
+        doc 상태를 권위로 삼아 무조건 포트에 반영한다(set_port_state 자체가 포트
+        레벨 기준 멱등이라 다운스트림은 실제 변할 때만 전파됨 = 수렴).
+        """
+        self._latched = data.get("latched", False)
+        self._data = data.get("data")
+        self._update_visual()
+        self._output_on = None
+        self._set_output(self._latched, self._data)
+
 
 class AndGateWidget(_LogicNodeBase):
     """A와 B가 모두 ON일 때 출력 ON (상태 기반)."""
@@ -235,6 +249,14 @@ class AndGateWidget(_LogicNodeBase):
         w.status_label.setText(f"{a} & {b}")
         return w
 
+    def apply_sync_data(self, data):
+        self._a_on = data.get("a_on", False)
+        self._b_on = data.get("b_on", False)
+        self._a_data = data.get("a_data")
+        self._b_data = data.get("b_data")
+        self._output_on = None   # 가드 무력화 → drift 한 포트도 강제 재구동(수렴)
+        self._evaluate()   # 라벨 재계산 + _set_output(멱등 레벨 재구동)
+
 
 class OrGateWidget(_LogicNodeBase):
     """A 또는 B 중 하나라도 ON이면 출력 ON (상태 기반)."""
@@ -297,6 +319,14 @@ class OrGateWidget(_LogicNodeBase):
         w.status_label.setText(f"{a} | {b}")
         return w
 
+    def apply_sync_data(self, data):
+        self._a_on = data.get("a_on", False)
+        self._b_on = data.get("b_on", False)
+        self._a_data = data.get("a_data")
+        self._b_data = data.get("b_data")
+        self._output_on = None   # 가드 무력화 → drift 한 포트도 강제 재구동(수렴)
+        self._evaluate()
+
 
 class NotGateWidget(_LogicNodeBase):
     """입력 반전: ON → OFF, OFF → ON."""
@@ -342,6 +372,13 @@ class NotGateWidget(_LogicNodeBase):
         w._output_on = not w._in_on
         w.status_label.setText("ON" if w._output_on else "OFF")
         return w
+
+    def apply_sync_data(self, data):
+        self._in_on = data.get("in_on", False)
+        out = not self._in_on
+        self.status_label.setText("ON" if out else "OFF")
+        self._output_on = None   # 가드 무력화 → drift 한 포트도 강제 재구동(수렴)
+        self._set_output(out, None)
 
 
 class XorGateWidget(_LogicNodeBase):
@@ -405,6 +442,14 @@ class XorGateWidget(_LogicNodeBase):
         w.status_label.setText(f"{a} ^ {b}")
         return w
 
+    def apply_sync_data(self, data):
+        self._a_on = data.get("a_on", False)
+        self._b_on = data.get("b_on", False)
+        self._a_data = data.get("a_data")
+        self._b_data = data.get("b_data")
+        self._output_on = None   # 가드 무력화 → drift 한 포트도 강제 재구동(수렴)
+        self._evaluate()
+
 
 class BulbNodeWidget(_LogicNodeBase):
 
@@ -460,3 +505,9 @@ class BulbNodeWidget(_LogicNodeBase):
         w._pass_powered = w._lit
         w._update_visual()
         return w
+
+    def apply_sync_data(self, data):
+        self._lit = data.get("lit", False)
+        self._update_visual()
+        self._output_on = None   # 가드 무력화 → drift 한 포트도 강제 재구동(수렴)
+        self._set_output(self._lit, None)
