@@ -59,6 +59,13 @@ function parseNotes(body) {
   return out.slice(0, 12)
 }
 
+// 버전 정렬용 키 — 'beta-1.4.10' → 1*1e6 + 4*1e3 + 10. GitHub /releases 의 응답
+// 순서가 항상 최신순은 아니어서(생성 시각과 무관하게 섞임) 사이트가 직접 정렬한다.
+function versionKey(v) {
+  const m = String(v || '').match(/(\d+)\.(\d+)\.(\d+)/)
+  return m ? Number(m[1]) * 1e6 + Number(m[2]) * 1e3 + Number(m[3]) : 0
+}
+
 function mapRelease(r) {
   return {
     version: r.tag_name || r.name,
@@ -325,7 +332,7 @@ function ReleaseItem({ r, i, latest = false }) {
 function useReleases() {
   const [releases, setReleases] = useState(DEFAULT_RELEASES)
   useEffect(() => {
-    const KEY = 'qonvo_releases_v1'
+    const KEY = 'qonvo_releases_v2'   // v2: 버전 정렬 적용 — 옛 캐시(미정렬) 무효화
     try {
       const c = JSON.parse(localStorage.getItem(KEY) || 'null')
       if (c?.data?.length) setReleases(c.data)
@@ -337,6 +344,7 @@ function useReleases() {
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then((arr) => {
         const data = arr.filter((r) => !r.draft).map(mapRelease)
+          .sort((a, b) => versionKey(b.version) - versionKey(a.version))
         if (data.length) {
           setReleases(data)
           try { localStorage.setItem(KEY, JSON.stringify({ ts: Date.now(), data })) } catch {}
