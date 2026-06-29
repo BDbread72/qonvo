@@ -91,6 +91,17 @@ def _git(*args: str) -> str:
         return ""
 
 
+def _blob_at(ref: str, rel: str) -> bytes | None:
+    """git 에 저장된(= GitHub raw 가 서빙하는) 바이트. 워킹카피 CRLF 와 무관하게
+    raw 와 동일한 LF 콘텐츠를 돌려준다 → sha256 이 다운로드와 일치하도록."""
+    try:
+        return subprocess.check_output(
+            ["git", "show", f"{ref}:{rel}"], cwd=str(ROOT), stderr=subprocess.DEVNULL
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 def _file_ref(rel: str, override: str | None) -> tuple[str, bool]:
     """다운로드 URL 에 쓸 git ref 와 '깨끗함(커밋과 일치)' 여부."""
     if override:
@@ -124,9 +135,12 @@ def main() -> int:
             continue
 
         rel = f"plugins/{py.name}"
-        data = py.read_bytes()
-        sha256 = hashlib.sha256(data).hexdigest()
         ref, clean = _file_ref(rel, args.ref)
+        # sha256/size 는 raw 가 서빙하는 git blob 기준(워킹카피 CRLF 무관). git 불가 시 워킹카피 폴백.
+        data = _blob_at(ref, rel)
+        if data is None:
+            data = py.read_bytes()
+        sha256 = hashlib.sha256(data).hexdigest()
         if not clean and not args.ref:
             warned_dirty = True
             print(f"  ! {py.name}: 미커밋 변경 — URL 이 {ref[:8]} 에 고정되지만 내용과 다를 수 있음")
