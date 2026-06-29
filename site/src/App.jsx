@@ -355,9 +355,37 @@ function useReleases() {
   return releases
 }
 
+// 플러그인 카탈로그 — registry.json(플러그인 .py 의 클래스 메타를 미러)에서 가져온다.
+// 플러그인이 사는 작업 브랜치의 raw 를 읽으며, localStorage 10분 캐시.
+const REGISTRY_URL = `https://raw.githubusercontent.com/${GITHUB_REPO}/1.1/registry.json`
+
+function usePlugins() {
+  const [plugins, setPlugins] = useState(null) // null = 로딩, [] = 없음/실패
+  useEffect(() => {
+    const KEY = 'qonvo_plugins_v1'
+    try {
+      const c = JSON.parse(localStorage.getItem(KEY) || 'null')
+      if (c?.data) setPlugins(c.data)
+      if (c?.ts && Date.now() - c.ts < 600000 && c?.data) return
+    } catch {}
+    fetch(REGISTRY_URL, { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((reg) => {
+        const data = Array.isArray(reg?.plugins) ? reg.plugins : []
+        setPlugins(data)
+        try { localStorage.setItem(KEY, JSON.stringify({ ts: Date.now(), data })) } catch {}
+      })
+      .catch(() => setPlugins((p) => p ?? []))
+  }, [])
+  return plugins
+}
+
 // 현재 해시가 가리키는 라우트. 정적 서빙에서도 동작하도록 해시 기반.
 function getRoute() {
-  return (typeof location !== 'undefined' && location.hash.startsWith('#/releases')) ? 'releases' : 'home'
+  if (typeof location === 'undefined') return 'home'
+  if (location.hash.startsWith('#/releases')) return 'releases'
+  if (location.hash.startsWith('#/plugins')) return 'plugins'
+  return 'home'
 }
 
 function useRoute() {
@@ -366,7 +394,7 @@ function useRoute() {
     const on = () => {
       setRoute(getRoute())
       // 라우트 전환 시 항상 상단에서 시작
-      if (getRoute() === 'releases') window.scrollTo(0, 0)
+      if (getRoute() !== 'home') window.scrollTo(0, 0)
     }
     window.addEventListener('hashchange', on)
     return () => window.removeEventListener('hashchange', on)
@@ -387,6 +415,7 @@ function Nav({ home = true }) {
             <>
               <a href="#features">기능</a>
               <a href="#download">다운로드</a>
+              <a href="#/plugins">플러그인</a>
               <a href="#/releases">릴리스</a>
               <a href="#guide">가이드</a>
               <a href="#download" className="nav-cta">받기</a>
@@ -395,6 +424,7 @@ function Nav({ home = true }) {
             <>
               <a href="./">홈</a>
               <a href="./#download">다운로드</a>
+              <a href="#/plugins">플러그인</a>
               <a href="./#guide">가이드</a>
               <a href="./#download" className="nav-cta">받기</a>
             </>
@@ -413,12 +443,85 @@ function Footer({ version }) {
         <div className="foot-links">
           <a href="./#features">기능</a>
           <a href="./#download">다운로드</a>
+          <a href="#/plugins">플러그인</a>
           <a href="#/releases">릴리스</a>
           <a href="./#guide">가이드</a>
         </div>
         <div style={{ fontSize: 13 }}>{version} · © 2026 Qonvo</div>
       </div>
     </footer>
+  )
+}
+
+// 플러그인 한 장 카드 — 이름·버전·설명·모델칩·다운로드(.py).
+function PluginCard({ p, i }) {
+  const models = p.models ? Object.values(p.models) : []
+  const sizeKb = p.size ? Math.max(1, Math.round(p.size / 1024)) : null
+  return (
+    <Reveal i={Math.min(i, 3)} className="feat-card">
+      <div className="plug-head">
+        <h3>{p.name}</h3>
+        <span className="plug-ver">v{p.version}</span>
+      </div>
+      {p.description && <p>{p.description}</p>}
+      {models.length > 0 && (
+        <div className="chips">
+          {models.slice(0, 6).map((m) => <span className="chip" key={m}>{m}</span>)}
+          {models.length > 6 && <span className="chip">+{models.length - 6}</span>}
+        </div>
+      )}
+      <div className="plug-foot">
+        <span className="plug-by">{p.author || 'qonvo'}{sizeKb ? ` · ~${sizeKb} KB` : ''}</span>
+        {p.download && (
+          <a className="rel-dlbtn" href={p.download} target="_blank" rel="noreferrer" download>
+            {p.id}.py
+          </a>
+        )}
+      </div>
+    </Reveal>
+  )
+}
+
+// 플러그인 카탈로그 — 별도 경로(#/plugins).
+function PluginsPage() {
+  const plugins = usePlugins()
+  const releases = useReleases()
+  const VERSION = releases[0]?.version
+  return (
+    <>
+      <div className="bg-grid" />
+      <div className="bg-glow" />
+      <Nav home={false} />
+      <section id="plugins" style={{ paddingTop: 120 }}>
+        <div className="container">
+          <div className="sec-head">
+            <Reveal><div className="eyebrow">Plugins</div></Reveal>
+            <Reveal i={1}><h2 className="sec-title">플러그인</h2></Reveal>
+            <Reveal i={2}>
+              <p className="sec-sub">
+                AI 프로바이더를 플러그인으로 추가하세요. 앱 <b>설정 → 플러그인 → 둘러보기</b>에서
+                원클릭 설치할 수 있고, 아래에서 <code>.py</code>를 직접 받아 plugins 폴더에 넣어도 됩니다.
+              </p>
+            </Reveal>
+          </div>
+          {plugins === null ? (
+            <p className="sec-sub" style={{ textAlign: 'center' }}>불러오는 중…</p>
+          ) : plugins.length === 0 ? (
+            <p className="sec-sub" style={{ textAlign: 'center' }}>아직 등록된 플러그인이 없습니다.</p>
+          ) : (
+            <div className="feat-grid">
+              {plugins.map((p, i) => <PluginCard key={p.id} p={p} i={i % 3} />)}
+            </div>
+          )}
+          <Reveal i={1} style={{ textAlign: 'center', marginTop: 28 }}>
+            <p className="sec-sub" style={{ fontSize: 13 }}>
+              ⚠ 플러그인은 임의 코드를 실행합니다. 신뢰할 수 있는 출처만 설치하세요.
+            </p>
+          </Reveal>
+        </div>
+      </section>
+      <Footer version={VERSION} />
+    </>
   )
 }
 
@@ -456,6 +559,7 @@ export default function App() {
   const releases = useReleases()
 
   if (route === 'releases') return <ReleasesPage />
+  if (route === 'plugins') return <PluginsPage />
 
   const latest = releases[0]
   const VERSION = latest.version

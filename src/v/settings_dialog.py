@@ -259,49 +259,24 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._section_label(t("plugin.section_title")))
         layout.addWidget(self._hint_label(t("plugin.hint")))
 
-        from v.model_plugin import PluginRegistry, get_plugins_dir
-        discovered = PluginRegistry.instance().get_discovered_plugins()
+        # 둘러보기/업데이트 — 레지스트리(registry.json)에서 원클릭 설치
+        btn_browse = QPushButton(t("plugin.browse_button"))
+        btn_browse.setStyleSheet("padding: 6px 14px; border-radius: 6px; font-size: 12px;")
+        btn_browse.clicked.connect(self._open_plugin_browser)
+        layout.addWidget(btn_browse)
+        layout.addSpacing(4)
 
-        if discovered:
-            for info in discovered:
-                models_str = ", ".join(info["models"].values()) if info["models"] else "no models"
-                cb = QCheckBox(f'{info["name"]} v{info["version"]}  ({models_str})')
-                cb.setChecked(info["enabled"])
-                cb.setStyleSheet(self._check_style())
-                layout.addWidget(cb)
-                self._plugin_checks[info["id"]] = cb
-
-                pid = info["id"]
-                self._plugin_key_data[pid] = get_plugin_api_keys(pid)
-
-                key_container = QWidget()
-                key_layout = QHBoxLayout(key_container)
-                key_layout.setContentsMargins(24, 0, 0, 0)
-                key_layout.setSpacing(6)
-                key_label = QLabel(t("plugin.api_keys") + ":")
-                key_label.setStyleSheet("color: #888; font-size: 11px;")
-                key_layout.addWidget(key_label)
-                count_label = QLabel("")
-                count_label.setStyleSheet("color: #888; font-size: 11px;")
-                key_layout.addWidget(count_label)
-                btn_add = QPushButton(t("plugin.add_key"))
-                btn_add.setStyleSheet("padding: 3px 10px; border-radius: 4px; font-size: 11px;")
-                btn_add.clicked.connect(lambda checked, p=pid: self._add_plugin_key(p))
-                key_layout.addWidget(btn_add)
-                btn_remove = QPushButton(t("plugin.remove_key"))
-                btn_remove.setStyleSheet("padding: 3px 10px; border-radius: 4px; font-size: 11px;")
-                btn_remove.clicked.connect(lambda checked, p=pid: self._remove_plugin_key(p))
-                key_layout.addWidget(btn_remove)
-                key_layout.addStretch()
-
-                self._plugin_key_widgets[pid] = {"count_label": count_label}
-                self._refresh_plugin_key_count(pid)
-                layout.addWidget(key_container)
-        else:
-            layout.addWidget(self._hint_label(t("plugin.no_plugins")))
+        # 설치된 플러그인 행은 별도 컨테이너에 — 설치 후 재오픈 없이 갱신 가능
+        self._plugins_rows_host = QWidget()
+        self._plugins_rows_layout = QVBoxLayout(self._plugins_rows_host)
+        self._plugins_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self._plugins_rows_layout.setSpacing(2)
+        layout.addWidget(self._plugins_rows_host)
+        self._refresh_plugins_rows()
 
         from PyQt6.QtGui import QDesktopServices
         from PyQt6.QtCore import QUrl
+        from v.model_plugin import get_plugins_dir
         btn_open_plugins = QPushButton(t("plugin.open_folder"))
         btn_open_plugins.setStyleSheet("padding: 6px 14px; border-radius: 6px; font-size: 12px;")
         btn_open_plugins.clicked.connect(
@@ -311,6 +286,75 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return page
+
+    def _refresh_plugins_rows(self):
+        """플러그인 행 컨테이너를 발견된 목록으로 다시 그린다(설치 직후 갱신용).
+        진행 중인 미저장 키 편집(_plugin_key_data)은 보존한다."""
+        from v.model_plugin import PluginRegistry
+
+        lay = self._plugins_rows_layout
+        while lay.count():
+            item = lay.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._plugin_checks.clear()
+        self._plugin_key_widgets.clear()
+
+        discovered = PluginRegistry.instance().get_discovered_plugins()
+        if not discovered:
+            lay.addWidget(self._hint_label(t("plugin.no_plugins")))
+            return
+
+        for info in discovered:
+            pid = info["id"]
+            models_str = ", ".join(info["models"].values()) if info["models"] else "no models"
+            cb = QCheckBox(f'{info["name"]} v{info["version"]}  ({models_str})')
+            cb.setChecked(info["enabled"])
+            cb.setStyleSheet(self._check_style())
+            lay.addWidget(cb)
+            self._plugin_checks[pid] = cb
+
+            # 미저장 편집이 있으면 유지, 없으면 settings 에서 로드
+            if pid not in self._plugin_key_data:
+                self._plugin_key_data[pid] = get_plugin_api_keys(pid)
+
+            key_container = QWidget()
+            key_layout = QHBoxLayout(key_container)
+            key_layout.setContentsMargins(24, 0, 0, 0)
+            key_layout.setSpacing(6)
+            key_label = QLabel(t("plugin.api_keys") + ":")
+            key_label.setStyleSheet("color: #888; font-size: 11px;")
+            key_layout.addWidget(key_label)
+            count_label = QLabel("")
+            count_label.setStyleSheet("color: #888; font-size: 11px;")
+            key_layout.addWidget(count_label)
+            btn_add = QPushButton(t("plugin.add_key"))
+            btn_add.setStyleSheet("padding: 3px 10px; border-radius: 4px; font-size: 11px;")
+            btn_add.clicked.connect(lambda checked, p=pid: self._add_plugin_key(p))
+            key_layout.addWidget(btn_add)
+            btn_remove = QPushButton(t("plugin.remove_key"))
+            btn_remove.setStyleSheet("padding: 3px 10px; border-radius: 4px; font-size: 11px;")
+            btn_remove.clicked.connect(lambda checked, p=pid: self._remove_plugin_key(p))
+            key_layout.addWidget(btn_remove)
+            key_layout.addStretch()
+
+            self._plugin_key_widgets[pid] = {"count_label": count_label}
+            self._refresh_plugin_key_count(pid)
+            lay.addWidget(key_container)
+
+    def _open_plugin_browser(self):
+        """레지스트리 브라우저 열기 → 설치되면 행 목록 갱신."""
+        try:
+            from v.plugin_browser_dialog import PluginBrowserDialog
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+            return
+        dlg = PluginBrowserDialog(self)
+        dlg.changed.connect(self._refresh_plugins_rows)
+        dlg.exec()
 
     def _build_collab_page(self) -> QWidget:
         page, layout = self._new_page()

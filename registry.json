@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "repo": "BDbread72/qonvo",
+  "plugins": [
+    {
+      "id": "anthropic_plugin",
+      "name": "Anthropic",
+      "version": "1.0",
+      "description": "Anthropic Claude models",
+      "author": "qonvo",
+      "models": {
+        "claude-sonnet-4-5-20250929": "Claude 4.5 Sonnet",
+        "claude-opus-4-6": "Claude Opus 4.6",
+        "claude-haiku-4-5-20251001": "Claude 4.5 Haiku"
+      },
+      "min_app_version": "",
+      "size": 4132,
+      "sha256": "13061a395ee84e54d26bc0afbed60b550b1f7c8864ca8d831feaf51954100399",
+      "download": "https://raw.githubusercontent.com/BDbread72/qonvo/d8ece8cef10c6af0336982df552336dbafb76a73/plugins/anthropic_plugin.py"
+    },
+    {
+      "id": "openai_plugin",
+      "name": "OpenAI",
+      "version": "1.0",
+      "description": "OpenAI GPT + DALL-E models",
+      "author": "qonvo",
+      "models": {
+        "gpt-4o": "GPT-4o",
+        "gpt-4o-mini": "GPT-4o mini",
+        "o3-mini": "o3-mini",
+        "dall-e-3": "DALL-E 3",
+        "gpt-image-1": "🎨 GPT Image",
+        "gpt-image-1-mini": "🎨 GPT Image Mini",
+        "gpt-image-2": "🎨 GPT Image 2",
+        "gpt-image-2-mini": "🎨 GPT Image 2 Mini"
+      },
+      "min_app_version": "",
+      "size": 21954,
+      "sha256": "4853e7d1f9023203e016e44a1906ada08bd12efc68c6ace9a0ad599505132501",
+      "download": "https://raw.githubusercontent.com/BDbread72/qonvo/785ec85ade8942d3f8d3acd32c479305d1143017/plugins/openai_plugin.py"
+    }
+  ]
+}
