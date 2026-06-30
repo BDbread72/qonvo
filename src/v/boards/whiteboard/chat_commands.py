@@ -1446,7 +1446,11 @@ class FunctionCommand(Command):
         if name in self._reserved():
             ctx.source.send_message(f"§e'{name}' 은 예약어라 함수명으로 못 씁니다")
             return 0
-        set_function(name, body)
+        try:
+            set_function(name, body)
+        except ValueError as e:
+            ctx.source.send_message(f"§e저장 거부: {e}")
+            return 0
         n = len(split_commands(body))
         ctx.source.send_message(f"§a함수 §b{name}§a 저장 §7({n}줄)")
         return 1
@@ -1461,7 +1465,11 @@ class FunctionCommand(Command):
         if name in self._reserved():
             ctx.source.send_message(f"§e'{name}' 은 예약어입니다")
             return 0
-        body = append_line(name, line)
+        try:
+            body = append_line(name, line)
+        except ValueError as e:
+            ctx.source.send_message(f"§e추가 거부: {e}")
+            return 0
         ctx.source.send_message(f"§a함수 §b{name}§a 에 1줄 추가 §7(총 {len(split_commands(body))}줄)")
         return 1
 
@@ -1687,7 +1695,11 @@ class DataCommand(Command):
         except TagSyntaxError as e:
             ctx.source.send_message(f"§e값 오류: {e}")
             return 0
-        data_set(key, val)
+        try:
+            data_set(key, val)
+        except ValueError as e:
+            ctx.source.send_message(f"§e저장 거부: {e}")
+            return 0
         ctx.source.send_message(f"§a데이터 §b{key}§a = §b{val}")
         return 1
 
@@ -1819,8 +1831,11 @@ class ExecuteCommand(Command):
         val = int(getattr(res, "value", 0) or 0)
         if store_key is not None:
             from .cmd_data import data_set
-            data_set(store_key, val)
-            ctx.source.send_message(f"§7  → data §b{store_key}§7 = §b{val}")
+            try:
+                data_set(store_key, val)
+                ctx.source.send_message(f"§7  → data §b{store_key}§7 = §b{val}")
+            except ValueError as e:
+                ctx.source.send_message(f"§e store 거부: {e}")
         return val
 
     # ── 조건 평가 ──

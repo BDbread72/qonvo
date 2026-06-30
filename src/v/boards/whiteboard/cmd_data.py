@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from v.settings import get_setting, set_setting
 
 _KEY = "chat_data"
+_MAX_VALUE_LEN = 65536   # 값 문자열 길이 상한 — settings 비대화·폭주 방지
+_MAX_KEYS = 1000         # 데이터 키 개수 상한
 
 
 # ── 저장소 (settings 글로벌) ────────────────────────────────────────────────
@@ -27,8 +29,20 @@ def save_data(d: Dict[str, Any]) -> None:
     set_setting(_KEY, d)
 
 
+def _check_value(value: Any) -> None:
+    try:
+        size = len(str(value))
+    except Exception:
+        size = 0
+    if size > _MAX_VALUE_LEN:
+        raise ValueError(f"값이 너무 큽니다 ({size} > {_MAX_VALUE_LEN}자)")
+
+
 def data_set(key: str, value: Any) -> None:
+    _check_value(value)
     d = load_data()
+    if key not in d and len(d) >= _MAX_KEYS:
+        raise ValueError(f"데이터 키가 너무 많습니다 (>{_MAX_KEYS})")
     d[key] = value
     save_data(d)
 

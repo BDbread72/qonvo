@@ -34,8 +34,20 @@ def get_function(name: str) -> Optional[str]:
     return load_functions().get(name)
 
 
+_MAX_BODY_LEN = 65536    # 함수 본문 길이 상한 — settings 비대화·폭주 방지
+_MAX_FUNCTIONS = 1000    # 함수 개수 상한
+
+
+def _check_body(body: str) -> None:
+    if len(body) > _MAX_BODY_LEN:
+        raise ValueError(f"함수 본문이 너무 깁니다 ({len(body)} > {_MAX_BODY_LEN}자)")
+
+
 def set_function(name: str, body: str) -> None:
+    _check_body(body or "")
     d = load_functions()
+    if name not in d and len(d) >= _MAX_FUNCTIONS:
+        raise ValueError(f"함수가 너무 많습니다 (>{_MAX_FUNCTIONS})")
     d[name] = body
     save_functions(d)
 
@@ -44,6 +56,7 @@ def append_line(name: str, line: str) -> str:
     d = load_functions()
     body = d.get(name, "")
     body = (body + "\n" + line) if body else line
+    _check_body(body)
     d[name] = body
     save_functions(d)
     return body
@@ -130,10 +143,17 @@ def macro_keys(body: str) -> List[str]:
 
 
 def apply_macro(line: str, args: Dict[str, Any]) -> str:
-    """'$' 가 벗겨진 매크로 줄의 `$(key)` 를 args 로 치환. 없는 키는 ValueError."""
+    """'$' 가 벗겨진 매크로 줄의 `$(key)` 를 args 로 치환. 없는 키는 ValueError.
+
+    문자열 값의 `\\`·`"` 는 이스케이프 → 큰따옴표 컨텍스트(`"$(x)"`)에서 따옴표/역슬래시가
+    호스트 명령 파싱을 깨지 않는다. (값에 따옴표가 있으면 반드시 큰따옴표로 감쌀 것.)
+    """
     def repl(m):
         key = m.group(1)
         if key not in args:
             raise ValueError(f"매크로 변수 '{key}' 값이 없습니다")
-        return str(args[key])
+        v = args[key]
+        if isinstance(v, str):
+            return v.replace("\\", "\\\\").replace('"', '\\"')
+        return str(v)
     return _MACRO_RE.sub(repl, line)

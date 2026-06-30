@@ -32,11 +32,15 @@ class TagSyntaxError(ValueError):
     """데이터 태그 파싱 실패. 사용자에게 그대로 보여줄 한글 메시지를 담는다."""
 
 
+_MAX_TAG_DEPTH = 32   # 중첩 컴파운드/리스트 깊이 한도 — RecursionError(앱 크래시) 방지
+
+
 class _TagReader:
-    def __init__(self, s: str):
+    def __init__(self, s: str, depth: int = 0):
         self.s = s
         self.i = 0
         self.n = len(s)
+        self.depth = depth
 
     def eof(self) -> bool:
         return self.i >= self.n
@@ -92,7 +96,7 @@ class _TagReader:
         return _coerce(self.s[start:self.i])
 
     def read_compound(self) -> dict:
-        """중첩 컴파운드 `{...}` — 균형 잡힌 블록을 읽어 parse_tag 로 파싱."""
+        """중첩 컴파운드 `{...}` — 균형 잡힌 블록을 읽어 parse_tag 로 파싱(깊이+1)."""
         start = self.i
         depth = 0
         in_q = None
@@ -113,7 +117,7 @@ class _TagReader:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    return parse_tag(self.s[start:self.i])
+                    return parse_tag(self.s[start:self.i], self.depth + 1)
         raise TagSyntaxError("중첩 컴파운드의 '}' 가 닫히지 않았습니다")
 
     def read_value(self) -> Any:
@@ -127,24 +131,30 @@ class _TagReader:
         return self.read_scalar()
 
     def read_list(self) -> list:
-        self.i += 1  # consume '['
-        out: list = []
-        self.ws()
-        if not self.eof() and self.peek() == "]":
-            self.i += 1
-            return out
-        while True:
+        if self.depth >= _MAX_TAG_DEPTH:
+            raise TagSyntaxError(f"중첩이 너무 깊습니다 (>{_MAX_TAG_DEPTH})")
+        self.depth += 1
+        try:
+            self.i += 1  # consume '['
+            out: list = []
             self.ws()
-            out.append(self.read_scalar())
-            self.ws()
-            if self.eof():
-                raise TagSyntaxError("']' 가 필요합니다")
-            c = self.peek()
-            if c == ",":
-                self.i += 1; continue
-            if c == "]":
-                self.i += 1; return out
-            raise TagSyntaxError(f"',' 또는 ']' 가 필요합니다 (위치 {self.i})")
+            if not self.eof() and self.peek() == "]":
+                self.i += 1
+                return out
+            while True:
+                self.ws()
+                out.append(self.read_value())   # 리스트도 컴파운드/중첩리스트 담을 수 있게
+                self.ws()
+                if self.eof():
+                    raise TagSyntaxError("']' 가 필요합니다")
+                c = self.peek()
+                if c == ",":
+                    self.i += 1; continue
+                if c == "]":
+                    self.i += 1; return out
+                raise TagSyntaxError(f"',' 또는 ']' 가 필요합니다 (위치 {self.i})")
+        finally:
+            self.depth -= 1
 
 
 _INT_RE = re.compile(r"-?(?:0|[1-9]\d*)$")        # 선행 0 금지(007 → 문자열 유지)
@@ -167,14 +177,16 @@ def _coerce(tok: str) -> Any:
     return tok
 
 
-def parse_tag(raw: str) -> Dict[str, Any]:
+def parse_tag(raw: str, _depth: int = 0) -> Dict[str, Any]:
     """`{...}` 데이터 태그 문자열 → dict. 실패 시 TagSyntaxError(한글 메시지)."""
+    if _depth > _MAX_TAG_DEPTH:
+        raise TagSyntaxError(f"중첩이 너무 깊습니다 (>{_MAX_TAG_DEPTH})")
     s = (raw or "").strip()
     if not s:
         return {}
     if not (s.startswith("{") and s.endswith("}")):
         raise TagSyntaxError("데이터 태그는 { } 로 감싸야 합니다")
-    r = _TagReader(s[1:-1])
+    r = _TagReader(s[1:-1], _depth)
     out: Dict[str, Any] = {}
     r.ws()
     if r.eof():
