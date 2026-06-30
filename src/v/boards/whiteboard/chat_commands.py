@@ -26,7 +26,7 @@ from v.logger import get_logger
 logger = get_logger("qonvo.chat_commands")
 
 from mccmd import Command, CommandRegistry, CommandService, literal, argument
-from mccmd.arguments import greedy_string, word, vec2
+from mccmd.arguments import word, vec2, greedy_string, integer
 from mccmd.arguments.types import ArgumentType
 
 
@@ -52,6 +52,13 @@ class CommandContext:
         self.chat_sink: Optional[Callable[[str], None]] = None   # 평문 채팅 전송
         self.clear_sink: Optional[Callable[[], None]] = None     # 로그/말풍선 비우기
         self._anims: list = []        # 이동 애니메이션 GC 방지용 강참조
+        # /function 실행 — 컨트롤러가 run_command 를 주입(명령 줄 하나 실행).
+        self.run_command: Optional[Callable[[str], Any]] = None
+        self.controller: Any = None      # ChatCommandController (에디터가 씀)
+        self._fn_depth: int = 0          # 현재 함수 중첩 깊이(=함수 안인지 판별)
+        self._fn_steps: int = 0          # top-level 호출당 누적 명령 수(폭주 방지)
+        self._return_pending: bool = False
+        self._return_value: int = 0
 
     @property
     def plugin(self):
@@ -140,6 +147,7 @@ CREATE_NODES: dict = {
     "function":  lambda p, pos: p.add_function(pos),
     "nixi":      lambda p, pos: p.add_nixi(pos),
     "prompt":    lambda p, pos: p.add_prompt_node(pos),
+    "sticky":    lambda p, pos: p.add_sticky(pos),
     "text":      lambda p, pos: p.add_text_item(pos),
     "markdown":  lambda p, pos: p.add_markdown(pos),
     "checklist": lambda p, pos: p.add_checklist(pos),
@@ -174,8 +182,41 @@ def _resolve_node_key(raw: str) -> Optional[str]:
     return CREATE_ALIASES.get(raw)
 
 
-class NodeTypeArgumentType(ArgumentType):
-    """생성할 노드 종류 하나. CREATE_NODES 키(+별칭) 자동완성/검증."""
+def _read_brace_block(reader):
+    """현재 위치('{')부터 균형 잡힌 '}' 까지(따옴표 인식). raw 문자열(중괄호 포함) 반환."""
+    from mccmd.errors import CommandSyntaxError
+    start = reader.cursor
+    depth = 0
+    in_q = None
+    esc = False
+    while reader.can_read():
+        c = reader.read()
+        if in_q is not None:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == in_q:
+                in_q = None
+        else:
+            if c in ("\"", "'"):
+                in_q = c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return reader.string[start:reader.cursor]
+    reader.cursor = start
+    raise CommandSyntaxError("데이터 태그의 '}' 가 닫히지 않았습니다", reader)
+
+
+class NodeSpecArgumentType(ArgumentType):
+    """생성할 노드 종류 + 선택적 데이터 태그.  `chat` 또는 `chat{model:"..."}`.
+
+    parse → (node_key, raw_tag|None). raw_tag 의 실제 해석은 run 단계(친절한 안내).
+    자동완성: 중괄호 밖 → 노드 키, 중괄호 안 → 파라미터 키/값.
+    """
 
     def parse(self, reader, source=None):
         from mccmd.errors import CommandSyntaxError
@@ -183,27 +224,135 @@ class NodeTypeArgumentType(ArgumentType):
         raw = reader.read_unquoted_string()
         if not raw:
             raise CommandSyntaxError("노드 종류를 입력하세요", reader)
-        if _resolve_node_key(raw) is None:
+        key = _resolve_node_key(raw)
+        if key is None:
             reader.cursor = start
             raise CommandSyntaxError(f"알 수 없는 노드 '{raw}'", reader)
-        return _resolve_node_key(raw)
+        tag = None
+        if reader.can_read() and reader.peek() == "{":
+            tag = _read_brace_block(reader)   # 균형 안 맞으면 CommandSyntaxError
+        return (key, tag)
 
     def list_suggestions(self, context, builder):
-        typed = builder.remaining_lower
-        for key in CREATE_NODES:
-            if key.startswith(typed):
-                builder.suggest(key)
-        for alias, key in CREATE_ALIASES.items():
-            if alias.startswith(typed):
-                builder.suggest(alias, tooltip=key)
-        return builder.build()
+        rem = builder.remaining
+        brace = rem.find("{")
+        if brace < 0:
+            typed = builder.remaining_lower
+            for key in CREATE_NODES:
+                if key.startswith(typed):
+                    builder.suggest(key)
+            for alias, key in CREATE_ALIASES.items():
+                if alias.startswith(typed):
+                    builder.suggest(alias, tooltip=key)
+            return builder.build()
+        try:
+            key = _resolve_node_key(rem[:brace])
+            cc = getattr(context.source, "ctx", None)
+            return _suggest_tag_inner(key, builder, rem, brace, cc)
+        except Exception:
+            return builder.build()
 
     def get_examples(self):
-        return ["chat", "prompt", "image"]
+        return ["chat", "text{text:\"hi\"}", "number{value:42}"]
 
 
-def node_type_arg():
-    return NodeTypeArgumentType()
+def node_spec_arg():
+    return NodeSpecArgumentType()
+
+
+def _suggest_tag_inner(node_key, builder, rem, brace, cc):
+    """`{...}` 데이터 태그 안 자동완성 — 키/값. rem 의 brace 위치부터 스캔.
+
+    NodeSpecArgumentType(노드에 붙은 태그)와 DataTagArgumentType(끝에 떨어진 태그)
+    둘이 공유한다. 절대 오프셋 = builder.start + (rem 내 위치).
+    """
+    from .cmd_params import params_for, value_suggestions
+    if node_key is None:
+        return builder.build()
+    inner_start = brace + 1
+    seg_begin = inner_start
+    cur_colon = -1
+    used = []
+    in_q = None
+    esc = False
+    j = inner_start
+    while j < len(rem):
+        c = rem[j]
+        if in_q is not None:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == in_q:
+                in_q = None
+        elif c in ("\"", "'"):
+            in_q = c
+        elif c == ",":
+            seg = rem[seg_begin:j]
+            k = (seg.split(":", 1)[0] if ":" in seg else seg).strip()
+            if k:
+                used.append(k)
+            seg_begin = j + 1
+            cur_colon = -1
+        elif c == ":" and cur_colon < 0:
+            cur_colon = j
+        j += 1
+
+    if cur_colon >= 0:
+        pkey = rem[seg_begin:cur_colon].strip()
+        val_start = cur_colon + 1
+        while val_start < len(rem) and rem[val_start].isspace():
+            val_start += 1
+        partial = rem[val_start:]
+        ob = builder.create_offset(builder.start + val_start)
+        for v in value_suggestions(node_key, pkey, cc):
+            if v.lower().startswith(partial.lower()):
+                ob.suggest(v)
+        return ob.build()
+
+    key_start = seg_begin
+    while key_start < len(rem) and rem[key_start].isspace():
+        key_start += 1
+    partial = rem[key_start:].lower()
+    ob = builder.create_offset(builder.start + key_start)
+    spec = params_for(node_key)
+    for pk in spec:
+        if pk not in used and pk.startswith(partial):
+            ob.suggest(pk + ":", tooltip=spec[pk].get("desc"))
+    return ob.build()
+
+
+class DataTagArgumentType(ArgumentType):
+    """끝에 떨어진 데이터 태그 `{...}` (공백 뒤). `{` 로 시작 안 하면 매칭 안 됨
+    → vec2 위치 인자와 충돌 없음. 노드 키는 이미 파싱된 'node' 인자에서 가져온다."""
+
+    def parse(self, reader, source=None):
+        from mccmd.errors import CommandSyntaxError
+        if not reader.can_read() or reader.peek() != "{":
+            raise CommandSyntaxError("데이터 태그는 { 로 시작합니다", reader)
+        return _read_brace_block(reader)
+
+    def list_suggestions(self, context, builder):
+        rem = builder.remaining
+        if not rem.startswith("{"):
+            return builder.build()
+        try:
+            spec = context.get_argument("node")
+            node_key = spec[0] if isinstance(spec, tuple) else spec
+        except Exception:
+            return builder.build()
+        cc = getattr(context.source, "ctx", None)
+        try:
+            return _suggest_tag_inner(node_key, builder, rem, 0, cc)
+        except Exception:
+            return builder.build()
+
+    def get_examples(self):
+        return ["{text:\"hi\"}", "{model:\"gemini-2.5-flash\"}"]
+
+
+def data_tag_arg():
+    return DataTagArgumentType()
 
 
 class MoveTargetArgumentType(ArgumentType):
@@ -258,6 +407,79 @@ class MoveTargetArgumentType(ArgumentType):
 
 def move_target_arg():
     return MoveTargetArgumentType()
+
+
+class NodeNameArgumentType(ArgumentType):
+    """노드 이름 하나 (delete/connect/run 대상). 접속 사용자/@s 는 제안 안 함."""
+
+    def parse(self, reader, source=None):
+        from mccmd.errors import CommandSyntaxError
+        from mccmd.reader import _is_quoted_string_start
+        if not reader.can_read():
+            raise CommandSyntaxError("노드 이름을 입력하세요", reader)
+        if _is_quoted_string_start(reader.peek()):
+            return reader.read_string()
+        start = reader.cursor
+        while reader.can_read() and reader.peek() != " ":
+            reader.skip()
+        raw = reader.string[start:reader.cursor]
+        if not raw:
+            raise CommandSyntaxError("노드 이름을 입력하세요", reader)
+        return raw
+
+    def list_suggestions(self, context, builder):
+        typed = builder.remaining_lower
+        try:
+            cc = context.source.ctx
+            plugin = cc.plugin
+            if plugin is not None:
+                for nid in getattr(plugin.app, "nodes", {}):
+                    try:
+                        nm = plugin.get_node_name(nid)
+                    except Exception:
+                        nm = ""
+                    if nm and nm.lower().startswith(typed):
+                        s = ('"%s"' % nm) if " " in nm else nm
+                        builder.suggest(s, tooltip=f"#{nid}")
+        except Exception:
+            pass
+        return builder.build()
+
+    def get_examples(self):
+        return ["Chat", "\"내 메모\""]
+
+
+def node_name_arg():
+    return NodeNameArgumentType()
+
+
+class FunctionNameArgumentType(ArgumentType):
+    """저장된 함수 이름 하나. 자동완성은 저장된 함수 목록."""
+
+    def parse(self, reader, source=None):
+        from mccmd.errors import CommandSyntaxError
+        raw = reader.read_unquoted_string()
+        if not raw:
+            raise CommandSyntaxError("함수 이름을 입력하세요", reader)
+        return raw
+
+    def list_suggestions(self, context, builder):
+        typed = builder.remaining_lower
+        try:
+            from .cmd_functions import list_functions
+            for name in list_functions():
+                if name.lower().startswith(typed):
+                    builder.suggest(name)
+        except Exception:
+            pass
+        return builder.build()
+
+    def get_examples(self):
+        return ["setup", "greet"]
+
+
+def function_name_arg():
+    return FunctionNameArgumentType()
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +567,104 @@ def _animate(cc: CommandContext, start_xy, end_xy, apply_fn, done_fn=None, ms: i
 
 
 # ---------------------------------------------------------------------------
+# delete / connect / run / grep 공통 헬퍼
+# ---------------------------------------------------------------------------
+def _delete_node_by_id(plugin, nid: int) -> bool:
+    """node_id 를 타입에 맞는 삭제 경로로 제거. view._delete_selected_items 와 동일 디스패치."""
+    if nid in plugin.proxies:                      # 모든 위젯 노드
+        plugin.delete_proxy_item(plugin.proxies[nid])
+        return True
+    item = getattr(plugin.app, "nodes", {}).get(nid)
+    if item is None:
+        return False
+    if nid in plugin.text_items:
+        plugin.delete_text_item(item)
+    elif nid in plugin.image_card_items:
+        plugin.delete_scene_item(item)
+    elif nid in plugin.file_node_items:
+        plugin.delete_file_node(item)
+    elif nid in plugin.group_frame_items:
+        plugin.delete_group_frame(item)
+    elif nid in plugin.dimension_items:
+        plugin.delete_dimension_item(item)
+    else:
+        return False
+    return True
+
+
+def _pick_port(plugin, item, port_type):
+    """item 의 대표 포트 1개 — 신호(⚡)보다 데이터 포트 우선."""
+    from .items import PortItem
+    try:
+        ports = plugin._collect_ports(item)
+    except Exception:
+        ports = []
+    cand = [p for p in ports if getattr(p, "port_type", None) == port_type]
+    data = [p for p in cand if not str(getattr(p, "port_name", "") or "").startswith("⚡")]
+    pool = data or cand
+    return pool[0] if pool else None
+
+
+def _run_node(node) -> Tuple[bool, str]:
+    """노드를 '신호가 들어온 것처럼' 실행. (성공, 사유)."""
+    if node is None:
+        return False, "노드 없음"
+    if hasattr(node, "_on_click"):            # 버튼: 클릭 = 신호 emit
+        node._on_click()
+        return True, "신호 emit"
+    if hasattr(node, "on_signal_input"):      # 챗/함수/프롬프트/마크다운 등
+        node.on_signal_input()
+        return True, "실행"
+    return False, "실행할 수 없는 노드"
+
+
+def _node_search_text(plugin, nid: int, node) -> str:
+    """grep 대상 텍스트 — 이름 + 본문/응답/값 등 알려진 필드를 모은다."""
+    parts = []
+    try:
+        parts.append(plugin.get_node_name(nid) or "")
+    except Exception:
+        pass
+    be = getattr(node, "body_edit", None)     # prompt / sticky
+    if be is not None and hasattr(be, "toPlainText"):
+        try:
+            parts.append(be.toPlainText())
+        except Exception:
+            pass
+    elif hasattr(node, "toPlainText"):        # 텍스트 아이템
+        try:
+            parts.append(node.toPlainText())
+        except Exception:
+            pass
+    md = getattr(node, "_raw_md", None)
+    if isinstance(md, str):
+        parts.append(md)
+    lbl = getattr(node, "_label", None)
+    if isinstance(lbl, str):
+        parts.append(lbl)
+    for attr in ("_value", "_result"):
+        v = getattr(node, attr, None)
+        if isinstance(v, (int, float)):
+            parts.append(str(v))
+    hist = getattr(node, "_history", None)    # 챗 대화
+    if isinstance(hist, list):
+        for h in hist:
+            if isinstance(h, dict):
+                parts.append(str(h.get("user", "")))
+                parts.append(str(h.get("response", "")))
+    return "\n".join(p for p in parts if p)
+
+
+def _node_type_label(plugin, nid: int, node) -> str:
+    """grep/list 표시용 짧은 타입 이름."""
+    from .node_title import default_name_for
+    try:
+        return default_name_for(node)
+    except Exception:
+        return type(node).__name__
+
+
+# ---------------------------------------------------------------------------
 # 명령어들
 # ---------------------------------------------------------------------------
 _HELP_PER_PAGE = 6
@@ -404,7 +724,21 @@ class HelpCommand(Command):
             ctx.source.send_message("  §7사용법:")
             for ln in usage:
                 ctx.source.send_message("    §b/" + ln)
+        if target.name == "create":
+            self._create_params(ctx)
         return 1
+
+    def _create_params(self, ctx):
+        """/help create — 노드별 데이터 태그 키 목록(마크식 {key:value})."""
+        try:
+            from .cmd_params import PARAM_SCHEMA
+        except Exception:
+            return
+        ctx.source.send_message("  §7데이터 태그 §b{key:value, ...}§7 (모든 노드 §bname§7 가능):")
+        for node_key, spec in PARAM_SCHEMA.items():
+            keys = ", ".join(spec.keys())
+            ctx.source.send_message(f"    §b{node_key}§r §7— {keys}")
+        ctx.source.send_message("  §7예: §b/create chat{model:\"gemini-2.5-flash\", name:\"분석\"}")
 
 
 class ClearCommand(Command):
@@ -429,15 +763,18 @@ class ClearCommand(Command):
 class CreateCommand(Command):
     name = "create"
     aliases = ("new", "spawn")
-    description = "노드를 생성한다 (기본 위치 = 커서)"
+    description = "노드를 생성한다 (기본 위치 = 커서). 마크식 데이터 태그: §bchat{model:\"...\"}§r"
     permission = staticmethod(_require_level(MEMBER))
 
     def build(self, root):
-        node = argument("node", node_type_arg())
+        node = argument("node", node_spec_arg())
         node.executes(self.run_cursor)
+        # 끝에 떨어진 태그도 허용: create prompt {text:"..."}
+        node.then(argument("tag", data_tag_arg()).executes(self.run_cursor))
         loc = argument("location", vec2())
         loc.executes(self.run_loc)
-        loc.then(argument("params", greedy_string()).executes(self.run_loc))
+        # 위치 뒤 태그도 허용: create prompt 0 0 {text:"..."}
+        loc.then(argument("tag", data_tag_arg()).executes(self.run_loc))
         node.then(loc)
         root.then(node)
         return root
@@ -455,7 +792,15 @@ class CreateCommand(Command):
             return 0
         return self._spawn(ctx, ctx.get_argument("node"), (x, y))
 
-    def _spawn(self, ctx, key: str, xy: Tuple[float, float]):
+    def _spawn(self, ctx, spec, xy: Tuple[float, float]):
+        # spec = (node_key, raw_tag|None). 끝에 떨어진 태그(tag 인자)가 있으면 그게 우선.
+        key, raw_tag = spec if isinstance(spec, tuple) else (spec, None)
+        try:
+            trailing = ctx.get_argument("tag")
+            if trailing:
+                raw_tag = trailing
+        except Exception:
+            pass
         cc = ctx.source.ctx
         plugin = cc.plugin
         if plugin is None:
@@ -465,7 +810,17 @@ class CreateCommand(Command):
         if factory is None:
             ctx.source.send_message(f"§e알 수 없는 노드 '{key}'")
             return 0
+        # 데이터 태그 먼저 파싱 — 잘못됐으면 노드를 만들지 않고 안내.
+        params = {}
+        if raw_tag:
+            from .cmd_params import parse_tag, TagSyntaxError
+            try:
+                params = parse_tag(raw_tag)
+            except TagSyntaxError as e:
+                ctx.source.send_message(f"§e데이터 태그 오류: {e}")
+                return 0
         from PyQt6.QtCore import QPointF
+        before = set(getattr(plugin.app, "nodes", {}).keys())
         try:
             factory(plugin, QPointF(xy[0], xy[1]))
         except Exception as e:
@@ -473,6 +828,20 @@ class CreateCommand(Command):
             ctx.source.send_message(f"§e노드 생성 실패: {e}")
             return 0
         ctx.source.send_message(f"§a'{key}' 노드를 생성했습니다 §7({int(xy[0])}, {int(xy[1])})")
+        # 데이터 태그 적용 — 방금 생긴 노드를 app.nodes diff 로 찾는다.
+        if params:
+            new_ids = [i for i in getattr(plugin.app, "nodes", {}) if i not in before]
+            if not new_ids:
+                ctx.source.send_message("§e데이터 태그를 적용할 노드를 찾지 못했습니다")
+                return 1
+            from .cmd_params import apply_params
+            nid = new_ids[0]
+            node = plugin.app.nodes[nid]
+            applied, errors = apply_params(plugin, key, nid, node, params)
+            if applied:
+                ctx.source.send_message("§7  적용: §b" + "§7, §b".join(applied))
+            for err in errors:
+                ctx.source.send_message(f"§e  {err}")
         return 1
 
 
@@ -577,9 +946,506 @@ class MoveCommand(Command):
         return 1
 
 
+class DeleteCommand(Command):
+    name = "delete"
+    aliases = ("remove", "del")
+    description = "노드를 삭제한다 (이름으로 지정, 연결된 엣지도 제거)"
+    permission = staticmethod(_require_level(MEMBER))
+
+    def build(self, root):
+        root.then(argument("target", node_name_arg()).executes(self.run))
+        return root
+
+    def run(self, ctx):
+        cc = ctx.source.ctx
+        plugin = cc.plugin
+        if plugin is None:
+            ctx.source.send_message("§e활성 보드가 없습니다")
+            return 0
+        target = (ctx.get_argument("target") or "").strip()
+        nid = _node_id_by_name(plugin, target)
+        if nid is None:
+            ctx.source.send_message(f"§e'{target}' 노드를 찾을 수 없습니다 §7(/grep 으로 검색)")
+            return 0
+        node = plugin.app.nodes.get(nid)
+        if getattr(node, "_running", False):
+            ctx.source.send_message(f"§e'{target}' 는 작업 중이라 삭제하지 않았습니다")
+            return 0
+        try:
+            ok = _delete_node_by_id(plugin, nid)
+        except Exception as e:
+            logger.debug("delete failed: %s", e)
+            ctx.source.send_message(f"§e삭제 실패: {e}")
+            return 0
+        if not ok:
+            ctx.source.send_message(f"§e'{target}' 는 삭제할 수 없는 종류입니다")
+            return 0
+        ctx.source.send_message(f"§a'{target}' 노드를 삭제했습니다")
+        return 1
+
+
+class ConnectCommand(Command):
+    name = "connect"
+    aliases = ("link", "wire")
+    description = "두 노드를 엣지로 연결한다 (앞 노드 출력 → 뒤 노드 입력)"
+    permission = staticmethod(_require_level(MEMBER))
+
+    def build(self, root):
+        src = argument("from", node_name_arg())
+        src.then(argument("to", node_name_arg()).executes(self.run))
+        root.then(src)
+        return root
+
+    def run(self, ctx):
+        from .items import PortItem
+        cc = ctx.source.ctx
+        plugin = cc.plugin
+        if plugin is None:
+            ctx.source.send_message("§e활성 보드가 없습니다")
+            return 0
+        a = (ctx.get_argument("from") or "").strip()
+        b = (ctx.get_argument("to") or "").strip()
+        na = _node_id_by_name(plugin, a)
+        nb = _node_id_by_name(plugin, b)
+        if na is None:
+            ctx.source.send_message(f"§e'{a}' 노드를 찾을 수 없습니다")
+            return 0
+        if nb is None:
+            ctx.source.send_message(f"§e'{b}' 노드를 찾을 수 없습니다")
+            return 0
+        if na == nb:
+            ctx.source.send_message("§e같은 노드끼리는 연결할 수 없습니다")
+            return 0
+        out_port = _pick_port(plugin, _movable_item(plugin, na), PortItem.OUTPUT)
+        in_port = _pick_port(plugin, _movable_item(plugin, nb), PortItem.INPUT)
+        if out_port is None:
+            ctx.source.send_message(f"§e'{a}' 에 출력 포트가 없습니다")
+            return 0
+        if in_port is None:
+            ctx.source.send_message(f"§e'{b}' 에 입력 포트가 없습니다")
+            return 0
+        edge = plugin.create_edge(out_port, in_port)
+        if edge is None:
+            ctx.source.send_message("§e연결할 수 없습니다 §7(이미 연결됐거나 같은 종류 포트)")
+            return 0
+        ctx.source.send_message(f"§a'{a}' §7→ §a'{b}' §7연결했습니다")
+        return 1
+
+
+class RunCommand(Command):
+    name = "run"
+    aliases = ("exec", "fire")
+    description = "노드를 실행/트리거한다 (챗=AI호출·버튼=신호·all=모든 챗)"
+    permission = staticmethod(_require_level(MEMBER))
+
+    def build(self, root):
+        root.then(argument("target", node_name_arg()).executes(self.run))
+        return root
+
+    def run(self, ctx):
+        cc = ctx.source.ctx
+        plugin = cc.plugin
+        if plugin is None:
+            ctx.source.send_message("§e활성 보드가 없습니다")
+            return 0
+        target = (ctx.get_argument("target") or "").strip()
+        if target.lower() == "all":
+            return self._run_all_chats(ctx, plugin)
+        nid = _node_id_by_name(plugin, target)
+        if nid is None:
+            ctx.source.send_message(f"§e'{target}' 노드를 찾을 수 없습니다")
+            return 0
+        node = plugin.app.nodes.get(nid)
+        if getattr(node, "_running", False):
+            ctx.source.send_message(f"§e'{target}' 는 이미 작업 중입니다")
+            return 0
+        try:
+            ok, why = _run_node(node)
+        except Exception as e:
+            logger.debug("run failed: %s", e)
+            ctx.source.send_message(f"§e실행 실패: {e}")
+            return 0
+        if not ok:
+            ctx.source.send_message(f"§e'{target}' §7— {why}")
+            return 0
+        ctx.source.send_message(f"§a'{target}' §7{why}")
+        return 1
+
+    def _run_all_chats(self, ctx, plugin):
+        count = 0
+        for nid in list(plugin.proxies.keys()):
+            node = plugin.app.nodes.get(nid)
+            if node is None or getattr(node, "_running", False):
+                continue
+            if type(node).__name__ == "ChatNodeWidget":
+                try:
+                    node.on_signal_input()
+                    count += 1
+                except Exception:
+                    pass
+        if count:
+            ctx.source.send_message(f"§a챗 노드 {count}개를 실행했습니다")
+        else:
+            ctx.source.send_message("§7실행할 챗 노드가 없습니다")
+        return 1
+
+
+class GrepCommand(Command):
+    name = "grep"
+    aliases = ("search", "find", "q")
+    description = "노드 내용을 검색한다 (이름·본문·대화, 대소문자 무시)"
+
+    def build(self, root):
+        root.then(argument("pattern", greedy_string()).executes(self.run))
+        return root
+
+    _LIMIT = 12
+
+    def run(self, ctx):
+        cc = ctx.source.ctx
+        plugin = cc.plugin
+        if plugin is None:
+            ctx.source.send_message("§e활성 보드가 없습니다")
+            return 0
+        pat = (ctx.get_argument("pattern") or "").strip()
+        if not pat:
+            ctx.source.send_message("§e검색어를 입력하세요 §7(예: §b/grep TODO§7)")
+            return 0
+        low = pat.lower()
+        hits = []
+        for nid in list(getattr(plugin.app, "nodes", {}).keys()):
+            node = plugin.app.nodes.get(nid)
+            if node is None:
+                continue
+            text = _node_search_text(plugin, nid, node)
+            if low in text.lower():
+                name = ""
+                try:
+                    name = plugin.get_node_name(nid)
+                except Exception:
+                    name = ""
+                hits.append((nid, name, _node_type_label(plugin, nid, node),
+                             self._snippet(text, low)))
+        if not hits:
+            ctx.source.send_message(f"§7'{pat}' 에 맞는 노드가 없습니다")
+            return 0
+        ctx.source.send_message(f"§b◆ '{pat}' §7— {len(hits)}개")
+        for nid, name, typ, snip in hits[:self._LIMIT]:
+            label = name or typ
+            extra = f"  §8{snip}" if snip else ""
+            ctx.source.send_message(f"  §b{label} §7#{nid} §8({typ}){extra}")
+        if len(hits) > self._LIMIT:
+            ctx.source.send_message(f"  §7… 외 {len(hits) - self._LIMIT}개")
+        return 1
+
+    @staticmethod
+    def _snippet(text: str, low: str, span: int = 24) -> str:
+        flat = " ".join(text.split())
+        i = flat.lower().find(low)
+        if i < 0:
+            return ""
+        start = max(0, i - span // 2)
+        end = min(len(flat), i + len(low) + span // 2)
+        s = flat[start:end]
+        if start > 0:
+            s = "…" + s
+        if end < len(flat):
+            s = s + "…"
+        return s
+
+
+class SayCommand(Command):
+    name = "say"
+    aliases = ("echo",)
+    description = "채팅창에 메시지를 보낸다 (함수 출력용)"
+
+    def build(self, root):
+        root.then(argument("text", greedy_string()).executes(self.run))
+        return root
+
+    def run(self, ctx):
+        cc = ctx.source.ctx
+        text = (ctx.get_argument("text") or "").strip()
+        if not text:
+            return 0
+        if cc.chat_sink is not None:
+            try:
+                cc.chat_sink(text)
+            except Exception:
+                ctx.source.send_message(text)
+        else:
+            ctx.source.send_message(text)
+        return 1
+
+
+# /function 폭주 방지 한도
+_FN_MAX_DEPTH = 16        # 중첩 호출 깊이
+_FN_MAX_STEPS = 2048      # top-level 호출당 누적 명령 수
+
+
+class ReturnCommand(Command):
+    name = "return"
+    aliases = ("ret",)
+    description = "함수 실행을 즉시 멈추고 값을 돌려준다 (함수 안에서만)"
+
+    def build(self, root):
+        root.executes(self.run_bare)
+        root.then(argument("value", integer()).executes(self.run_value))
+        root.then(literal("run").then(
+            argument("command", greedy_string()).executes(self.run_run)))
+        return root
+
+    def _guard(self, ctx) -> bool:
+        if ctx.source.ctx._fn_depth <= 0:
+            ctx.source.send_message("§e/return 은 함수 안에서만 쓸 수 있습니다")
+            return False
+        return True
+
+    def run_bare(self, ctx):
+        if not self._guard(ctx):
+            return 0
+        cc = ctx.source.ctx
+        cc._return_pending = True
+        cc._return_value = 0
+        return 0
+
+    def run_value(self, ctx):
+        if not self._guard(ctx):
+            return 0
+        cc = ctx.source.ctx
+        val = int(ctx.get_argument("value"))
+        cc._return_pending = True
+        cc._return_value = val
+        return val
+
+    def run_run(self, ctx):
+        if not self._guard(ctx):
+            return 0
+        cc = ctx.source.ctx
+        sub = (ctx.get_argument("command") or "").strip()
+        val = 0
+        if sub and cc.run_command is not None:
+            try:
+                res = cc.run_command(sub)
+                for m in getattr(res, "messages", []) or []:
+                    ctx.source.send_message(m)
+                val = int(getattr(res, "value", 0) or 0)
+            except Exception as e:
+                ctx.source.send_message(f"§ereturn run 실패: {e}")
+        # return run 직후 또 return 이 걸렸다면(중첩) 그대로 둔다.
+        if not cc._return_pending:
+            cc._return_pending = True
+            cc._return_value = val
+        return cc._return_value
+
+
+class FunctionCommand(Command):
+    name = "function"
+    aliases = ("fn",)
+    description = "명령들을 묶은 함수를 실행/정의한다 (마크식, 매크로 {args} + return)"
+
+    def build(self, root):
+        root.then(literal("list").executes(self.run_list))
+        root.then(literal("show").then(
+            argument("name", function_name_arg()).executes(self.run_show)))
+        edit = literal("edit")
+        edit.executes(self.run_edit)
+        edit.then(argument("name", word()).executes(self.run_edit))
+        root.then(edit)
+        root.then(literal("remove").then(
+            argument("name", function_name_arg()).executes(self.run_remove)))
+        set_ = literal("set").then(argument("name", word()).then(
+            argument("body", greedy_string()).executes(self.run_set)))
+        root.then(set_)
+        add_ = literal("add").then(argument("name", word()).then(
+            argument("line", greedy_string()).executes(self.run_add)))
+        root.then(add_)
+        # 호출: /function <name> [ {args} ]
+        call = argument("name", function_name_arg())
+        call.executes(self.run_call)
+        call.then(argument("args", greedy_string()).executes(self.run_call))
+        root.then(call)
+        return root
+
+    # ── 정의/조회 (set/add 는 Member) ──
+    def run_set(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_functions import set_function, split_commands
+        name = (ctx.get_argument("name") or "").strip()
+        body = ctx.get_argument("body") or ""
+        if name in self._reserved():
+            ctx.source.send_message(f"§e'{name}' 은 예약어라 함수명으로 못 씁니다")
+            return 0
+        set_function(name, body)
+        n = len(split_commands(body))
+        ctx.source.send_message(f"§a함수 §b{name}§a 저장 §7({n}줄)")
+        return 1
+
+    def run_add(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_functions import append_line, split_commands
+        name = (ctx.get_argument("name") or "").strip()
+        line = (ctx.get_argument("line") or "").strip()
+        if name in self._reserved():
+            ctx.source.send_message(f"§e'{name}' 은 예약어입니다")
+            return 0
+        body = append_line(name, line)
+        ctx.source.send_message(f"§a함수 §b{name}§a 에 1줄 추가 §7(총 {len(split_commands(body))}줄)")
+        return 1
+
+    def run_remove(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_functions import delete_function
+        name = (ctx.get_argument("name") or "").strip()
+        if delete_function(name):
+            ctx.source.send_message(f"§a함수 §b{name}§a 삭제")
+            return 1
+        ctx.source.send_message(f"§e함수 '{name}' 가 없습니다")
+        return 0
+
+    def run_list(self, ctx):
+        from .cmd_functions import list_functions
+        names = list_functions()
+        if not names:
+            ctx.source.send_message("§7저장된 함수가 없습니다 §7(/function set <이름> <명령;명령>)")
+            return 0
+        ctx.source.send_message(f"§b◆ 함수 §7— {len(names)}개")
+        for nm in names:
+            ctx.source.send_message(f"  §b{nm}")
+        return 1
+
+    def run_show(self, ctx):
+        from .cmd_functions import get_function, split_commands, macro_keys
+        name = (ctx.get_argument("name") or "").strip()
+        body = get_function(name)
+        if body is None:
+            ctx.source.send_message(f"§e함수 '{name}' 가 없습니다")
+            return 0
+        ctx.source.send_message(f"§b{name}§7:")
+        for ln in split_commands(body):
+            ctx.source.send_message("  §b" + ln)
+        keys = macro_keys(body)
+        if keys:
+            ctx.source.send_message("  §7매크로 변수: §b" + ", ".join(keys))
+        return 1
+
+    def run_edit(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        cc = ctx.source.ctx
+        try:
+            name = ctx.get_argument("name") or ""
+        except Exception:
+            name = ""
+        controller = getattr(cc, "controller", None)
+        if controller is None:
+            ctx.source.send_message("§e에디터를 열 수 없습니다")
+            return 0
+        try:
+            from .function_editor_web import open_function_editor, webengine_available
+            if not webengine_available():
+                ctx.source.send_message(
+                    "§e함수 에디터는 PyQt6-WebEngine 이 필요합니다 §7(명령으로는 /function set 사용)")
+                return 0
+            dlg = open_function_editor(cc.ui, controller, (name or "").strip())
+            if dlg is None:
+                ctx.source.send_message("§e함수 에디터를 열지 못했습니다")
+                return 0
+            if hasattr(controller, "_editors"):
+                controller._editors.append(dlg)
+                dlg.destroyed.connect(
+                    lambda *_a, d=dlg: controller._editors.remove(d)
+                    if d in controller._editors else None)
+            ctx.source.send_message("§a함수 에디터를 열었습니다")
+            return 1
+        except Exception as e:
+            logger.debug("open editor failed: %s", e)
+            ctx.source.send_message(f"§e에디터 오류: {e}")
+            return 0
+
+    # ── 실행 ──
+    def run_call(self, ctx):
+        from .cmd_functions import get_function
+        cc = ctx.source.ctx
+        name = (ctx.get_argument("name") or "").strip()
+        body = get_function(name)
+        if body is None:
+            ctx.source.send_message(f"§e함수 '{name}' 가 없습니다 §7(/function list)")
+            return 0
+        args = {}
+        raw_args = None
+        try:
+            raw_args = ctx.get_argument("args")
+        except Exception:
+            raw_args = None
+        if raw_args:
+            from .cmd_params import parse_tag, TagSyntaxError
+            try:
+                args = parse_tag(raw_args)
+            except TagSyntaxError as e:
+                ctx.source.send_message(f"§e인자 오류: {e}")
+                return 0
+        return self._invoke(ctx, cc, name, body, args)
+
+    def _invoke(self, ctx, cc, name, body, args):
+        from .cmd_functions import split_commands, is_macro_line, apply_macro, MACRO_PREFIX
+        if cc._fn_depth >= _FN_MAX_DEPTH:
+            ctx.source.send_message(f"§e함수 중첩이 너무 깊습니다 (>{_FN_MAX_DEPTH}) — 재귀 의심")
+            return 0
+        if cc.run_command is None:
+            ctx.source.send_message("§e함수 실행 경로가 없습니다")
+            return 0
+        cc._fn_depth += 1
+        result = 0
+        try:
+            for raw in split_commands(body):
+                cc._fn_steps += 1
+                if cc._fn_steps > _FN_MAX_STEPS:
+                    ctx.source.send_message(f"§e명령 한도 초과 (>{_FN_MAX_STEPS}) — 중단")
+                    break
+                line = raw
+                if is_macro_line(line):
+                    try:
+                        line = apply_macro(line.lstrip()[len(MACRO_PREFIX):].lstrip(), args)
+                    except ValueError as e:
+                        ctx.source.send_message(f"§e{name}: {e}")
+                        break
+                line = line.strip()
+                if not line:
+                    continue
+                res = cc.run_command(line)
+                for m in getattr(res, "messages", []) or []:
+                    ctx.source.send_message(m)
+                if getattr(res, "failed", False):
+                    ctx.source.send_message(f"§e{name}: '{line}' 실패")
+                result = int(getattr(res, "value", 0) or 0)
+                if cc._return_pending:
+                    result = cc._return_value
+                    cc._return_pending = False
+                    break
+        finally:
+            cc._fn_depth -= 1
+            if cc._fn_depth == 0:
+                cc._fn_steps = 0
+        return result
+
+    @staticmethod
+    def _reserved() -> set:
+        return {"list", "show", "set", "add", "remove"}
+
+
 # 등록되는 명령어 전체 (순서 = /help 목록 순서)
 CHAT_COMMANDS = [
     HelpCommand, ClearCommand, CreateCommand, MoveCommand,
+    DeleteCommand, ConnectCommand, RunCommand, GrepCommand,
+    FunctionCommand, ReturnCommand, SayCommand,
 ]
 
 
@@ -601,6 +1467,10 @@ class ChatCommandController:
             registry.add(cmd())
         self.dispatcher = registry.build()
         self.service = CommandService(self.dispatcher, self._make_source)
+        # /function 이 함수 본문의 각 줄을 실행할 때 쓰는 경로(같은 ctx 공유 → return 상태 유지).
+        self.ctx.run_command = self.execute
+        self.ctx.controller = self    # /function edit 가 에디터에 넘길 컨트롤러 핸들
+        self._editors = []            # 열린 함수 에디터 다이얼로그(GC 방지)
 
     # --- 소스 팩토리 (실행/제안마다 새 소스) ---
     def _make_source(self) -> ChatSource:
@@ -644,6 +1514,35 @@ class ChatCommandController:
             return self.service.ghost(command_text, cursor) or ""
         except Exception:
             return ""
+
+    def validate(self, command_text: str) -> str:
+        """명령 한 줄을 **실행하지 않고** 문법만 검사. 정상이면 "", 아니면 오류 메시지.
+
+        에디터 밑줄/린트용. 매크로/주석/빈 줄은 통과(런타임 치환 대상).
+        """
+        text = (command_text or "").strip()
+        if not text or text.startswith("#") or text.startswith("$"):
+            return ""
+        try:
+            src = self._make_source()
+            parse = self.dispatcher.parse(text, src)
+        except Exception as e:
+            return str(e)
+        first = text.split()[0]
+        known = self.command_names()
+        if parse.reader.can_read():
+            if first not in known:
+                return f"모르는 명령 '{first}'"
+            rem = parse.reader.get_remaining().strip()
+            return f"형식 오류 근처 '{rem[:16]}'"
+        node = parse.context
+        while node is not None:
+            if getattr(node, "command", None) is not None:
+                return ""   # 끝까지 소비 + 실행 가능한 명령 존재 = 정상
+            node = getattr(node, "child", None)
+        if first not in known:
+            return f"모르는 명령 '{first}'"
+        return "인자가 부족합니다"
 
     def command_names(self) -> set:
         """등록된 모든 명령 이름+별칭 집합(오류 안내에서 '아는 명령인지' 판별용)."""

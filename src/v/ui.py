@@ -1990,6 +1990,14 @@ def run_app(app: App):
         import ctypes
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("mokabun.qonvo")
 
+    # WebEngine(함수 에디터, CodeMirror)을 나중에 lazy import 하려면 QApplication 생성
+    # 전에 이 플래그가 필요. WebEngine 미설치여도 무해(플래그만 켬, 로드 안 함).
+    try:
+        from PyQt6.QtCore import Qt as _Qt
+        QApplication.setAttribute(_Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+    except Exception:
+        pass
+
     qapp = QApplication(sys.argv)
     qapp.setStyle("Fusion")
 

@@ -50,6 +50,10 @@ python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon
     --hidden-import "v.boards.whiteboard.repository_node" ^
     --hidden-import "v.boards.whiteboard.function_library" ^
     --hidden-import "v.boards.whiteboard.function_editor" ^
+    --hidden-import "v.boards.whiteboard.function_editor_web" ^
+    --hidden-import "PyQt6.QtWebEngineWidgets" ^
+    --hidden-import "PyQt6.QtWebEngineCore" ^
+    --hidden-import "PyQt6.QtWebChannel" ^
     --hidden-import "v.data_viewer" ^
     ./src/main.py
 del buildno.txt 2>nul
