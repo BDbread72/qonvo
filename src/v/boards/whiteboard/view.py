@@ -750,6 +750,17 @@ class WhiteboardView(QGraphicsView):
         # 보드 좌표로 잘못 전송돼 커서가 엉뚱하게 움직이는 것을 방지(마지막 위치 유지)
         if self._cursor_state() == "away":
             return
+        # 내 커서 스킨 자가복구 — 팬 종료/방사형 메뉴 닫기 등이 viewport 커서를 화살표로
+        # 되돌려 스킨이 풀리므로 매 폴 틱(120ms) 다시 입힌다. 위치 변화 없이 정지 상태에서
+        # 풀리는 경우(메뉴 닫힘=커서 워프, 위치 안 변함)도 아래 위치-스킵 전에 복구한다.
+        # 방사형 메뉴 중엔 뷰가 일부러 커서를 숨기므로 건드리지 않는다.
+        if not self.radial_menu:
+            cl = getattr(self.plugin, '_cursor_layer', None) if self.plugin is not None else None
+            if cl is not None:
+                try:
+                    cl.reassert_self_pointer()
+                except Exception:
+                    pass
         try:
             if self.radial_menu and getattr(self, '_original_scene_pos', None) is not None:
                 # 방사형 메뉴 중엔 워프된 실제 커서 말고 원래 위치를 보고
@@ -1383,8 +1394,14 @@ class WhiteboardView(QGraphicsView):
         # 애니메이션 중지
         self._anim_timer.stop()
 
-        # 커서 복원 (viewport에 적용)
+        # 커서 복원 (viewport에 적용) — 스킨이 있으면 화살표 대신 스킨으로 즉시 복원
         self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        cl = getattr(self.plugin, '_cursor_layer', None) if self.plugin is not None else None
+        if cl is not None:
+            try:
+                cl.reassert_self_pointer()
+            except Exception:
+                pass
 
         # 원래 위치로 마우스 이동
         if self._original_cursor_pos is not None:

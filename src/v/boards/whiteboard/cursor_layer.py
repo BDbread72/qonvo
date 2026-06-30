@@ -431,11 +431,22 @@ class CursorLayer(QObject):
         """내 커서 상태(typing/point/…) 변경 → 내 포인터를 해당 역할 스킨으로 즉시 전환.
 
         (서버 round-trip 없이 view 가 로컬에서 호출 → 즉각 반응)
+        menu/away 는 뷰가 커서를 직접 제어(방사형 메뉴=숨김 등)하므로 스킨을 입히지 않는다.
         """
         if state == self._self_state:
             return
         self._self_state = state
-        if self._self_roles:
+        if self._self_roles and state not in ("menu", "away"):
+            self._apply_self_pointer()
+
+    def reassert_self_pointer(self):
+        """내 포인터 스킨을 다시 강제 적용(자가복구).
+
+        뷰의 다른 코드(팬 종료/방사형 메뉴 닫기 등)가 viewport 커서를 ArrowCursor 로
+        되돌려 스킨이 풀리는 일이 잦다. 폴 타이머가 매 틱 호출해 120ms 내 복구한다.
+        menu/away 상태에선 뷰가 커서를 직접 제어하므로 건드리지 않는다.
+        """
+        if self._self_roles and self._self_state not in ("menu", "away"):
             self._apply_self_pointer()
 
     def _apply_self_pointer(self):
