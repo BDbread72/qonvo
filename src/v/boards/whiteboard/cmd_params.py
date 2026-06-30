@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -77,19 +78,52 @@ class _TagReader:
         return key
 
     def read_scalar(self) -> Any:
-        """다음 콤마/닫는기호 전까지의 한 값 (따옴표 문자열 또는 bareword)."""
+        """bareword 한 토큰 (따옴표 없으면 공백/콤마/닫는기호 전까지).
+
+        공백에서도 멈춘다 → `{a:1 b:2}`(콤마 누락)가 값에 흡수되지 않고 오류가 난다.
+        공백 포함 문자열은 따옴표로(MC SNBT 와 동일).
+        """
         if self.peek() in _QUOTES:
             return self.read_quoted()
         start = self.i
-        while not self.eof() and self.s[self.i] not in (",", "}", "]"):
+        while not self.eof() and self.s[self.i] not in (",", "}", "]") \
+                and not self.s[self.i].isspace():
             self.i += 1
-        return _coerce(self.s[start:self.i].strip())
+        return _coerce(self.s[start:self.i])
+
+    def read_compound(self) -> dict:
+        """중첩 컴파운드 `{...}` — 균형 잡힌 블록을 읽어 parse_tag 로 파싱."""
+        start = self.i
+        depth = 0
+        in_q = None
+        esc = False
+        while not self.eof():
+            c = self.s[self.i]; self.i += 1
+            if in_q is not None:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == in_q:
+                    in_q = None
+            elif c in _QUOTES:
+                in_q = c
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return parse_tag(self.s[start:self.i])
+        raise TagSyntaxError("중첩 컴파운드의 '}' 가 닫히지 않았습니다")
 
     def read_value(self) -> Any:
         if self.eof():
             raise TagSyntaxError("값이 필요합니다")
-        if self.peek() == "[":
+        c = self.peek()
+        if c == "[":
             return self.read_list()
+        if c == "{":
+            return self.read_compound()
         return self.read_scalar()
 
     def read_list(self) -> list:
@@ -113,8 +147,12 @@ class _TagReader:
             raise TagSyntaxError(f"',' 또는 ']' 가 필요합니다 (위치 {self.i})")
 
 
+_INT_RE = re.compile(r"-?(?:0|[1-9]\d*)$")        # 선행 0 금지(007 → 문자열 유지)
+_FLOAT_RE = re.compile(r"-?\d+\.\d+$")             # 일반 십진만(inf/nan/1e3/1_000 제외)
+
+
 def _coerce(tok: str) -> Any:
-    """bareword → bool / int / float / str 로 자동 변환."""
+    """bareword → bool / int / float / str. ID·버전 같은 값(007, 1e3, inf)은 문자열 보존."""
     if tok == "":
         return ""
     low = tok.lower()
@@ -122,14 +160,10 @@ def _coerce(tok: str) -> Any:
         return True
     if low == "false":
         return False
-    try:
+    if _INT_RE.match(tok):
         return int(tok)
-    except ValueError:
-        pass
-    try:
+    if _FLOAT_RE.match(tok):
         return float(tok)
-    except ValueError:
-        pass
     return tok
 
 
@@ -177,7 +211,12 @@ def parse_value(s: str) -> Any:
         return ""
     if s.startswith("{"):
         return parse_tag(s)          # 컴파운드
-    return _TagReader(s).read_value()  # 리스트 또는 스칼라
+    r = _TagReader(s)
+    val = r.read_value()             # 리스트 또는 스칼라
+    r.ws()
+    if not r.eof():                  # 여분 입력(예: 'data set x 1 2 3') → 조용히 버리지 않고 오류
+        raise TagSyntaxError(f"값 뒤에 여분의 입력: '{s[r.i:][:16]}' (공백 포함은 따옴표로)")
+    return val
 
 
 # ---------------------------------------------------------------------------

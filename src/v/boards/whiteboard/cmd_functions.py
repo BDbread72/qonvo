@@ -66,19 +66,20 @@ def list_functions() -> List[str]:
 def split_commands(text: str) -> List[str]:
     """본문을 명령 줄 목록으로. 줄바꿈 + top-level ';' 로 분리(괄호/따옴표 인식).
 
-    '#' 으로 시작하는 줄은 주석(무시). 빈 줄 제거.
+    ⚠️ 줄바꿈도 **괄호/따옴표 안에서는 구분자가 아니다** → 멀티라인 `{...}`/문자열이
+    안 깨진다. '#' 으로 시작하는 줄은 주석(무시). 빈 줄 제거.
     """
     out: List[str] = []
-    for raw_line in (text or "").split("\n"):
-        for cmd in _split_semicolons(raw_line):
-            c = cmd.strip()
-            if not c or c.startswith("#"):
-                continue
-            out.append(c)
+    for cmd in _split_top(text or ""):
+        c = cmd.strip()
+        if not c or c.startswith("#"):
+            continue
+        out.append(c)
     return out
 
 
-def _split_semicolons(s: str) -> List[str]:
+def _split_top(s: str) -> List[str]:
+    """top-level(괄호/따옴표 밖) ';' 와 줄바꿈에서 분리."""
     parts: List[str] = []
     buf: List[str] = []
     depth = 0
@@ -103,7 +104,7 @@ def _split_semicolons(s: str) -> List[str]:
         elif c in ("}", "]"):
             depth = max(0, depth - 1)
             buf.append(c)
-        elif c == ";" and depth == 0:
+        elif (c == ";" or c == "\n") and depth == 0:
             parts.append("".join(buf))
             buf = []
         else:

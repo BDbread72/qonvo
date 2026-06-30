@@ -27,6 +27,7 @@ def is_allowed_in_unquoted_string(c):
         or c == "-"
         or c == "."
         or c == "+"
+        or ord(c) > 127   # 한글 등 비ASCII 허용(데이터키·함수명 등). 구분자(공백/:,{}[])는 ASCII라 영향 없음
     )
 
 

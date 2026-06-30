@@ -495,18 +495,39 @@ def _resolve_vec2(loc, base_xy: Tuple[float, float]) -> Tuple[float, float]:
 
 
 def _node_id_by_name(plugin, name: str) -> Optional[int]:
-    """표시 이름(대소문자 무시)으로 노드 id 찾기. 없으면 None."""
-    target = (name or "").strip().lower()
+    """이름 또는 §#id§ 로 노드 id 찾기. 첫 일치 반환(이름 중복은 #id 로 구분). 없으면 None."""
+    target = (name or "").strip()
     if not target or plugin is None:
         return None
+    nodes = getattr(plugin.app, "nodes", {})
+    if target.startswith("#") and target[1:].isdigit():   # #5 처럼 id 직접 지정
+        nid = int(target[1:])
+        return nid if nid in nodes else None
+    low = target.lower()
+    for nid in nodes:
+        try:
+            nm = plugin.get_node_name(nid)
+        except Exception:
+            nm = ""
+        if nm and nm.lower() == low:
+            return nid
+    return None
+
+
+def _nodes_by_name(plugin, name: str) -> list:
+    """이름이 일치하는 모든 노드 id(중복 이름 감지용)."""
+    low = (name or "").strip().lower()
+    out = []
+    if not low or plugin is None or low.startswith("#"):
+        return out
     for nid in getattr(plugin.app, "nodes", {}):
         try:
             nm = plugin.get_node_name(nid)
         except Exception:
             nm = ""
-        if nm and nm.lower() == target:
-            return nid
-    return None
+        if nm and nm.lower() == low:
+            out.append(nid)
+    return out
 
 
 def _movable_item(plugin, node_id: int):
@@ -600,23 +621,34 @@ def _ports_of(plugin, item, port_type):
     return [p for p in ports if getattr(p, "port_type", None) == port_type]
 
 
-def _pick_port(plugin, item, port_type):
-    """item 의 대표 포트 1개 — 신호(⚡)보다 데이터 포트 우선."""
+def _pick_port(plugin, item, port_type, prefer_data_type=None):
+    """item 의 대표 포트 1개. 같은 데이터타입(prefer_data_type) 우선 → 신호(⚡)보다 데이터 우선."""
     cand = _ports_of(plugin, item, port_type)
+    if not cand:
+        return None
+    if prefer_data_type is not None:
+        same = [p for p in cand if getattr(p, "port_data_type", None) == prefer_data_type]
+        if same:
+            # 같은 타입 중에서도 ⚡ 보다 일반 우선
+            data = [p for p in same if not str(getattr(p, "port_name", "") or "").startswith("⚡")]
+            return (data or same)[0]
     data = [p for p in cand if not str(getattr(p, "port_name", "") or "").startswith("⚡")]
-    pool = data or cand
-    return pool[0] if pool else None
+    return (data or cand)[0]
 
 
 def _named_port(plugin, item, port_type, name):
-    """이름으로 포트 찾기 — 정확일치 → 부분포함(⚡ 이모지/공백 무시). 없으면 None."""
+    """이름으로 포트 찾기 — 정확일치 → 접두 → 부분포함(⚡ 이모지/공백 무시). 없으면 None."""
     nl = (name or "").strip().lower()
     cand = _ports_of(plugin, item, port_type)
-    for p in cand:
-        if (getattr(p, "port_name", "") or "").lower() == nl:
+    norm = [(p, (getattr(p, "port_name", "") or "").lower()) for p in cand]
+    for p, pn in norm:                 # 정확 일치
+        if pn == nl:
             return p
-    for p in cand:
-        if nl and nl in (getattr(p, "port_name", "") or "").lower():
+    for p, pn in norm:                 # 접두(이모지 제거 후 시작)
+        if nl and pn.lstrip("⚡ ").startswith(nl):
+            return p
+    for p, pn in norm:                 # 부분 포함
+        if nl and nl in pn:
             return p
     return None
 
@@ -890,14 +922,21 @@ class CreateCommand(Command):
         if factory is None:
             ctx.source.send_message(f"§e알 수 없는 노드 '{key}'")
             return 0
-        # 데이터 태그 먼저 파싱 — 잘못됐으면 노드를 만들지 않고 안내.
+        # 데이터 태그 먼저 파싱 + 키 검증 — 잘못됐으면 노드를 아예 만들지 않는다(부분생성 방지).
         params = {}
         if raw_tag:
-            from .cmd_params import parse_tag, TagSyntaxError
+            from .cmd_params import parse_tag, TagSyntaxError, params_for, _KEY_ALIASES
             try:
                 params = parse_tag(raw_tag)
             except TagSyntaxError as e:
                 ctx.source.send_message(f"§e데이터 태그 오류: {e}")
+                return 0
+            valid = params_for(key)
+            aliases = _KEY_ALIASES.get(key, {})
+            unknown = [k for k in params if aliases.get(k, k) not in valid]
+            if unknown:
+                ctx.source.send_message(
+                    f"§e'{key}' 가 모르는 키: §b{', '.join(unknown)}§e §7(가능: {', '.join(valid)})")
                 return 0
         from PyQt6.QtCore import QPointF
         before = set(getattr(plugin.app, "nodes", {}).keys())
@@ -1047,6 +1086,11 @@ class DeleteCommand(Command):
         if nid is None:
             ctx.source.send_message(f"§e'{target}' 노드를 찾을 수 없습니다 §7(/grep 으로 검색)")
             return 0
+        dups = _nodes_by_name(plugin, target)
+        if len(dups) > 1:
+            ids = ", ".join("#" + str(i) for i in dups)
+            ctx.source.send_message(
+                f"§e'{target}' 이름이 여러 개({ids}) — §b#{nid}§e 를 삭제합니다 §7(#id 로 지정 가능)")
         node = plugin.app.nodes.get(nid)
         if getattr(node, "_running", False):
             ctx.source.send_message(f"§e'{target}' 는 작업 중이라 삭제하지 않았습니다")
@@ -1122,6 +1166,9 @@ class ConnectCommand(Command):
                 return 0
         else:
             out_port = _pick_port(plugin, src_item, PortItem.OUTPUT)
+        if out_port is None:
+            ctx.source.send_message(f"§e'{a}' 에 출력 포트가 없습니다")
+            return 0
         if in_name:
             in_port = _named_port(plugin, tgt_item, PortItem.INPUT, in_name)
             if in_port is None:
@@ -1129,13 +1176,14 @@ class ConnectCommand(Command):
                 ctx.source.send_message(f"§e'{b}' 입력 포트 '{in_name}' 없음 §7(가능: {names})")
                 return 0
         else:
-            in_port = _pick_port(plugin, tgt_item, PortItem.INPUT)
-        if out_port is None:
-            ctx.source.send_message(f"§e'{a}' 에 출력 포트가 없습니다")
-            return 0
+            # 기본 입력은 출력의 데이터타입과 같은 포트를 우선(예: 신호 출력 → 신호 입력)
+            in_port = _pick_port(plugin, tgt_item, PortItem.INPUT,
+                                 prefer_data_type=getattr(out_port, "port_data_type", None))
         if in_port is None:
             ctx.source.send_message(f"§e'{b}' 에 입력 포트가 없습니다")
             return 0
+        # 단일 입력 포트가 이미 연결돼 있으면 create_edge 가 조용히 교체 → 미리 알림
+        replaced = bool(getattr(in_port, "edges", None)) and not getattr(in_port, "multi_connect", False)
         edge = plugin.create_edge(out_port, in_port)
         if edge is None:
             ctx.source.send_message("§e연결할 수 없습니다 §7(이미 연결됐거나 같은 종류 포트)")
@@ -1143,6 +1191,12 @@ class ConnectCommand(Command):
         op_label = getattr(out_port, "port_name", "") or "출력"
         ip_label = getattr(in_port, "port_name", "") or "입력"
         ctx.source.send_message(f"§a'{a}'§7:{op_label} §7→ §a'{b}'§7:{ip_label} §7연결")
+        # 데이터 타입 불일치 경고(끊지 않고 알림만 — 시그널↔문자 등은 의도일 수 있음)
+        ot, it = getattr(out_port, "port_data_type", None), getattr(in_port, "port_data_type", None)
+        if ot is not None and it is not None and ot != it:
+            ctx.source.send_message("§7  ⚠ 포트 데이터 타입이 달라요 (의도면 무시)")
+        if replaced:
+            ctx.source.send_message("§7  ⚠ 기존 연결을 교체했습니다")
         return 1
 
 
@@ -1552,7 +1606,7 @@ class FunctionCommand(Command):
 
     @staticmethod
     def _reserved() -> set:
-        return {"list", "show", "set", "add", "remove"}
+        return {"list", "show", "set", "add", "remove", "edit"}
 
 
 class DataKeyArgumentType(ArgumentType):
@@ -1745,7 +1799,10 @@ class ExecuteCommand(Command):
             ctx.source.send_message(f"§e조건 해석 실패: {e}")
             return 0
 
-        if cmd_text is None:                      # run 없음 → 조건 테스트만
+        if cmd_text is None:                      # run 없음
+            if store_key is not None:
+                ctx.source.send_message("§estore 는 run 과 함께 써야 합니다 §7(store result data <키> run <명령>)")
+                return 0
             ctx.source.send_message("§a조건 충족 ✓" if passed else "§7조건 불충족")
             return 1 if passed else 0
         if not passed:
