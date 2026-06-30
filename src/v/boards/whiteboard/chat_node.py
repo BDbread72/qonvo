@@ -19,10 +19,10 @@ import uuid
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QFrame, QApplication, QSpinBox, QMenu, QLineEdit,
-    QSizePolicy,
+    QSizePolicy, QGraphicsDropShadowEffect,
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPainterPath
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, pyqtSignal
+from PyQt6.QtGui import QPixmap, QPainter, QColor, QPen, QPainterPath, QLinearGradient
 
 from q import t
 from v.model_plugin import get_all_models, get_all_model_ids, get_all_model_options
@@ -470,169 +470,94 @@ class ChatLogWindow(QWidget):
             pass
 
 
-class _Bubble(QLabel):
-    """말풍선 1개 — 사용자(오른쪽 강조)/AI(왼쪽). 단어 줄바꿈 + 선택 가능."""
+class _TypingDots(QWidget):
+    """LLM 응답 생성 중 인디케이터 — 3점 파동(자체 QTimer, 위젯 단위 repaint 라 깜빡임 없음)."""
 
-    def __init__(self, role: str):
-        super().__init__()
-        self.setWordWrap(True)
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self._role = role
-        self._cur_error = None   # 스타일 dedupe — 같은 상태면 setStyleSheet 재호출 안 함
-        self.apply_style()
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(16)
+        self.setFixedWidth(40)
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self._tick)
 
-    def apply_style(self, error: bool = False):
-        # ⚠️ setStyleSheet 은 위젯 전체 re-polish 를 유발해 비싸다. 스트리밍 중 매 청크
-        # 호출되면 느려지므로, 스타일 상태(에러 여부)가 실제로 바뀔 때만 적용한다.
-        if self._cur_error == error:
-            return
-        self._cur_error = error
-        if self._role == "user":
-            bg = Theme.ACCENT_PRIMARY
-            fg = "white"
-        elif error:
-            bg = "#3a1e1e"
-            fg = Theme.ACCENT_DANGER
-        else:
-            bg = Theme.BG_INPUT
-            fg = Theme.TEXT_PRIMARY
-        self.setStyleSheet(
-            f"QLabel {{ background-color: {bg}; color: {fg}; border-radius: 10px; "
-            f"padding: 7px 10px; font-size: 12px; }}"
-        )
+    def start(self):
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
+
+    def stop(self):
+        self._timer.stop()
+        self.hide()
+
+    def _tick(self):
+        self._phase += 0.30
+        self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        base = QColor(Theme.ACCENT_PRIMARY)
+        cy = self.height() / 2.0
+        for i in range(3):
+            w = math.sin(self._phase - i * 0.7) * 0.5 + 0.5  # 0..1
+            c = QColor(base)
+            c.setAlphaF(0.30 + 0.70 * w)
+            p.setBrush(c)
+            r = 2.4 + 1.4 * w
+            p.drawEllipse(QPointF(6.0 + i * 11.0, cy), r, r)
+        p.end()
 
 
-class _ConversationView(QScrollArea):
-    """노드 면에 들어가는 채팅 트랜스크립트 — 전형적인 메신저식 말풍선 흐름.
+class _ShimmerBar(QWidget):
+    """헤더 아래 진행 셰이머 — 실행 중 좌→우로 흐르는 하이라이트(3px). 자체 타이머."""
 
-    핵심: 스트리밍 청크마다 마지막 AI 말풍선의 텍스트만 setText 로 갱신한다(전체 재생성
-    금지 = 깜빡임 없음). begin_turn 으로 턴을 추가하고, set_stream 으로 마지막 AI 응답을
-    갱신한다. 로드 시에만 set_history 로 1회 전체 구성한다.
-    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(3)
+        self._offset = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+        self.hide()
 
-    _MAX_TURNS = 30   # 노드 면엔 최근 N턴만(나머지는 로그창에서)
+    def start(self):
+        self._offset = 0.0
+        if not self._timer.isActive():
+            self._timer.start()
+        self.show()
 
-    def __init__(self):
-        super().__init__()
-        self.setWidgetResizable(True)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setStyleSheet("QScrollArea { background: transparent; border: none; }")
-        self._container = QWidget()
-        self._container.setStyleSheet("background: transparent;")
-        self._vbox = QVBoxLayout(self._container)
-        self._vbox.setContentsMargins(8, 8, 8, 8)
-        self._vbox.setSpacing(6)
-        self._vbox.addStretch(1)
-        self.setWidget(self._container)
-        self._rows = []          # [(row_widget, user_bubble|None, ai_bubble), ...]
-        self._scroll_pending = False
-        self._placeholder = QLabel("메시지를 입력해 대화를 시작하세요")
-        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder.setStyleSheet(
-            f"color: {Theme.TEXT_DISABLED}; font-size: 11px; background: transparent;")
-        self._vbox.insertWidget(0, self._placeholder)
+    def stop(self):
+        self._timer.stop()
+        self.hide()
 
-    def _new_bubble_row(self, role, text):
-        row = QWidget()
-        row.setStyleSheet("background: transparent;")
-        h = QHBoxLayout(row)
-        h.setContentsMargins(0, 0, 0, 0)
-        b = _Bubble(role)
-        b.setText(text)
-        b.setMaximumWidth(10_000)
-        if role == "user":
-            h.addStretch(1)
-            h.addWidget(b, 0)
-        else:
-            h.addWidget(b, 0)
-            h.addStretch(1)
-        # 말풍선 폭은 컨테이너의 ~85% 까지(긴 글은 줄바꿈)
-        b.setMaximumWidth(max(120, int(self.width() * 0.82)))
-        return row, b
+    def _tick(self):
+        self._offset = (self._offset + 0.022) % 1.0
+        self.update()
 
-    def _scroll_to_bottom(self):
-        # 청크마다 singleShot 을 쌓지 않도록 1개만 예약(이벤트 루프당 1회 스크롤).
-        if self._scroll_pending:
-            return
-        self._scroll_pending = True
-        QTimer.singleShot(0, self._do_scroll)
-
-    def _do_scroll(self):
-        self._scroll_pending = False
-        sb = self.verticalScrollBar()
-        if sb is not None:
-            sb.setValue(sb.maximum())
-
-    def begin_turn(self, user_text):
-        """새 턴 추가 — 사용자 말풍선 + (스트리밍용) 빈 AI 말풍선."""
-        if self._placeholder is not None:
-            self._placeholder.hide()
-        insert_at = self._vbox.count() - 1  # stretch 앞
-        urow = ubub = None
-        if user_text:
-            urow, ubub = self._new_bubble_row("user", user_text)
-            self._vbox.insertWidget(insert_at, urow)
-            insert_at += 1
-        arow, abub = self._new_bubble_row("ai", "")
-        abub.setText("●")
-        abub.apply_style()
-        self._vbox.insertWidget(insert_at, arow)
-        self._rows.append((urow, ubub, arow, abub))
-        self._trim()
-        self._scroll_to_bottom()
-
-    def set_stream(self, text, is_error=False):
-        """마지막 AI 말풍선 텍스트만 갱신(재생성 X). 활성 턴이 없으면 하나 만든다."""
-        if not self._rows:
-            self.begin_turn("")
-        _, _, _, abub = self._rows[-1]
-        abub.apply_style(error=is_error)
-        abub.setText(text if (text and text.strip()) else "●")
-        self._scroll_to_bottom()
-
-    def set_history(self, history):
-        """로드/복원 시 1회 전체 구성(최근 N턴)."""
-        for r in self._rows:
-            for w in (r[0], r[2]):
-                if w is not None:
-                    w.setParent(None)
-                    w.deleteLater()
-        self._rows = []
-        recent = list(history or [])[-self._MAX_TURNS:]
-        for entry in recent:
-            user = entry.get("user", "")
-            resp = entry.get("response", "")
-            err = bool(str(resp or "").lstrip().startswith(("Error:", "⚠️", "⚠")))
-            self.begin_turn(user)
-            if resp:
-                self.set_stream(resp, is_error=err)
-        if not recent and self._placeholder is not None:
-            self._placeholder.show()
-
-    def _trim(self):
-        while len(self._rows) > self._MAX_TURNS:
-            urow, ubub, arow, abub = self._rows.pop(0)
-            for w in (urow, arow):
-                if w is not None:
-                    w.setParent(None)
-                    w.deleteLater()
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        # 폭 변하면 말풍선 최대폭 재계산(줄바꿈 갱신)
-        mw = max(120, int(self.width() * 0.82))
-        for _, ubub, _, abub in self._rows:
-            if ubub is not None:
-                ubub.setMaximumWidth(mw)
-            abub.setMaximumWidth(mw)
+    def paintEvent(self, e):
+        p = QPainter(self)
+        w = float(self.width())
+        h = self.height()
+        p.fillRect(0, 0, int(w), h, QColor(Theme.BG_INPUT))
+        band = max(40.0, w * 0.35)
+        x = self._offset * (w + band) - band
+        grad = QLinearGradient(x, 0, x + band, 0)
+        c0 = QColor(Theme.ACCENT_PRIMARY); c0.setAlpha(0)
+        c1 = QColor(Theme.ACCENT_PRIMARY); c1.setAlpha(235)
+        grad.setColorAt(0.0, c0)
+        grad.setColorAt(0.5, c1)
+        grad.setColorAt(1.0, c0)
+        p.fillRect(QRectF(x, 0, band, h), grad)
+        p.end()
 
 
 class ChatNodeWidget(QWidget, BaseNode):
     """Chat node with model selection and streaming response."""
 
-    TITLE_NAME = "Chat"
+    TITLE_NAME = "LLM"
 
     # 보드별 이미지 임시 폴더 (plugin이 설정)
     _board_temp_dir: str | None = None
@@ -689,8 +614,10 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._archive_path = None
         self._archived_count = 0
 
-        self.setMinimumSize(300, 280)
-        self.resize(320, 400)   # 채팅창처럼 세로로 넉넉하게(대화 트랜스크립트 공간)
+        # 결과를 면에 안 보여주는 호출 노드 → 세로로 넉넉할 필요 없음. 컨트롤 + 상태만 담을
+        # 만큼 컴팩트하게. (예전 트랜스크립트용 400 높이는 하단이 텅 비는 '민머리'가 됐음)
+        self.setMinimumSize(260, 210)
+        self.resize(300, 250)
         self.setStyleSheet(
             f"""
             ChatNodeWidget {{
@@ -766,11 +693,15 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         layout.addWidget(self.header)
 
+        # 진행 셰이머 — 실행 중 헤더 아래로 좌→우 하이라이트가 흐른다(작동 중 시각 효과).
+        self._shimmer = _ShimmerBar()
+        layout.addWidget(self._shimmer)
+
         # model bar
         model_bar = QFrame()
         model_bar.setStyleSheet(f"background-color: {Theme.BG_INPUT}; border: none;")
         model_layout = QHBoxLayout(model_bar)
-        model_layout.setContentsMargins(12, 6, 12, 6)
+        model_layout.setContentsMargins(12, 7, 12, 7)
 
         model_label = QLabel(t("label.model"))
         model_label.setStyleSheet(f"color: {Theme.TEXT_TERTIARY}; font-size: 11px;")
@@ -791,24 +722,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             pass
         model_layout.addWidget(self.model_combo)
 
-        # 모든 생성 옵션(비율/해상도/품질 포함)은 'G' 패널(OptionsPanel)에서 스키마 기반으로
-        # 렌더된다 — 모델바에 콤보를 박아 클러터를 만들지 않는다.
-
-        # Generation options toggle button
-        self.btn_opts_toggle = QPushButton("G")
-        self.btn_opts_toggle.setFixedSize(24, 24)
-        self.btn_opts_toggle.setCheckable(True)
-        self.btn_opts_toggle.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: none; font-size: 12px;
-                border-radius: 4px; color: {Theme.TEXT_TERTIARY};
-            }}
-            QPushButton:checked {{ background-color: {Theme.ACCENT_PRIMARY}; color: white; }}
-            QPushButton:hover {{ background-color: {Theme.BG_HOVER}; }}
-        """)
-        self.btn_opts_toggle.setToolTip("Generation Options")
-        self.btn_opts_toggle.clicked.connect(self._toggle_opts_panel)
-        model_layout.addWidget(self.btn_opts_toggle)
+        # 생성 옵션(G 값)은 항상 인라인으로 보인다(아래 opts_panel). 토글/팝업 안 씀 —
+        # 저장된 값을 노드 면에서 바로 확인/수정할 수 있어야 하기 때문.
 
         self.btn_meta_toggle = QPushButton("M")
         self.btn_meta_toggle.setFixedSize(24, 24)
@@ -829,12 +744,12 @@ class ChatNodeWidget(QWidget, BaseNode):
         layout.addWidget(model_bar)
 
         # 생성 옵션 패널 — 스키마 기반(OptionsPanel). 현재 모델의 MODEL_OPTIONS 를 그대로
-        # 렌더하므로 thinking_level/budget 같은 옵션도 자동 노출되고, 새 옵션은 스키마 한 줄.
-        # 인라인 아코디언(G 토글로 펼침). 필드가 노드 폭에 맞춰 줄어들어 폭이 안 터진다.
+        # 렌더하므로 thinking_level/budget 같은 옵션도 자동 노출. **항상 인라인 표시**(토글 없음):
+        # 저장된 G 값이 노드 면에서 늘 보이고, 옵션 없는 모델이면 숨긴다. 옵션 수가 바뀌면
+        # 노드 높이를 콘텐츠에 맞춰 정리(_fit_height) — 빈 공간(민머리)도, 잘림도 없게.
         self.opts_panel = OptionsPanel()
         self.opts_panel.changed.connect(self._on_opts_changed)
-        self.opts_panel.hide()
-        layout.addWidget(self.opts_panel)
+        layout.addWidget(self.opts_panel)   # 인라인 — grid sizeHint 가 정확해 _fit_height 가 맞음
 
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         self._on_model_changed()
@@ -843,7 +758,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         input_bar = QFrame()
         input_bar.setStyleSheet(f"QFrame {{ background-color: {Theme.BG_INPUT}; border: none; }}")
         input_bar_layout = QHBoxLayout(input_bar)
-        input_bar_layout.setContentsMargins(12, 4, 12, 4)
+        input_bar_layout.setContentsMargins(12, 7, 12, 7)
         input_bar_layout.setSpacing(6)
 
         in_label = QLabel("IN")
@@ -891,7 +806,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         pref_bar = QFrame()
         pref_bar.setStyleSheet(f"QFrame {{ background-color: {Theme.BG_INPUT}; border: none; }}")
         pref_layout = QHBoxLayout(pref_bar)
-        pref_layout.setContentsMargins(12, 4, 12, 4)
+        pref_layout.setContentsMargins(12, 7, 12, 7)
         pref_layout.setSpacing(6)
 
         self.btn_pref_toggle = QPushButton("Preferred")
@@ -931,27 +846,28 @@ class ChatNodeWidget(QWidget, BaseNode):
         pref_layout.addStretch()
         layout.addWidget(pref_bar)
 
-        # Status area (replaces old content_area with inline responses)
+        # 상태 영역 — 이 노드는 LLM '호출' 노드다. 결과(output)는 노드 면에 표시하지 않고
+        # 출력 포트(신호/데이터)로만 내보낸다. 면에는 호출 상태 + 작동 효과만 둔다.
         self._status_area = QFrame()
         self._status_area.setStyleSheet(f"QFrame {{ background-color: {Theme.BG_TERTIARY}; border: none; }}")
         status_layout = QVBoxLayout(self._status_area)
-        status_layout.setContentsMargins(10, 12, 10, 12)
+        status_layout.setContentsMargins(10, 8, 10, 8)
         status_layout.setSpacing(6)
         status_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 상태 콘텐츠를 하나의 중앙 클러스터로 묶는다(위/아래 빈공간 2개 → 균형 1쌍).
+        status_layout.addStretch(1)
 
         self._status_label = QLabel(t("chat.status_idle"))
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setStyleSheet(
-            f"color: {Theme.TEXT_DISABLED}; font-size: 13px; font-weight: bold;"
+            f"color: {Theme.TEXT_DISABLED}; font-size: 15px; font-weight: bold;"
         )
-        self._status_label.hide()   # 상태는 작은 캡션으로만(대화창이 주). 펄스 대신 typing dots.
-        status_layout.addWidget(self._status_label)
+        status_layout.addWidget(self._status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # 인라인 대화 트랜스크립트 — 전형적인 채팅 서비스처럼 말풍선 흐름으로 보여준다.
-        # 스트리밍은 마지막 AI 말풍선만 갱신(전체 재생성 X = 깜빡임 없음).
-        self._conv = _ConversationView()
-        status_layout.addWidget(self._conv, stretch=1)
-        status_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        # 생성 중 인디케이터(3점 파동) — 실행 중에만 표시. 출력 텍스트는 안 보여준다.
+        self._gen_dots = _TypingDots()
+        self._gen_dots.hide()
+        status_layout.addWidget(self._gen_dots, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self._run_count_label = QLabel("")
         self._run_count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -993,54 +909,17 @@ class ChatNodeWidget(QWidget, BaseNode):
         self._btn_pref_view.hide()
         status_layout.addWidget(self._btn_pref_view, alignment=Qt.AlignmentFlag.AlignCenter)
 
+        status_layout.addStretch(1)
+
         layout.addWidget(self._status_area, stretch=1)
 
-        # 인라인 작성줄 — 전형적인 채팅창처럼 노드 하단에 입력칸 + 보내기.
-        composer = QFrame()
-        composer.setStyleSheet(
-            f"QFrame {{ background-color: {Theme.BG_INPUT}; "
-            f"border-bottom-left-radius: 9px; border-bottom-right-radius: 9px; }}")
-        crow = QHBoxLayout(composer)
-        crow.setContentsMargins(8, 6, 8, 6)
-        crow.setSpacing(6)
-
-        # 멀티라인/첨부가 필요할 때 여는 확장 버튼(기존 모달 재사용)
-        self.btn_expand = QPushButton("＋")
-        self.btn_expand.setFixedSize(28, 28)
-        self.btn_expand.setToolTip("자세히 작성 / 파일 첨부")
-        self.btn_expand.setStyleSheet(f"""
-            QPushButton {{ background: transparent; border: none; color: {Theme.TEXT_TERTIARY};
-                font-size: 16px; border-radius: 4px; }}
-            QPushButton:hover {{ background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_PRIMARY}; }}
-        """)
-        self.btn_expand.clicked.connect(self._open_input)
-        crow.addWidget(self.btn_expand)
-
-        self.composer_input = QLineEdit()
-        self.composer_input.setPlaceholderText("메시지 입력…  (Enter 전송)")
-        self.composer_input.setStyleSheet(f"""
-            QLineEdit {{ background-color: {Theme.BG_TERTIARY}; color: {Theme.TEXT_PRIMARY};
-                border: 1px solid {Theme.NODE_BORDER}; border-radius: 14px; padding: 6px 12px;
-                font-size: 12px; }}
-            QLineEdit:focus {{ border-color: {Theme.ACCENT_PRIMARY}; }}
-        """)
-        self.composer_input.returnPressed.connect(self._on_composer_submit)
-        crow.addWidget(self.composer_input, 1)
-
-        # 보내기/중지 버튼(실행 중엔 ■ 로 바뀌어 취소)
-        self.btn_input = QPushButton("➤")
-        self.btn_input.setFixedSize(32, 32)
-        self.btn_input.setStyleSheet(f"""
-            QPushButton {{ background-color: {Theme.ACCENT_PRIMARY}; color: white; border: none;
-                border-radius: 16px; font-size: 14px; font-weight: bold; }}
-            QPushButton:hover {{ background-color: {Theme.ACCENT_HOVER}; }}
-            QPushButton:disabled {{ background-color: {Theme.BG_HOVER}; color: {Theme.TEXT_DISABLED}; }}
-        """)
-        self.btn_input.setToolTip(t("button.compose"))
-        self.btn_input.clicked.connect(self._on_send_button)
-        crow.addWidget(self.btn_input)
-
-        layout.addWidget(composer)
+        # 직접 입력(작성줄) 제거 — 이 노드는 입력 포트/신호로만 트리거되는 LLM 호출 노드다.
+        # btn_input/composer_input 은 기존 상태-갱신 코드(setText/setEnabled, text/clear)와의
+        # 호환을 위해 숨김 객체로만 유지한다(레이아웃에 추가하지 않으므로 화면엔 안 보임).
+        self.composer_input = QLineEdit(self)
+        self.composer_input.hide()
+        self.btn_input = QPushButton(self)
+        self.btn_input.hide()
 
         self.tokens_label = QLabel("")
         self.tokens_label.setStyleSheet(f"color: {Theme.TEXT_DISABLED}; font-size: 10px; padding: 2px 10px;")
@@ -1052,36 +931,38 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.resize_handle.move(self.width() - 16, self.height() - 16)
         self.resize_handle.raise_()
 
+        # 작동 중 글로우(노드 둘레 호흡) — proxy 그림자라 위젯 내부 리페인트 없음 = 깜빡임 없음.
         self._pulse_timer = QTimer()
-        self._pulse_timer.setInterval(350)   # 타이핑 점 애니메이션(저빈도 — 깜빡임/부하 없음)
+        self._pulse_timer.setInterval(50)    # ~20fps 부드러운 호흡
         self._pulse_timer.timeout.connect(self._pulse_tick)
         self._pulse_active = False
-        self._typing_phase = 0
+        self._glow_phase = 0.0
+        self._glow_effect = None
 
     def _update_status(self, state):
-        """Update the status indicator: 'idle', 'running', or 'done'."""
+        """호출 상태 표시(idle/running/done/error). 결과 텍스트는 표시하지 않음 — 출력 포트로만 나감."""
         count = len(self._history)
+        base = "font-size: 15px; font-weight: bold;"
+        running = (state == "running")
         if state == "idle":
             self._status_label.setText(t("chat.status_idle"))
-            self._status_label.setStyleSheet(
-                f"color: {Theme.TEXT_DISABLED}; font-size: 13px; font-weight: bold;"
-            )
+            self._status_label.setStyleSheet(f"color: {Theme.TEXT_DISABLED}; {base}")
         elif state == "running":
             self._status_label.setText(t("chat.status_running"))
-            self._status_label.setStyleSheet(
-                f"color: {Theme.ACCENT_PRIMARY}; font-size: 13px; font-weight: bold;"
-            )
+            self._status_label.setStyleSheet(f"color: {Theme.ACCENT_PRIMARY}; {base}")
         elif state == "done":
             self._status_label.setText(t("chat.status_done"))
-            self._status_label.setStyleSheet(
-                f"color: {Theme.ACCENT_SUCCESS}; font-size: 13px; font-weight: bold;"
-            )
+            self._status_label.setStyleSheet(f"color: {Theme.ACCENT_SUCCESS}; {base}")
         elif state == "error":
             # 실패를 성공('완료')과 똑같이 보이지 않게 빨간 '오류' 상태로 표시.
             self._status_label.setText("⚠ " + t("chat.status_done"))
-            self._status_label.setStyleSheet(
-                f"color: {Theme.ACCENT_DANGER}; font-size: 13px; font-weight: bold;"
-            )
+            self._status_label.setStyleSheet(f"color: {Theme.ACCENT_DANGER}; {base}")
+
+        # 생성 중 점은 실행 중에만 표시.
+        if running:
+            self._gen_dots.start()
+        else:
+            self._gen_dots.stop()
 
         if count > 0:
             self._run_count_label.setText(t("chat.run_count", count=count))
@@ -1090,6 +971,10 @@ class ChatNodeWidget(QWidget, BaseNode):
         else:
             self._run_count_label.hide()
             self._btn_log.hide()
+
+        # 실행 기록(회수·로그버튼)이 생기면 상태 영역이 더 필요해진다 → 최소 높이 갱신해
+        # 짜부/잘림 방지(현재 높이가 모자라면 자동으로 그만큼 키운다).
+        self._apply_content_min()
 
     def _open_log_window(self):
         if self._log_window is not None:
@@ -1135,8 +1020,58 @@ class ChatNodeWidget(QWidget, BaseNode):
         )
         self._log_window.show()
 
-    def _toggle_opts_panel(self):
-        self.opts_panel.setVisible(self.btn_opts_toggle.isChecked())
+    def _apply_content_min(self):
+        """노드 최소 높이를 '콘텐츠가 안 짜부되는 높이'로 고정한다.
+
+        옵션이 항상 인라인이라 막대+옵션+상태가 차지하는 최소 높이가 있다. 이걸 노드의
+        minimumHeight 로 박아두면, 리사이즈 핸들로 드래그하든 작은 기본값이든 그 아래로
+        못 줄어든다 = 내용이 짜부되지 않는다. 폭은 별도(가로는 위젯이 알아서 줄어듦).
+        """
+        lay = self.layout()
+        if lay is None:
+            return
+        lay.activate()
+        need = lay.minimumSize().height()
+        if need > 0 and self.minimumHeight() != need:
+            self.setMinimumHeight(need)
+            if self.height() < need:
+                self.resize(self.width(), need)
+                if self.proxy is not None:
+                    try:
+                        self.proxy.resize(self.width(), need)
+                    except Exception:
+                        pass
+
+    def _fit_height(self):
+        """최소 높이(짜부 방지)를 잡고, 현재 높이가 부족하면 콘텐츠 선호 높이로 키운다.
+
+        옵션 수가 모델마다 달라 필요 높이가 바뀐다 → 모델 변경/최초 표시 때만 한 번 정리
+        (빈 공간/잘림 방지). 폭은 유지. 토글로 깜빡 늘었다 줄지 않음.
+        """
+        lay = self.layout()
+        if lay is None:
+            return
+        self._apply_content_min()
+        target = max(self.minimumHeight(), lay.sizeHint().height())
+        if self.height() != target:
+            self.resize(self.width(), target)
+            if self.proxy is not None:
+                try:
+                    self.proxy.resize(self.width(), target)
+                except Exception:
+                    pass
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # 구성 시점엔 레이아웃이 안 잡혀 sizeHint 가 작게 나온다 → 표시 직후 한 번 정리.
+        if not getattr(self, "_did_initial_fit", False):
+            self._did_initial_fit = True
+            if getattr(self, "_restored_geometry", False):
+                # 저장된 크기는 존중하되, 짜부 방지 최소 높이는 항상 건다
+                # (옛 보드의 너무 작은 저장 높이는 최소까지 자동으로 올라감).
+                QTimer.singleShot(0, self._apply_content_min)
+            else:
+                QTimer.singleShot(0, self._fit_height)
 
     def _open_meta_menu(self):
         """M 클릭 → 어떤 계측 포트를 노출할지 고르는 체크리스트 메뉴(여러 개 연속 선택 가능)."""
@@ -1180,8 +1115,8 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._pref_window = None
         self.pending_results = results
         self._running = False
-        self._stop_pulse()
-        self.btn_input.setText(t("button.compose"))
+        self._stop_pulse(ok=True)
+        self.btn_input.setText("▶")
         self.btn_input.setEnabled(True)
         self.model_combo.setEnabled(True)
         self._update_status("done")
@@ -1203,6 +1138,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             self._history[-1]["preferred_candidates"] = preferred_candidates
             self._history[-1]["preferred_texts"] = [c["text"] for c in preferred_candidates]
             self._history[-1]["response"] = summary
+        self._update_inline_response(summary)   # 출력 블록을 요약으로 마감(점 멈춤)
         if self.on_modified:
             self.on_modified()
 
@@ -1378,11 +1314,9 @@ class ChatNodeWidget(QWidget, BaseNode):
         self.opts_panel.set_schema(opts)
         # 모델이 바뀌면 옵션 기본값으로 node_options 갱신(저장 대상 항상 최신 유지).
         self.node_options = self.opts_panel.values()
-        # 옵션이 없는 모델이면 'G' 토글/패널을 닫아둔다.
-        if not self.opts_panel.has_options() and self.btn_opts_toggle.isChecked():
-            self.btn_opts_toggle.setChecked(False)
-            self.opts_panel.hide()
-        self.btn_opts_toggle.setEnabled(self.opts_panel.has_options())
+        # 옵션 있는 모델만 인라인 패널을 보인다(없으면 숨겨 빈 영역 제거) + 높이 정리.
+        self.opts_panel.setVisible(self.opts_panel.has_options())
+        self._fit_height()
         if callable(self.on_modified):
             self.on_modified(self.node_id)
 
@@ -1511,7 +1445,6 @@ class ChatNodeWidget(QWidget, BaseNode):
             "prompt_entries": list(prompt_entries),
         })
         self._current_streaming = ""
-        self._conv.begin_turn(msg)   # 대화창에 사용자 말풍선 + 빈 AI 말풍선
 
         self._update_status("running")
         self.btn_input.setText("■")
@@ -1549,7 +1482,6 @@ class ChatNodeWidget(QWidget, BaseNode):
             "prompt_entries": entry.get("prompt_entries", []),
         })
         self._current_streaming = ""
-        self._conv.begin_turn(entry["msg"])
 
         self._update_status("running")
         self.btn_input.setText("■")
@@ -1580,8 +1512,8 @@ class ChatNodeWidget(QWidget, BaseNode):
 
         if done:
             self._running = False
-            self._stop_pulse()
-            self.btn_input.setText("➤")
+            self._stop_pulse(ok=not streaming_error)
+            self.btn_input.setText("▶")
             self.btn_input.setEnabled(True)
             self.model_combo.setEnabled(True)
             if self._history and (self.tokens_in or self.tokens_out):
@@ -1597,12 +1529,13 @@ class ChatNodeWidget(QWidget, BaseNode):
                 QTimer.singleShot(0, self._process_queue)
 
     def _update_inline_response(self, text, is_error=False):
-        """대화창의 마지막 AI 말풍선을 갱신한다(스트리밍 = 재생성 없이 텍스트만)."""
-        conv = getattr(self, "_conv", None)
-        if conv is None:
-            return
+        """노드 면에는 결과를 표시하지 않는다(LLM 호출 노드 — 출력 포트로만 내보냄).
+
+        과거엔 여기서 대화창 말풍선을 갱신했으나, 이 노드는 결과를 보여주는 게 아니라
+        신호/데이터로 흘려보내는 역할이라 표시를 제거. 스트리밍 중 작동 표시는
+        상태 라벨 + 글로우/셰이머/생성점이 담당한다. 지난 결과는 '로그 보기'에서만.
+        """
         try:
-            conv.set_stream(str(text or ""), is_error=is_error)
             if hasattr(self, "_btn_log") and self._history:
                 self._btn_log.show()
         except Exception:
@@ -1654,7 +1587,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         return None
 
     def set_image_response(self, text, images, thought_signatures=None):
-        self._stop_pulse()
+        self._stop_pulse(ok=True)
         self.ai_response = text or t("status.images_created", count=len(images))
         self.ai_image_paths = []
         self.thought_signatures = thought_signatures or []
@@ -1702,9 +1635,11 @@ class ChatNodeWidget(QWidget, BaseNode):
         elapsed = time.time() - self._start_time if self._start_time else 0
         self._record_run(elapsed, is_error=False)
         self._set_meta_port_values(elapsed)
-        self.btn_input.setText(t("button.compose"))
+        self.btn_input.setText("▶")
         self.btn_input.setEnabled(True)
         self.model_combo.setEnabled(True)
+        # 출력 블록을 요약 텍스트로 마감(이미지 생성은 텍스트 스트림이 없으므로 명시 갱신).
+        self._update_inline_response(self.ai_response or t("status.images_created", count=len(saved_paths)))
         self._update_status("done")
         if self._send_queue:
             QTimer.singleShot(0, self._process_queue)
@@ -1780,33 +1715,99 @@ class ChatNodeWidget(QWidget, BaseNode):
         if self.on_modified:
             self.on_modified()
 
-    def _start_pulse(self):
-        # 깜빡임 원인이던 '노드 전체 배경 33fps 리페인트 + 스타일시트 스왑'을 제거.
-        # 대신 첫 청크 도착 전까지 마지막 AI 말풍선에 타이핑 점(●●●)만 부드럽게 돌린다.
-        self._pulse_active = True
-        self._typing_phase = 0
-        self._pulse_timer.start()
+    def _ensure_glow(self):
+        """proxy(캔버스 아이템)에 드롭섀도 글로우 효과를 단다 — 위젯 내부와 무관해 깜빡임 없음."""
+        if self._glow_effect is not None:
+            return self._glow_effect
+        if self.proxy is None:
+            return None
+        try:
+            eff = QGraphicsDropShadowEffect()
+            eff.setOffset(0, 0)
+            eff.setBlurRadius(18)
+            eff.setColor(QColor(Theme.ACCENT_PRIMARY))
+            self.proxy.setGraphicsEffect(eff)
+            self._glow_effect = eff
+        except Exception:
+            self._glow_effect = None
+        return self._glow_effect
 
-    def _stop_pulse(self):
+    def _clear_glow(self):
+        self._glow_effect = None
+        if self.proxy is None:
+            return
+        try:
+            self.proxy.setGraphicsEffect(None)
+        except Exception:
+            pass
+
+    def _start_pulse(self):
+        # 작동 중 시각 효과 = (1) 노드 둘레 글로우 호흡 (2) 헤더 진행 셰이머
+        # (3) 상태영역 생성 점(_gen_dots, _update_status 가 토글) (4) 내부 accent 테두리(paintEvent).
+        self._pulse_active = True
+        self._glow_phase = 0.0
+        self._ensure_glow()
+        self._pulse_timer.start()
+        sh = getattr(self, "_shimmer", None)
+        if sh is not None:
+            sh.start()
+        self.update()   # 내부 실행 테두리 즉시 표시
+
+    def _stop_pulse(self, ok=True):
         self._pulse_timer.stop()
         self._pulse_active = False
+        sh = getattr(self, "_shimmer", None)
+        if sh is not None:
+            sh.stop()
+        gd = getattr(self, "_gen_dots", None)
+        if gd is not None:
+            gd.stop()   # 생성 중 점 정지(자체 타이머)
+        # 완료 플래시(성공=녹색 / 오류=빨강) 후 글로우 제거.
+        eff = self._glow_effect
+        if eff is not None:
+            try:
+                eff.setColor(QColor(Theme.ACCENT_SUCCESS if ok else Theme.ACCENT_DANGER))
+                eff.setBlurRadius(26)
+            except Exception:
+                pass
+            QTimer.singleShot(650, self._clear_glow)
+        self.update()   # 내부 실행 테두리 제거
 
     def _pulse_tick(self):
         if not self._pulse_active:
             return
-        # 실제 응답이 아직 안 들어왔을 때만 '생성 중' 점 애니메이션(전체 리페인트 없음).
-        if self._current_streaming and self._current_streaming.strip():
+        eff = self._glow_effect
+        if eff is None:
             return
-        self._typing_phase = (self._typing_phase + 1) % 3
-        dots = "●" + " ●" * self._typing_phase
+        self._glow_phase += 0.16
+        w = math.sin(self._glow_phase) * 0.5 + 0.5   # 0..1 호흡
+        # 파랑(ACCENT) ↔ 밝은 시안 사이 보간 + blur 호흡.
+        a = QColor(Theme.ACCENT_PRIMARY)
+        r = int(a.red() + (90 - a.red()) * w)
+        g = int(a.green() + (200 - a.green()) * w)
+        b = int(a.blue() + (255 - a.blue()) * w)
         try:
-            self._conv.set_stream(dots)
+            eff.setColor(QColor(r, g, b))
+            eff.setBlurRadius(16 + 22 * w)
         except Exception:
             pass
 
     def paintEvent(self, event):
-        # 펄스 오버레이 제거 — 스타일시트(둥근 배경/테두리)만으로 그린다(깜빡임 없음).
         super().paintEvent(event)
+        # 실행 중엔 노드 내부에 accent 둥근 테두리(이미 리페인트되는 순간에만 그려져 깜빡임 없음).
+        if getattr(self, "_running", False):
+            try:
+                p = QPainter(self)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                pen = QPen(QColor(Theme.ACCENT_PRIMARY))
+                pen.setWidth(2)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                r = self.rect().adjusted(2, 2, -2, -2)
+                p.drawRoundedRect(QRectF(r), 11.0, 11.0)
+                p.end()
+            except Exception:
+                pass
 
     def pack_history(self, keep_recent=20):
         if len(self._history) <= keep_recent:
@@ -1915,7 +1916,6 @@ class ChatNodeWidget(QWidget, BaseNode):
             "extra_input_defs": [] if _light else copy.deepcopy(self.extra_input_defs),
             "preferred_options_enabled": self.preferred_options_enabled,
             "preferred_options_count": self.preferred_options_count,
-            "opts_panel_visible": self.btn_opts_toggle.isChecked(),
             "meta_selected": sorted(self.meta_selected),
             "history": [] if _light else copy.deepcopy(self._history),
         }
@@ -1959,6 +1959,7 @@ class ChatNodeWidget(QWidget, BaseNode):
         """
         if row.get("width") and row.get("height"):
             self.resize(int(row["width"]), int(row["height"]))
+            self._restored_geometry = True   # 저장된 크기 존중 — showEvent 자동 fit 안 함
         if "user_message" in row:
             self.user_message = row["user_message"]
         if "user_files" in row:
@@ -1999,9 +2000,7 @@ class ChatNodeWidget(QWidget, BaseNode):
             self.preferred_options_count = int(row["preferred_options_count"])
             self.pref_count_spin.setValue(self.preferred_options_count)
         self.pref_count_spin.setEnabled(self.preferred_options_enabled)
-        if row.get("opts_panel_visible", False) and self.opts_panel.has_options():
-            self.btn_opts_toggle.setChecked(True)
-            self.opts_panel.setVisible(True)
+        # 옵션 패널은 항상 인라인이라 별도 가시성 복원 불필요(set_schema 가 모델 따라 채움).
         if "history" in row:
             self._history = row.get("history") or []
             if not self._history and row.get("ai_response"):
@@ -2014,12 +2013,8 @@ class ChatNodeWidget(QWidget, BaseNode):
                     "tokens_out": row.get("tokens_out", 0),
                     "model": row.get("model", ""),
                 }]
-            # 대화창을 로드된 히스토리로 1회 재구성(이후 스트리밍은 증분).
-            if getattr(self, "_conv", None) is not None:
-                try:
-                    self._conv.set_history(self._history)
-                except Exception:
-                    pass
+            # 결과는 노드 면에 표시하지 않는다(출력 포트로만). 로드 시 상태만 갱신.
+            self._update_status("done" if self._history else "idle")
         if "archive_path" in row:
             self._archive_path = row.get("archive_path")
             self._archived_count = row.get("archived_count", 0)
