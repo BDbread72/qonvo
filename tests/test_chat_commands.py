@@ -61,6 +61,11 @@ def main():
     check("edge created", len(plugin._edges) == 1)
     check("connect missing node fails", fails('connect Sys Nope'))
     check("connect self fails", fails('connect Sys Sys'))
+    # 포트 지정 — Sys(prompt) 출력 'prompt' → N(number) 입력 '설정' 명시 연결
+    check("connect named port", ok('connect Sys N prompt 설정'))
+    check("connect bad port fails", fails('connect Sys N prompt 없는포트'))
+    check("port autocomplete", any("설정" in t for t in
+          [c.text for c in ctrl.suggest('connect Sys N prompt ', len('connect Sys N prompt '))]))
 
     print("grep:")
     r = ctrl.execute('grep helpful')

@@ -592,17 +592,79 @@ def _delete_node_by_id(plugin, nid: int) -> bool:
     return True
 
 
-def _pick_port(plugin, item, port_type):
-    """item 의 대표 포트 1개 — 신호(⚡)보다 데이터 포트 우선."""
-    from .items import PortItem
+def _ports_of(plugin, item, port_type):
     try:
         ports = plugin._collect_ports(item)
     except Exception:
         ports = []
-    cand = [p for p in ports if getattr(p, "port_type", None) == port_type]
+    return [p for p in ports if getattr(p, "port_type", None) == port_type]
+
+
+def _pick_port(plugin, item, port_type):
+    """item 의 대표 포트 1개 — 신호(⚡)보다 데이터 포트 우선."""
+    cand = _ports_of(plugin, item, port_type)
     data = [p for p in cand if not str(getattr(p, "port_name", "") or "").startswith("⚡")]
     pool = data or cand
     return pool[0] if pool else None
+
+
+def _named_port(plugin, item, port_type, name):
+    """이름으로 포트 찾기 — 정확일치 → 부분포함(⚡ 이모지/공백 무시). 없으면 None."""
+    nl = (name or "").strip().lower()
+    cand = _ports_of(plugin, item, port_type)
+    for p in cand:
+        if (getattr(p, "port_name", "") or "").lower() == nl:
+            return p
+    for p in cand:
+        if nl and nl in (getattr(p, "port_name", "") or "").lower():
+            return p
+    return None
+
+
+def _port_names(plugin, item, port_type):
+    """그 노드의 포트 이름 목록(에러 안내용)."""
+    return [getattr(p, "port_name", "") or "?" for p in _ports_of(plugin, item, port_type)]
+
+
+class PortNameArgumentType(ArgumentType):
+    """노드의 포트 이름 하나. 자동완성은 앞서 파싱된 노드(node_arg)의 해당 방향 포트들."""
+
+    def __init__(self, node_arg, port_type_name):
+        self._node_arg = node_arg          # "from" | "to"
+        self._port_type_name = port_type_name  # "OUTPUT" | "INPUT"
+
+    def parse(self, reader, source=None):
+        from mccmd.errors import CommandSyntaxError
+        from mccmd.reader import _is_quoted_string_start
+        if not reader.can_read():
+            raise CommandSyntaxError("포트 이름을 입력하세요", reader)
+        if _is_quoted_string_start(reader.peek()):
+            return reader.read_string()
+        start = reader.cursor
+        while reader.can_read() and reader.peek() != " ":
+            reader.skip()
+        return reader.string[start:reader.cursor]
+
+    def list_suggestions(self, context, builder):
+        try:
+            from .items import PortItem
+            cc = context.source.ctx
+            plugin = cc.plugin
+            node_name = context.get_argument(self._node_arg)
+            nid = _node_id_by_name(plugin, node_name)
+            if nid is None:
+                return builder.build()
+            pt = getattr(PortItem, self._port_type_name)
+            typed = builder.remaining_lower
+            for pn in _port_names(plugin, _movable_item(plugin, nid), pt):
+                if pn.lower().startswith(typed) or typed in pn.lower():
+                    builder.suggest(('"%s"' % pn) if " " in pn else pn)
+        except Exception:
+            pass
+        return builder.build()
+
+    def get_examples(self):
+        return ["값", "\"⚡ 증가\""]
 
 
 def _run_node(node) -> Tuple[bool, str]:
@@ -1005,12 +1067,20 @@ class DeleteCommand(Command):
 class ConnectCommand(Command):
     name = "connect"
     aliases = ("link", "wire")
-    description = "두 노드를 엣지로 연결한다 (앞 노드 출력 → 뒤 노드 입력)"
+    description = "두 노드를 엣지로 연결 (생략 시 첫 데이터 포트, [출력] [입력] 으로 포트 지정)"
     permission = staticmethod(_require_level(MEMBER))
 
     def build(self, root):
         src = argument("from", node_name_arg())
-        src.then(argument("to", node_name_arg()).executes(self.run))
+        to = argument("to", node_name_arg())
+        to.executes(self.run)
+        outp = argument("out", PortNameArgumentType("from", "OUTPUT"))
+        outp.executes(self.run)
+        inp = argument("in", PortNameArgumentType("to", "INPUT"))
+        inp.executes(self.run)
+        outp.then(inp)
+        to.then(outp)
+        src.then(to)
         root.then(src)
         return root
 
@@ -1034,8 +1104,32 @@ class ConnectCommand(Command):
         if na == nb:
             ctx.source.send_message("§e같은 노드끼리는 연결할 수 없습니다")
             return 0
-        out_port = _pick_port(plugin, _movable_item(plugin, na), PortItem.OUTPUT)
-        in_port = _pick_port(plugin, _movable_item(plugin, nb), PortItem.INPUT)
+
+        def _opt(arg):
+            try:
+                v = ctx.get_argument(arg)
+                return v.strip() if v else None
+            except Exception:
+                return None
+        out_name, in_name = _opt("out"), _opt("in")
+        src_item, tgt_item = _movable_item(plugin, na), _movable_item(plugin, nb)
+
+        if out_name:
+            out_port = _named_port(plugin, src_item, PortItem.OUTPUT, out_name)
+            if out_port is None:
+                names = ", ".join(_port_names(plugin, src_item, PortItem.OUTPUT)) or "(없음)"
+                ctx.source.send_message(f"§e'{a}' 출력 포트 '{out_name}' 없음 §7(가능: {names})")
+                return 0
+        else:
+            out_port = _pick_port(plugin, src_item, PortItem.OUTPUT)
+        if in_name:
+            in_port = _named_port(plugin, tgt_item, PortItem.INPUT, in_name)
+            if in_port is None:
+                names = ", ".join(_port_names(plugin, tgt_item, PortItem.INPUT)) or "(없음)"
+                ctx.source.send_message(f"§e'{b}' 입력 포트 '{in_name}' 없음 §7(가능: {names})")
+                return 0
+        else:
+            in_port = _pick_port(plugin, tgt_item, PortItem.INPUT)
         if out_port is None:
             ctx.source.send_message(f"§e'{a}' 에 출력 포트가 없습니다")
             return 0
@@ -1046,7 +1140,9 @@ class ConnectCommand(Command):
         if edge is None:
             ctx.source.send_message("§e연결할 수 없습니다 §7(이미 연결됐거나 같은 종류 포트)")
             return 0
-        ctx.source.send_message(f"§a'{a}' §7→ §a'{b}' §7연결했습니다")
+        op_label = getattr(out_port, "port_name", "") or "출력"
+        ip_label = getattr(in_port, "port_name", "") or "입력"
+        ctx.source.send_message(f"§a'{a}'§7:{op_label} §7→ §a'{b}'§7:{ip_label} §7연결")
         return 1
 
 
