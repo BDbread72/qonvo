@@ -726,7 +726,25 @@ class HelpCommand(Command):
                 ctx.source.send_message("    §b/" + ln)
         if target.name == "create":
             self._create_params(ctx)
+        if target.name == "execute":
+            self._execute_help(ctx)
         return 1
+
+    def _execute_help(self, ctx):
+        """/help execute — 조건 종류 레퍼런스."""
+        lines = [
+            "  §7조건(§bif§7/§bunless§7) 종류:",
+            "    §bdata <키> [matches <범위>|<op> <수>]§7 — 저장소 값",
+            "    §bvalue <노드> [matches <범위>|<op> <수>]§7 — number/math 노드 값",
+            "    §bnode <이름>§7 — 노드 존재",
+            "    §bonline <유저>§7 — 접속 중(서버)",
+            "    §bcursor <유저> x|y <op> <수>§7 — 커서 좌표(서버)",
+            "  §7범위: §b10§7(정확) §b10..§7(이상) §b..10§7(이하) §b5..10§7(사이)",
+            "  §7예: §b/execute if value 카운터 matches 100.. run delete 카운터",
+            "  §7  계산→저장: §b/execute store result data n run grep TODO",
+        ]
+        for ln in lines:
+            ctx.source.send_message(ln)
 
     def _create_params(self, ctx):
         """/help create — 노드별 데이터 태그 키 목록(마크식 {key:value})."""
@@ -1441,11 +1459,290 @@ class FunctionCommand(Command):
         return {"list", "show", "set", "add", "remove"}
 
 
+class DataKeyArgumentType(ArgumentType):
+    """저장된 데이터 키 하나. 자동완성은 저장된 키 목록."""
+
+    def parse(self, reader, source=None):
+        from mccmd.errors import CommandSyntaxError
+        raw = reader.read_unquoted_string()
+        if not raw:
+            raise CommandSyntaxError("데이터 키를 입력하세요", reader)
+        return raw
+
+    def list_suggestions(self, context, builder):
+        typed = builder.remaining_lower
+        try:
+            from .cmd_data import data_keys
+            for k in data_keys():
+                if k.lower().startswith(typed):
+                    builder.suggest(k)
+        except Exception:
+            pass
+        return builder.build()
+
+    def get_examples(self):
+        return ["hp", "pos"]
+
+
+def data_key_arg():
+    return DataKeyArgumentType()
+
+
+def _node_numeric(plugin, name: str):
+    """노드 이름 → 수치 값(number/math 값·출력포트). 없으면 None."""
+    nid = _node_id_by_name(plugin, name)
+    if nid is None:
+        return None
+    node = plugin.app.nodes.get(nid)
+    for attr in ("_value", "_result"):
+        v = getattr(node, attr, None)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    op = getattr(node, "output_port", None)
+    pv = getattr(op, "port_value", None) if op is not None else None
+    if isinstance(pv, (int, float)) and not isinstance(pv, bool):
+        return float(pv)
+    return None
+
+
+class DataCommand(Command):
+    name = "data"
+    aliases = ("db",)
+    description = "자체 데이터 저장소 — set/get/merge/remove/list (값=SNBT)"
+
+    def build(self, root):
+        root.then(literal("set").then(argument("key", word()).then(
+            argument("value", greedy_string()).executes(self.run_set))))
+        get_key = argument("key", data_key_arg())
+        get_key.executes(self.run_get)
+        get_key.then(argument("path", word()).executes(self.run_get))
+        root.then(literal("get").then(get_key))
+        root.then(literal("merge").then(argument("key", word()).then(
+            argument("compound", greedy_string()).executes(self.run_merge))))
+        root.then(literal("remove").then(
+            argument("key", data_key_arg()).executes(self.run_remove)))
+        root.then(literal("list").executes(self.run_list))
+        return root
+
+    def run_set(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_data import data_set
+        from .cmd_params import parse_value, TagSyntaxError
+        key = (ctx.get_argument("key") or "").strip()
+        raw = ctx.get_argument("value") or ""
+        try:
+            val = parse_value(raw)
+        except TagSyntaxError as e:
+            ctx.source.send_message(f"§e값 오류: {e}")
+            return 0
+        data_set(key, val)
+        ctx.source.send_message(f"§a데이터 §b{key}§a = §b{val}")
+        return 1
+
+    def run_get(self, ctx):
+        from .cmd_data import data_get
+        key = (ctx.get_argument("key") or "").strip()
+        try:
+            path = ctx.get_argument("path")
+        except Exception:
+            path = None
+        found, val = data_get(key, path)
+        if not found:
+            where = f"{key}.{path}" if path else key
+            ctx.source.send_message(f"§e데이터 '{where}' 가 없습니다")
+            return 0
+        ctx.source.send_message(f"§b{key}{('.' + path) if path else ''}§7 = §b{val}")
+        from .cmd_execute import to_number
+        n = to_number(val)
+        return int(n) if n is not None else 1
+
+    def run_merge(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_data import data_merge
+        from .cmd_params import parse_tag, TagSyntaxError
+        key = (ctx.get_argument("key") or "").strip()
+        try:
+            comp = parse_tag(ctx.get_argument("compound") or "")
+        except TagSyntaxError as e:
+            ctx.source.send_message(f"§e컴파운드 오류: {e}")
+            return 0
+        data_merge(key, comp)
+        ctx.source.send_message(f"§a데이터 §b{key}§a 병합")
+        return 1
+
+    def run_remove(self, ctx):
+        if not _require_level(MEMBER)(ctx.source):
+            ctx.source.send_message("§e권한이 없습니다 (Member 이상)")
+            return 0
+        from .cmd_data import data_remove
+        key = (ctx.get_argument("key") or "").strip()
+        if data_remove(key):
+            ctx.source.send_message(f"§a데이터 §b{key}§a 삭제")
+            return 1
+        ctx.source.send_message(f"§e데이터 '{key}' 가 없습니다")
+        return 0
+
+    def run_list(self, ctx):
+        from .cmd_data import data_keys, data_get
+        keys = data_keys()
+        if not keys:
+            ctx.source.send_message("§7저장된 데이터가 없습니다 §7(/data set <키> <값>)")
+            return 0
+        ctx.source.send_message(f"§b◆ 데이터 §7— {len(keys)}개")
+        for k in keys:
+            _, v = data_get(k)
+            ctx.source.send_message(f"  §b{k}§7 = §8{v}")
+        return 1
+
+
+class ExecuteCommand(Command):
+    name = "execute"
+    aliases = ("ex",)
+    description = "조건부/데이터 실행 — if|unless <조건> run <명령>, store result data <키> run …"
+    permission = staticmethod(_require_level(MEMBER))
+
+    def build(self, root):
+        root.then(argument("clause", greedy_string()).executes(self.run))
+        return root
+
+    def run(self, ctx):
+        from .cmd_execute import tokenize_pos
+        cc = ctx.source.ctx
+        if cc.plugin is None:
+            ctx.source.send_message("§e활성 보드가 없습니다")
+            return 0
+        clause = (ctx.get_argument("clause") or "").strip()
+        if not clause:
+            ctx.source.send_message("§e사용법: §bexecute if <조건> run <명령>")
+            return 0
+        toks = tokenize_pos(clause)
+        vals = [t[0] for t in toks]
+        i = 0
+        passed = True
+        store_key = None
+        cmd_text = None
+        try:
+            while i < len(vals):
+                t = vals[i]
+                if t in ("if", "unless"):
+                    ok, consumed = self._eval_condition(cc, vals, i + 1)
+                    i += 1 + consumed
+                    cond = (not ok) if t == "unless" else ok
+                    passed = passed and cond
+                elif t == "store":
+                    if vals[i + 1:i + 3] != ["result", "data"] or i + 3 >= len(vals):
+                        ctx.source.send_message("§e사용법: §bexecute store result data <키> run <명령>")
+                        return 0
+                    store_key = vals[i + 3]
+                    i += 4
+                elif t == "run":
+                    cmd_text = clause[toks[i][2]:].strip()   # run 토큰 이후 원문
+                    break
+                else:
+                    ctx.source.send_message(f"§e'{t}' — if/unless/store/run 중 하나여야 합니다")
+                    return 0
+        except (IndexError, ValueError) as e:
+            ctx.source.send_message(f"§e조건 해석 실패: {e}")
+            return 0
+
+        if cmd_text is None:                      # run 없음 → 조건 테스트만
+            ctx.source.send_message("§a조건 충족 ✓" if passed else "§7조건 불충족")
+            return 1 if passed else 0
+        if not passed:
+            ctx.source.send_message("§7조건 불충족 — 실행 안 함")
+            return 0
+        if not cmd_text or cc.run_command is None:
+            ctx.source.send_message("§e실행할 명령이 없습니다")
+            return 0
+        res = cc.run_command(cmd_text)
+        for m in getattr(res, "messages", []) or []:
+            ctx.source.send_message(m)
+        if getattr(res, "failed", False):
+            ctx.source.send_message(f"§e실행 실패: {cmd_text}")
+        val = int(getattr(res, "value", 0) or 0)
+        if store_key is not None:
+            from .cmd_data import data_set
+            data_set(store_key, val)
+            ctx.source.send_message(f"§7  → data §b{store_key}§7 = §b{val}")
+        return val
+
+    # ── 조건 평가 ──
+    def _eval_condition(self, cc, vals, i):
+        """(통과?, 소비 토큰수). kind 부터 카운트. 형식 오류는 ValueError."""
+        from .cmd_data import data_get
+        if i >= len(vals):
+            raise ValueError("조건이 필요합니다")
+        kind = vals[i]
+        if kind in ("data", "value"):
+            if i + 1 >= len(vals):
+                raise ValueError(f"{kind} 뒤에 대상이 필요합니다")
+            name = vals[i + 1]
+            if kind == "data":
+                found, value = data_get(name)
+            else:
+                value = _node_numeric(cc.plugin, name)
+                found = value is not None
+            ok, tail = self._match_tail(value, found, vals, i + 2)
+            return ok, 2 + tail
+        if kind == "node":
+            if i + 1 >= len(vals):
+                raise ValueError("node 뒤에 이름이 필요합니다")
+            exists = _node_id_by_name(cc.plugin, vals[i + 1]) is not None
+            return exists, 2
+        if kind == "online":
+            if i + 1 >= len(vals):
+                raise ValueError("online 뒤에 유저가 필요합니다")
+            user = vals[i + 1].lower()
+            on = any((u.get("user", "") or "").lower() == user
+                     for u in (cc.last_presence or []))
+            return on, 2
+        if kind == "cursor":
+            if i + 4 >= len(vals):
+                raise ValueError("cursor <유저> <x|y> <op> <수> 형식이 필요합니다")
+            user, axis, op, num = vals[i + 1], vals[i + 2], vals[i + 3], vals[i + 4]
+            coord = self._cursor_coord(cc, user, axis)
+            if coord is None:
+                return False, 5
+            from .cmd_execute import compare
+            return compare(coord, op, num), 5
+        raise ValueError(f"알 수 없는 조건 '{kind}' (data/value/node/online/cursor)")
+
+    @staticmethod
+    def _match_tail(value, found, vals, j):
+        """data/value 의 꼬리: 'matches <범위>' | '<op> <수>' | (없음=존재). (통과?, 소비)."""
+        from .cmd_execute import parse_range, match_range, compare, is_cmp_op
+        if j < len(vals) and vals[j] == "matches":
+            if j + 1 >= len(vals):
+                raise ValueError("matches 뒤에 범위가 필요합니다 (예: 10..)")
+            rng = parse_range(vals[j + 1])
+            return (found and match_range(value, rng)), 2
+        if j + 1 < len(vals) and is_cmp_op(vals[j]):
+            return (found and compare(value, vals[j], vals[j + 1])), 2
+        return found, 0
+
+    @staticmethod
+    def _cursor_coord(cc, user, axis):
+        if axis not in ("x", "y"):
+            raise ValueError("커서 축은 x 또는 y 여야 합니다")
+        ul = user.lower()
+        for u in (cc.last_presence or []):
+            if (u.get("user", "") or "").lower() == ul:
+                cur = u.get("cursor")
+                if isinstance(cur, dict):
+                    return cur.get(axis)
+        return None
+
+
 # 등록되는 명령어 전체 (순서 = /help 목록 순서)
 CHAT_COMMANDS = [
     HelpCommand, ClearCommand, CreateCommand, MoveCommand,
     DeleteCommand, ConnectCommand, RunCommand, GrepCommand,
     FunctionCommand, ReturnCommand, SayCommand,
+    DataCommand, ExecuteCommand,
 ]
 
 

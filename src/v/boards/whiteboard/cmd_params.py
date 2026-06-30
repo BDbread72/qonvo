@@ -167,6 +167,19 @@ def parse_tag(raw: str) -> Dict[str, Any]:
     return out
 
 
+def parse_value(s: str) -> Any:
+    """SNBT 단일 값 하나 → 파이썬 값. `/data set` 등에서 씀.
+
+    `{...}` → dict, `[...]` → list, `"..."`/숫자/bool/단어 → 스칼라.
+    """
+    s = (s or "").strip()
+    if not s:
+        return ""
+    if s.startswith("{"):
+        return parse_tag(s)          # 컴파운드
+    return _TagReader(s).read_value()  # 리스트 또는 스칼라
+
+
 # ---------------------------------------------------------------------------
 # 2. 파라미터 스키마 — 노드별 받을 수 있는 키
 #    values: 정적 리스트 / callable(cc)->list / None(자유값)
