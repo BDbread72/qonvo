@@ -62,6 +62,8 @@ class ServerMixin:
         # 라이브 커서 레이어 (뷰 drawForeground 에서 그림)
         from .cursor_layer import CursorLayer
         self._cursor_layer = CursorLayer(self.view)
+        self._cursor_layer.set_client(client)  # 커서 스킨 다운로드/URL 용
+        self._skin_uploaded_this_session = False  # 접속 시 로컬 스킨 1회 업로드 플래그
         if self.view is not None:
             self.view._cursor_layer = self._cursor_layer
         # 주기적 자동 동기화 — 이벤트가 안 잡힌 변경도 주기마다 자동 감지해 전송(견고)
@@ -109,6 +111,8 @@ class ServerMixin:
             self._server_client.update_cursor(scene_x, scene_y, state)
         if getattr(self, '_cursor_layer', None) is not None:
             self._cursor_layer.set_self(scene_x, scene_y)  # 내 말풍선 위치용
+            # 내 커서 상태(point/typing/…) → 내 포인터 스킨 역할 즉시 전환(로컬, 무지연)
+            self._cursor_layer.set_self_state(state)
 
     def report_selection(self, x=None, y=None, w=None, h=None):
         """영역 선택 사각형을 서버에 보고(None 이면 해제)."""
@@ -183,6 +187,31 @@ class ServerMixin:
         me = self._server_client.username if self._server_client else ""
         try:
             self._cursor_layer.update_from_presence(users, exclude_user=me)
+            # 내 커서 스킨(Dynamic Cursor) → 내 마우스 포인터에 적용
+            mine = next((u for u in (users or []) if u.get("user") == me), None)
+            self._cursor_layer.set_self_skin((mine or {}).get("skin") or "", me)
+        except Exception:
+            pass
+
+    def _maybe_upload_local_skin(self):
+        """오프라인에서 디자인한 로컬 커서 스킨을 접속 시 서버에 업로드(데몬 스레드)."""
+        try:
+            from .cursor_skin_dialog import local_skin_path
+            p = local_skin_path()
+            if not p.exists():
+                return
+            data = p.read_bytes()
+            client = self._server_client
+            if client is None or not client.is_connected or not data:
+                return
+            import threading
+
+            def _up():
+                try:
+                    client.upload_skin(data)  # urllib only — Qt 객체 안 건드림
+                except Exception:
+                    pass
+            threading.Thread(target=_up, daemon=True).start()
         except Exception:
             pass
 
@@ -206,6 +235,12 @@ class ServerMixin:
                 self._cursor_layer.clear()
             except Exception:
                 pass
+
+        # 오프라인에서 디자인한 커서 스킨(local)이 있으면 접속 시 1회 자동 업로드
+        # (계정에 반영 → 내 포인터 + 상대에게 적용). 작은 파일이라 데몬 스레드로.
+        if not getattr(self, '_skin_uploaded_this_session', True):
+            self._skin_uploaded_this_session = True
+            self._maybe_upload_local_skin()
 
         # 스냅샷 prime 캐시는 비활성(일부 노드 비는 문제) — 항상 서버 full sync 로 복원.
         # 첨부(이미지)만 백그라운드로 증분 다운로드한다.

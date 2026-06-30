@@ -392,8 +392,76 @@ class SettingsDialog(QDialog):
         self.cursor_opacity_spin.setStyleSheet(self._input_style())
         layout.addWidget(self.cursor_opacity_spin)
 
+        layout.addWidget(self._separator())
+
+        # ── 내 커서 스킨 (Dynamic Cursor) ──
+        layout.addWidget(self._section_label("내 커서 스킨"))
+        try:
+            from v.boards.whiteboard.cursor_skin_dialog import feature_icon_path
+            self._skin_icon_path = feature_icon_path()
+        except Exception:
+            self._skin_icon_path = ""
+        skin_row = QHBoxLayout()
+        self._skin_preview = QLabel()
+        self._skin_preview.setFixedSize(40, 40)
+        self._skin_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._skin_preview.setStyleSheet(
+            "background-color: #2a2a2a; border: 1px solid #444; border-radius: 6px;")
+        self._refresh_skin_preview()
+        skin_row.addWidget(self._skin_preview)
+        skin_row.addSpacing(10)
+        skin_btn = QPushButton("디자인…")
+        skin_btn.setStyleSheet(self._input_style())
+        if self._skin_icon_path:
+            from PyQt6.QtGui import QIcon
+            from PyQt6.QtCore import QSize
+            skin_btn.setIcon(QIcon(self._skin_icon_path))
+            skin_btn.setIconSize(QSize(18, 18))
+        skin_btn.clicked.connect(self._open_cursor_skin)
+        skin_row.addWidget(skin_btn)
+        skin_row.addStretch()
+        layout.addLayout(skin_row)
+        layout.addWidget(self._hint_label(
+            "내 커서를 직접 만들어 서버에 올리면, 같은 기능을 켠 다른 사람에게 이 커서로 보입니다\n"
+            "(merri 계정에 저장 — 어디서 접속하든 따라옴). 서버 접속 후 변경을 권장합니다."))
+
         layout.addStretch()
         return page
+
+    def _refresh_skin_preview(self):
+        """협업 페이지의 내 커서 스킨 미리보기를 로컬 저장본으로 갱신."""
+        try:
+            from v.boards.whiteboard.cursor_skin_dialog import local_skin_path
+            from PyQt6.QtGui import QPixmap
+            p = local_skin_path()
+            if p.exists():
+                pm = QPixmap(str(p))
+                if not pm.isNull():
+                    self._skin_preview.setPixmap(pm.scaled(
+                        32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation))
+                    return
+            self._skin_preview.setText("기본")
+            self._skin_preview.setStyleSheet(
+                "background-color: #2a2a2a; border: 1px solid #444; border-radius: 6px;"
+                " color: #777; font-size: 11px;")
+        except Exception:
+            pass
+
+    def _open_cursor_skin(self):
+        """커서 스킨 디자인 다이얼로그 — 현재 서버 클라/커서 레이어 연결."""
+        try:
+            from v.boards.whiteboard.cursor_skin_dialog import CursorSkinDialog
+            ui = self.parent()
+            client = getattr(ui, "_server_client", None)
+            cp = getattr(ui, "current_plugin", None)
+            cl = getattr(cp, "_cursor_layer", None) if cp else None
+            dlg = CursorSkinDialog(self, client=client, cursor_layer=cl)
+            dlg.exec()
+            self._refresh_skin_preview()
+        except Exception as e:
+            from v.logger import get_logger
+            get_logger("qonvo.settings").debug("open cursor skin failed: %s", e)
 
     def _build_advanced_page(self) -> QWidget:
         page, layout = self._new_page()

@@ -283,6 +283,48 @@ class ServerClient(QObject):
         """
         return AttachmentDownloadThread(self._http_base, self._http_token, board_id, dest_dir)
 
+    # ---- 커서 스킨(Dynamic Cursor) -------------------------------------
+    def skin_url(self, username: str) -> str:
+        """계정의 커서 스킨 다운로드 URL."""
+        from urllib.parse import quote
+        return f"{self._http_base}/skin/{quote(username)}?t={self._http_token}"
+
+    def start_skin_download(self, username: str, expected_hash: str,
+                            dest_dir: str) -> "SkinDownloadThread":
+        """username 의 스킨을 dest_dir/<hash>.png 로 받는 스레드 생성·반환(start 는 호출 측)."""
+        return SkinDownloadThread(self._http_base, self._http_token,
+                                  username, expected_hash, dest_dir)
+
+    def upload_skin(self, data: bytes) -> str:
+        """내 커서 스킨(PNG 바이트)을 서버에 올린다(동기). 성공 시 해시, 실패 시 ""."""
+        import urllib.request
+        if not self._http_base or not self._http_token or not data:
+            return ""
+        try:
+            url = f"{self._http_base}/skin?t={self._http_token}"
+            req = urllib.request.Request(url, data=data, method="PUT")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if r.status != 200:
+                    return ""
+                return json.loads(r.read().decode("utf-8")).get("hash", "")
+        except Exception as e:
+            logger.debug("skin upload failed: %s", e)
+            return ""
+
+    def delete_skin(self) -> bool:
+        """내 커서 스킨을 삭제(기본 화살표 복귀). 성공 여부."""
+        import urllib.request
+        if not self._http_base or not self._http_token:
+            return False
+        try:
+            url = f"{self._http_base}/skin?t={self._http_token}"
+            req = urllib.request.Request(url, method="DELETE")
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status == 200
+        except Exception as e:
+            logger.debug("skin delete failed: %s", e)
+            return False
+
     def upload_attachment(self, board_id: str, name: str, path: str) -> bool:
         """로컬 파일을 서버 보드 첨부로 업로드한다(동기, 작은 파일용)."""
         import urllib.request
@@ -671,3 +713,48 @@ class AttachmentDownloadThread(QThread):
         except Exception as e:
             logger.debug("manifest fetch failed: %s", e)
             return []
+
+
+class SkinDownloadThread(QThread):
+    """한 계정의 커서 스킨(PNG)을 받아 dest_dir/<actual_hash>.png 로 저장하는 QThread.
+
+    서버 /skin/{user} 는 **현재** 스킨을 돌려주므로, presence 가 알려준 expected_hash 와
+    실제 받은 바이트의 해시(actual)가 다를 수 있다(업로드 직후 경쟁). 그래서 항상 **실제 해시**
+    이름으로 저장하고, 둘을 모두 시그널에 실어 보낸다(호출 측이 매칭해 적용).
+    """
+
+    done = pyqtSignal(str, str, str, str)   # (username, expected_hash, actual_hash, path|"")
+
+    def __init__(self, http_base: str, token: str, username: str,
+                 expected_hash: str, dest_dir: str):
+        super().__init__()
+        self._base = http_base
+        self._token = token
+        self._user = username
+        self._expected = expected_hash
+        self._dest = dest_dir
+
+    def run(self):
+        import hashlib
+        import os
+        import urllib.request
+        from urllib.parse import quote
+        try:
+            os.makedirs(self._dest, exist_ok=True)
+            url = f"{self._base}/skin/{quote(self._user)}?t={self._token}"
+            with urllib.request.urlopen(url, timeout=30) as r:
+                data = r.read(1024 * 1024)  # 스킨 상한(서버 512KB)보다 넉넉히
+            if not data:
+                self.done.emit(self._user, self._expected, "", "")
+                return
+            actual = hashlib.sha256(data).hexdigest()[:16]
+            path = os.path.join(self._dest, f"{actual}.png")
+            if not (os.path.exists(path) and os.path.getsize(path) > 0):
+                tmp = path + ".part"
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, path)
+            self.done.emit(self._user, self._expected, actual, path)
+        except Exception as e:
+            logger.debug("skin download failed (%s): %s", self._user, e)
+            self.done.emit(self._user, self._expected, "", "")

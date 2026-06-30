@@ -31,6 +31,7 @@ class Session:
         self.select: Optional[dict] = None   # {x,y,w,h} 영역 선택 사각형
         self.state: str = ""          # "" / menu / typing / away (커서 상태표시)
         self.color: str = ""          # 커서/이름표 색
+        self.skin: str = ""           # 커서 스킨 해시(16hex) — 빈값이면 기본 화살표(Dynamic Cursor)
 
     async def send(self, msg: Dict[str, Any]) -> None:
         """JSON 메시지를 전송한다(연결 종료 시 무시)."""
@@ -76,7 +77,7 @@ class Registry:
                 continue
             out.append({"user": s.username, "level": s.level, "ping": s.ping,
                         "cursor": s.cursor, "select": s.select, "state": s.state,
-                        "color": s.color, "sid": s.id})
+                        "color": s.color, "skin": s.skin, "sid": s.id})
         out.sort(key=lambda d: d["user"].lower())
         return out
 

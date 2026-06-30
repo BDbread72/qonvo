@@ -104,6 +104,10 @@ class QonvoServer:
         self._app.router.add_get("/board/{bid}/manifest", self._attach_manifest)
         self._app.router.add_get("/board/{bid}/attach/{name}", self._attach_get)
         self._app.router.add_put("/board/{bid}/attach/{name}", self._attach_put)
+        # 커서 스킨(Dynamic Cursor) — 계정 기준 호스팅, presence 엔 해시만(마크 스킨 식)
+        self._app.router.add_get("/skin/{user}", self._skin_get)
+        self._app.router.add_put("/skin", self._skin_put)
+        self._app.router.add_delete("/skin", self._skin_delete)
         # OAuth 콜백은 공개 주소여야 한다(브라우저가 redirect 됨). public_host 우선.
         _oauth_host = self.public_host or "localhost"
         public_url = f"http://{_oauth_host}:{self.port}"
@@ -317,6 +321,58 @@ class QonvoServer:
             return web.json_response({"ok": True, "name": name, "size": len(data)})
         return web.Response(status=400, text="save failed")
 
+    # ---- 커서 스킨 HTTP (Dynamic Cursor) -------------------------------
+    async def _skin_get(self, request: web.Request) -> web.StreamResponse:
+        """계정의 커서 스킨 PNG 를 내려준다(없으면 404 → 클라는 기본 화살표)."""
+        if self._check_http_token(request) is None:
+            return web.Response(status=401, text="unauthorized")
+        from .skin_store import skin_path
+        p = skin_path(request.match_info["user"])
+        if p is None or not p.exists():
+            return web.Response(status=404, text="not found")
+        return web.FileResponse(p)
+
+    async def _skin_put(self, request: web.Request) -> web.Response:
+        """내 커서 스킨을 업로드한다(Member 이상). 토큰의 username 에 귀속."""
+        tok = self._check_http_token(request)
+        if tok is None:
+            return web.Response(status=401, text="unauthorized")
+        if tok[1] < MEMBER:
+            return web.Response(status=403, text="read-only")
+        username = tok[0]
+        data = await request.read()
+        from .skin_store import save_skin
+        h = save_skin(username, data)
+        if not h:
+            return web.Response(status=400, text="bad skin (PNG, <=512KB)")
+        await self._refresh_user_skin(username, h)
+        return web.json_response({"ok": True, "hash": h})
+
+    async def _skin_delete(self, request: web.Request) -> web.Response:
+        """내 커서 스킨을 삭제한다(기본 화살표로 복귀)."""
+        tok = self._check_http_token(request)
+        if tok is None:
+            return web.Response(status=401, text="unauthorized")
+        username = tok[0]
+        from .skin_store import delete_skin
+        delete_skin(username)
+        await self._refresh_user_skin(username, "")
+        return web.json_response({"ok": True})
+
+    async def _refresh_user_skin(self, username: str, h: str) -> None:
+        """접속 중 같은 계정의 세션들에 새 스킨 해시를 박고 해당 보드에 presence 재방송.
+
+        (한 계정이 여러 클라로 접속할 수 있으므로 username 매칭 세션 전부 갱신)
+        """
+        boards = set()
+        for s in self.registry.all_sessions():
+            if s.username == username:
+                s.skin = h
+                if s.board_id:
+                    boards.add(s.board_id)
+        for bid in boards:
+            await self._broadcast_presence(bid)
+
     def _ensure_router(self):
         if self.router is None:
             from .ai_runner import build_router
@@ -459,6 +515,13 @@ class QonvoServer:
         sess.username = username
         sess.level = level
         sess.color = _USER_COLORS[sess.id % len(_USER_COLORS)]
+        # 커서 스킨(Dynamic Cursor): 계정에 저장된 스킨 해시를 로드해 presence 로 광고.
+        # 작은 파일 + sha256(mtime 캐시)라 인라인이어도 루프를 막지 않는다.
+        try:
+            from .skin_store import skin_hash
+            sess.skin = skin_hash(username)
+        except Exception:
+            sess.skin = ""
         # 첨부 HTTP 전송용 토큰 발급
         import uuid as _uuid
         http_token = _uuid.uuid4().hex

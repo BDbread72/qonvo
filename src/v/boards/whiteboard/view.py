@@ -674,7 +674,7 @@ class WhiteboardView(QGraphicsView):
             super().mousePressEvent(event)
 
     def _cursor_state(self) -> str:
-        """라이브 커서 상태표시용: menu(방사형메뉴)/typing(입력중)/away(앱 비활성)."""
+        """라이브 커서 상태표시용: menu(방사형메뉴)/typing(입력중)/point(노드 위)/away(앱 비활성)."""
         from PyQt6.QtWidgets import QApplication
         if self.radial_menu:
             return "menu"
@@ -686,7 +686,25 @@ class WhiteboardView(QGraphicsView):
                 return "away"
         except Exception:
             pass
+        # 클릭 가능한 노드/아이템 위면 포인터(손) — 커서 스킨의 point 역할에 매핑
+        if self._over_clickable_item():
+            return "point"
         return ""
+
+    def _over_clickable_item(self) -> bool:
+        """현재 마우스가 클릭 가능한 씬 아이템(노드/포트/엣지 등) 위에 있는지."""
+        try:
+            from PyQt6.QtGui import QCursor
+            vp = self.viewport()
+            pos = vp.mapFromGlobal(QCursor.pos())
+            if not vp.rect().contains(pos):
+                return False
+            it = self.itemAt(pos)
+            # 배경(grid 는 drawBackground 로 그려 아이템 아님) 위면 None → 화살표,
+            # 노드/포트/엣지/프록시 등 실제 아이템 위면 손모양.
+            return it is not None
+        except Exception:
+            return False
 
     def _report_cursor_state(self):
         """위치 변화 없이 상태만 바뀐 경우(메뉴 열림/입력/포커스) 마지막 위치로 재보고."""

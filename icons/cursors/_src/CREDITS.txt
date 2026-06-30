@@ -1,0 +1,12 @@
+Dynamic Cursor 프리셋 — 원본 아이콘 출처 및 라이선스
+
+이 폴더의 SVG 는 퍼미시브 라이선스 아이콘 세트에서 가져온 것이며,
+cursor_presets.py 가 이를 색/외곽선/글로우로 스타일링해 프리셋 시트(../<id>.png)를 생성한다.
+
+- arrow.svg  : Phosphor Icons "cursor-fill"          — MIT License
+- hand.svg   : Phosphor Icons "hand-pointing-fill"   — MIT License
+               https://github.com/phosphor-icons/core  (© Phosphor Icons)
+- text.svg   : Lucide "text-cursor"                  — ISC License
+               https://github.com/lucide-icons/lucide  (© Lucide Contributors)
+
+두 라이선스(MIT/ISC) 모두 재배포·번들을 허용하며, 본 CREDITS 표기로 고지 의무를 충족한다.

@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QObject
-from PyQt6.QtGui import (QColor, QPolygonF, QPainterPath, QFont, QFontMetrics, QPen)
+from PyQt6.QtGui import (QColor, QPolygonF, QPainterPath, QFont, QFontMetrics, QPen,
+                         QPixmap, QCursor)
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem
 
 _ARROW = QPolygonF([
@@ -29,6 +31,14 @@ _IBEAM = QPolygonF([
 ])
 _EASE = 0.35
 _SETTLE = 0.4
+_SKIN_DISP = 26.0   # 스킨 글리프 표시 한도(px, 화살표 대체) — 큰 PNG 도 이 안에 맞춤
+
+# presence state → 스킨 역할(시트 칸). 나머지(""/menu/away)는 default.
+_ROLE_FOR_STATE = {"typing": "text", "point": "point"}
+
+
+def _role_for_state(state: str) -> str:
+    return _ROLE_FOR_STATE.get(state or "", "default")
 _BUBBLE_TTL = 6.0
 _BUBBLE_FADE = 1.8
 _STATE_LABEL = {"menu": "≡ 메뉴", "typing": "⌨ 입력 중", "away": "💤 자리비움"}
@@ -57,7 +67,23 @@ class _CursorItem(QGraphicsItem):
         self._fm = QFontMetrics(_FONT)
         self._lw = 0.0
         self._lh = float(self._fm.height() + 4)
+        self._skins: dict = {}   # 역할별 스킨 {role: QPixmap} (비면 기본 화살표/I-beam)
         self._recalc()
+
+    def set_skins(self, skins: dict):
+        """역할별 스킨 dict 교체({}=기본 글리프). 동일하면 무시."""
+        if skins is self._skins or (not skins and not self._skins):
+            return
+        self.prepareGeometryChange()
+        self._skins = skins or {}
+        self.update()
+
+    def _cur_skin(self) -> Optional[QPixmap]:
+        """현재 상태에 맞는 스킨 픽스맵(없으면 default, 그것도 없으면 None)."""
+        if not self._skins:
+            return None
+        pm = self._skins.get(_role_for_state(self._state)) or self._skins.get("default")
+        return pm if (pm is not None and not pm.isNull()) else None
 
     def set_label(self, name: str, state: str, color: QColor):
         if name == self._name and state == self._state and color == self._color:
@@ -88,18 +114,33 @@ class _CursorItem(QGraphicsItem):
     def boundingRect(self) -> QRectF:
         s = self._scale
         m = 4.0  # 안티앨리어싱/빠른 이동 여유 — 뷰가 DontAdjustForAntialiasing 라 잔상 방지용으로 직접 확보
-        return QRectF(-2 * s - m, -2 * s - m,
-                      (18 + self._lw) * s + 2 * m, (20 + self._lh) * s + 2 * m)
+        if self._cur_skin() is not None:
+            # 스킨은 화살표보다 클 수 있어 글리프 영역을 _SKIN_DISP 까지 확보
+            w = max(_SKIN_DISP, 14.0 + self._lw)
+            h = max(_SKIN_DISP, 14.0 + self._lh)
+        else:
+            w = 18.0 + self._lw
+            h = 20.0 + self._lh
+        return QRectF(-2 * s - m, -2 * s - m, w * s + 2 * m, h * s + 2 * m)
 
     def paint(self, p, opt, widget=None):
         p.setRenderHint(p.RenderHint.Antialiasing, True)
         p.setOpacity(self._opacity)
         if self._scale != 1.0:
             p.scale(self._scale, self._scale)
-        p.setPen(QColor(255, 255, 255, 230))
-        p.setBrush(self._color)
-        # 입력 중이면 텍스트 커서(I-beam), 그 외엔 화살표
-        p.drawPolygon(_IBEAM if self._state == "typing" else _ARROW)
+        # 글리프: 현재 상태의 스킨(있으면, 화살표/I-beam 대체) 또는 내장 글리프
+        skin = self._cur_skin()
+        if skin is not None:
+            p.setRenderHint(p.RenderHint.SmoothPixmapTransform, True)
+            bw, bh = skin.width(), skin.height()
+            if bw > 0 and bh > 0:
+                f = min(_SKIN_DISP / bw, _SKIN_DISP / bh, 1.0)  # 축소만(작은 건 원본 크기)
+                p.drawPixmap(QRectF(0, 0, bw * f, bh * f), skin, QRectF(0, 0, bw, bh))
+        else:
+            p.setPen(QColor(255, 255, 255, 230))
+            p.setBrush(self._color)
+            # 입력 중이면 텍스트 커서(I-beam), 그 외엔 화살표
+            p.drawPolygon(_IBEAM if self._state == "typing" else _ARROW)
         lw, lh = self._lw, self._lh
         path = QPainterPath()
         path.addRoundedRect(QRectF(14, 14, lw, lh), 5, 5)
@@ -180,13 +221,26 @@ class CursorLayer(QObject):
         super().__init__(view)
         self._view = view
         self._scene = view.scene()
-        self._cursors: dict = {}   # user -> {name,color,cur,tgt,select,state,item,selitem}
+        self._cursors: dict = {}   # user -> {name,color,cur,tgt,select,state,skin,item,selitem}
         self._bubbles: dict = {}   # user -> {t0, item}
         self._self_pos = None
+
+        # ── 커서 스킨(Dynamic Cursor) ──
+        self._client = None              # ServerClient (스킨 URL/다운로드용)
+        self._skin_downloading: set = set()   # 진행 중 다운로드 해시(중복 방지)
+        self._skin_threads: list = []    # SkinDownloadThread 참조 보관(GC 방지)
+        self._self_skin_hash = None      # 내 포인터에 적용된 스킨 해시
+        self._self_skin_want = None      # 내 포인터가 원하는 스킨 해시(다운로드 대기)
+        self._self_roles: dict = {}      # 내 스킨 역할별 {role: QPixmap}
+        self._self_state = ""            # 내 커서 상태(역할 선택용)
 
         self._timer = QTimer(self)
         self._timer.setInterval(16)  # ~60fps 보간
         self._timer.timeout.connect(self._tick)
+
+    def set_client(self, client):
+        """스킨 다운로드/URL 구성을 위한 ServerClient 참조 설정."""
+        self._client = client
 
     # ---- 외부 API -------------------------------------------------------
     def update(self):
@@ -277,7 +331,7 @@ class CursorLayer(QObject):
                 item.setPos(tx, ty)
                 self._scene.addItem(item)
                 c = {"name": name, "color": color, "cur": [tx, ty], "tgt": [tx, ty],
-                     "select": None, "state": st, "item": item, "selitem": None}
+                     "select": None, "state": st, "skin": "", "item": item, "selitem": None}
                 self._cursors[name] = c
             else:
                 c["tgt"] = [tx, ty]
@@ -285,12 +339,133 @@ class CursorLayer(QObject):
                 c["state"] = st
                 c["item"].set_label(name, st, color)
                 c["item"].set_style(scale, opacity)
+            self._apply_user_skin(c, name, u.get("skin") or "")
             self._apply_select(c, sel)
         for name in list(self._cursors.keys()):
             if name not in seen:
                 self._remove_cursor(name)
         if self._cursors and not self._timer.isActive():
             self._timer.start()
+
+    # ── 커서 스킨(Dynamic Cursor, 역할 세트) ───────────────────────────
+    def _apply_user_skin(self, c: dict, name: str, h: str):
+        """원격 커서에 역할 스킨 적용: 캐시 히트면 즉시, 없으면 다운로드(그동안 기본 글리프)."""
+        c["skin"] = h
+        item = c["item"]
+        if not h:
+            item.set_skins({})
+            return
+        from . import cursor_skin_cache as cache
+        roles = cache.get_roles(h)
+        if roles:
+            item.set_skins(roles)
+        else:
+            item.set_skins({})
+            self._request_skin(name, h)
+
+    def _request_skin(self, name: str, h: str):
+        """username 의 스킨 시트를 백그라운드로 받는다(해시당 1회)."""
+        if not h or h in self._skin_downloading or self._client is None:
+            return
+        base = getattr(self._client, "http_base", "")
+        token = getattr(self._client, "http_token", "")
+        if not base or not token:
+            return
+        from . import cursor_skin_cache as cache
+        try:
+            th = self._client.start_skin_download(name, h, str(cache.cache_dir()))
+        except Exception:
+            return
+        self._skin_downloading.add(h)
+        th.done.connect(self._on_skin_downloaded)
+        th.finished.connect(lambda t=th: self._drop_thread(t))
+        self._skin_threads.append(th)
+        th.start()
+
+    def _drop_thread(self, t):
+        try:
+            self._skin_threads.remove(t)
+        except ValueError:
+            pass
+
+    def _on_skin_downloaded(self, user: str, expected: str, actual: str, path: str):
+        """다운로드 완료 → 시트 캐시 로드 후 해당 유저/해시 커서 + 내 포인터에 역할 적용."""
+        self._skin_downloading.discard(expected)
+        if not actual or not path:
+            return
+        from . import cursor_skin_cache as cache
+        if cache.store_file(actual, path) is None:
+            return
+        roles = cache.get_roles(actual)
+        if not roles:
+            return
+        for nm, c in self._cursors.items():
+            if nm == user or c.get("skin") == actual:
+                c["item"].set_skins(roles)
+                c["skin"] = actual
+        # 내 포인터가 이 스킨을 기다렸으면 적용
+        if self._self_skin_want in (actual, expected) and self._self_skin_hash != actual:
+            self._self_roles = roles
+            self._self_skin_hash = actual
+            self._apply_self_pointer()
+        self._invalidate()
+
+    def set_self_skin(self, h: str, username: str):
+        """내 커서 스킨 세트를 내 마우스 포인터에 적용한다(없으면 기본 포인터로 복귀)."""
+        self._self_skin_want = h or None
+        if not h:
+            self._reset_self_pointer()
+            return
+        if self._self_skin_hash == h:
+            return
+        from . import cursor_skin_cache as cache
+        roles = cache.get_roles(h)
+        if roles:
+            self._self_roles = roles
+            self._self_skin_hash = h
+            self._apply_self_pointer()
+        else:
+            self._request_skin(username, h)
+
+    def set_self_state(self, state: str):
+        """내 커서 상태(typing/point/…) 변경 → 내 포인터를 해당 역할 스킨으로 즉시 전환.
+
+        (서버 round-trip 없이 view 가 로컬에서 호출 → 즉각 반응)
+        """
+        if state == self._self_state:
+            return
+        self._self_state = state
+        if self._self_roles:
+            self._apply_self_pointer()
+
+    def _apply_self_pointer(self):
+        """현재 상태(_self_state)의 역할 스킨을 내 마우스 포인터에 적용."""
+        if self._view is None or not self._self_roles:
+            return
+        pm = (self._self_roles.get(_role_for_state(self._self_state))
+              or self._self_roles.get("default"))
+        if pm is None or pm.isNull():
+            return
+        try:
+            disp = pm
+            if pm.width() > _SKIN_DISP or pm.height() > _SKIN_DISP:
+                disp = pm.scaled(int(_SKIN_DISP), int(_SKIN_DISP),
+                                 Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            self._view.viewport().setCursor(QCursor(disp, 0, 0))
+        except Exception:
+            pass
+
+    def _reset_self_pointer(self):
+        self._self_roles = {}
+        if self._self_skin_hash is None:
+            return
+        self._self_skin_hash = None
+        try:
+            if self._view is not None:
+                self._view.viewport().unsetCursor()
+        except Exception:
+            pass
 
     def set_anonymized(self, on: bool):
         """스크린샷용 — 타인 커서 이름표를 'Guest 1·2…'로 바꾸거나(on) 실제 이름으로 복원(off).
@@ -321,6 +496,9 @@ class CursorLayer(QObject):
             self._remove_bubble(user)
         self._cursors.clear()
         self._bubbles.clear()
+        # 내 포인터 스킨도 기본으로 복귀(보드 전환/연결 해제 시 유령 방지)
+        self._reset_self_pointer()
+        self._self_skin_want = None
 
     def remove_user(self, name: str):
         """특정 사용자의 커서/말풍선을 즉시 제거(user_leave 수신 시 호출).

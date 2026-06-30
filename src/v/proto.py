@@ -11,10 +11,12 @@ GUI 클라(server_client.py)와 헤드리스 서버(server/app.py)가 **둘 다*
 연동 이력(참고용 — 깨지는 변경에서 +1):
   v1: models/model_options 광고, preferred count, extra_input_defs 동기화,
       http_token 첨부, presence/chat/relay, ai_request 백그라운드화.
+  v2: 커서 스킨(Dynamic Cursor) — presence 에 skin 해시 필드 + GET/PUT/DELETE /skin.
+      하위호환(구버전 클라는 skin 무시·기본 화살표, 구버전 서버는 필드 미제공). 능력 감지용.
 """
 from __future__ import annotations
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 def app_version() -> str:
