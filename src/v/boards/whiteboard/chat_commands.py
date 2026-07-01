@@ -111,10 +111,13 @@ class CommandContext:
 class ChatSource:
     """mccmd 가 기대하는 소스. send_message 로 결과를 모으고, ctx 로 앱에 접근."""
 
+    _MAX_MSGS = 60   # 명령 하나가 채팅로그를 도배하지 못하게(공용 출력 폭주 캡)
+
     def __init__(self, ctx: CommandContext):
         self.ctx = ctx
         self._on_output: Optional[Callable[[str], None]] = None
         self.name = "you"
+        self._msg_count = 0
         # _make_source 가 주입하는 핸들들 (기본 None — bare 소스에서도 안전)
         self._panel: Any = None
         self._all_usage: Callable[[], List[str]] = lambda: []
@@ -125,8 +128,13 @@ class ChatSource:
         return self
 
     def send_message(self, text):
-        if self._on_output is not None:
+        if self._on_output is None:
+            return
+        self._msg_count += 1
+        if self._msg_count <= self._MAX_MSGS:
             self._on_output(text)
+        elif self._msg_count == self._MAX_MSGS + 1:
+            self._on_output("§7… 출력이 많아 나머지는 생략했습니다")
 
 
 def _require_level(level: int):
@@ -708,40 +716,56 @@ def _run_node(node) -> Tuple[bool, str]:
     return False, "실행할 수 없는 노드"
 
 
+_GREP_TEXT_CAP = 20000    # 노드당 검색 텍스트 길이 상한 — 대형 챗 히스토리로 grep 느려짐 방지
+
+
 def _node_search_text(plugin, nid: int, node) -> str:
-    """grep 대상 텍스트 — 이름 + 본문/응답/값 등 알려진 필드를 모은다."""
+    """grep 대상 텍스트 — 이름 + 본문/응답/값 등. 노드당 길이 상한(대형 보드 성능)."""
     parts = []
+    total = 0
+    cap = _GREP_TEXT_CAP
+
+    def add(s):
+        nonlocal total
+        if not s or total >= cap:
+            return
+        s = str(s)[:cap - total]      # 남은 예산만큼만(대형 챗 히스토리 잘라 담기)
+        parts.append(s)
+        total += len(s)
+
     try:
-        parts.append(plugin.get_node_name(nid) or "")
+        add(plugin.get_node_name(nid) or "")
     except Exception:
         pass
     be = getattr(node, "body_edit", None)     # prompt / sticky
     if be is not None and hasattr(be, "toPlainText"):
         try:
-            parts.append(be.toPlainText())
+            add(be.toPlainText())
         except Exception:
             pass
     elif hasattr(node, "toPlainText"):        # 텍스트 아이템
         try:
-            parts.append(node.toPlainText())
+            add(node.toPlainText())
         except Exception:
             pass
     md = getattr(node, "_raw_md", None)
     if isinstance(md, str):
-        parts.append(md)
+        add(md)
     lbl = getattr(node, "_label", None)
     if isinstance(lbl, str):
-        parts.append(lbl)
+        add(lbl)
     for attr in ("_value", "_result"):
         v = getattr(node, attr, None)
         if isinstance(v, (int, float)):
-            parts.append(str(v))
-    hist = getattr(node, "_history", None)    # 챗 대화
+            add(str(v))
+    hist = getattr(node, "_history", None)    # 챗 대화(길면 상한에서 멈춤)
     if isinstance(hist, list):
         for h in hist:
+            if total >= cap:
+                break
             if isinstance(h, dict):
-                parts.append(str(h.get("user", "")))
-                parts.append(str(h.get("response", "")))
+                add(h.get("user", ""))
+                add(h.get("response", ""))
     return "\n".join(p for p in parts if p)
 
 
@@ -1235,22 +1259,32 @@ class RunCommand(Command):
         ctx.source.send_message(f"§a'{target}' §7{why}")
         return 1
 
+    _RUN_ALL_CAP = 20   # 한 번에 실행할 챗 노드 상한 — 대량 AI 호출(비용 폭탄) 방지
+
     def _run_all_chats(self, ctx, plugin):
-        count = 0
+        targets = []
         for nid in list(plugin.proxies.keys()):
             node = plugin.app.nodes.get(nid)
             if node is None or getattr(node, "_running", False):
                 continue
             if type(node).__name__ == "ChatNodeWidget":
-                try:
-                    node.on_signal_input()
-                    count += 1
-                except Exception:
-                    pass
-        if count:
-            ctx.source.send_message(f"§a챗 노드 {count}개를 실행했습니다")
-        else:
+                targets.append(node)
+        if not targets:
             ctx.source.send_message("§7실행할 챗 노드가 없습니다")
+            return 1
+        if len(targets) > self._RUN_ALL_CAP:
+            ctx.source.send_message(
+                f"§e챗 노드가 {len(targets)}개 — 한 번에 {self._RUN_ALL_CAP}개까지만 실행합니다 "
+                f"§7(AI 비용 보호, 개별 §b/run <이름>§7 권장)")
+            targets = targets[:self._RUN_ALL_CAP]
+        count = 0
+        for node in targets:
+            try:
+                node.on_signal_input()
+                count += 1
+            except Exception:
+                pass
+        ctx.source.send_message(f"§a챗 노드 {count}개를 실행했습니다")
         return 1
 
 
@@ -1727,6 +1761,9 @@ class DataCommand(Command):
     def run_get(self, ctx):
         from .cmd_data import data_get
         key = (ctx.get_argument("key") or "").strip()
+        if not key:
+            ctx.source.send_message("§e데이터 키가 비었습니다")
+            return 0
         try:
             path = ctx.get_argument("path")
         except Exception:
@@ -1748,12 +1785,19 @@ class DataCommand(Command):
         from .cmd_data import data_merge
         from .cmd_params import parse_tag, TagSyntaxError
         key = (ctx.get_argument("key") or "").strip()
+        if not key or "." in key:
+            ctx.source.send_message("§e데이터 키가 비었거나 '.' 를 포함합니다")
+            return 0
         try:
             comp = parse_tag(ctx.get_argument("compound") or "")
         except TagSyntaxError as e:
             ctx.source.send_message(f"§e컴파운드 오류: {e}")
             return 0
-        data_merge(key, comp)
+        try:
+            data_merge(key, comp)
+        except ValueError as e:
+            ctx.source.send_message(f"§e병합 거부: {e}")
+            return 0
         ctx.source.send_message(f"§a데이터 §b{key}§a 병합")
         return 1
 
