@@ -11,15 +11,18 @@ _CMP_OPS = {"<", "<=", "=", "==", ">=", ">", "!="}
 
 
 def to_number(v: Any) -> Optional[float]:
-    """값을 수치로(불가하면 None). bool 은 0/1."""
+    """값을 수치로(불가·비유한이면 None). bool 은 0/1."""
+    import math
     if isinstance(v, bool):
         return 1.0 if v else 0.0
     if isinstance(v, (int, float)):
-        return float(v)
-    try:
-        return float(str(v).strip())
-    except (TypeError, ValueError):
-        return None
+        n = float(v)
+    else:
+        try:
+            n = float(str(v).strip())
+        except (TypeError, ValueError):
+            return None
+    return n if math.isfinite(n) else None   # inf/nan → 조건에서 no-match
 
 
 def parse_range(s: str) -> Tuple[Optional[float], Optional[float]]:

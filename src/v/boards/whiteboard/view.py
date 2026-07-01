@@ -980,11 +980,13 @@ class WhiteboardView(QGraphicsView):
 
     @staticmethod
     def _friendly_cmd_error(cmd: str, err, known: set) -> str:
-        """mccmd 영문 오류를 친절한 한글 안내로. 아는 명령이면 사용법, 아니면 오타 안내."""
-        name = cmd.split()[0].lstrip("/") if cmd.split() else ""
-        if name and name in known:
-            return f"§e'/{name}' 사용법이 안 맞아요.§r  /help {name} 로 확인하세요"
-        return f"§e'/{name}' 는 모르는 명령이에요.§r  /help 로 목록을 보세요"
+        """mccmd 영문 오류를 친절한 한글 안내로 (chat_commands 의 공용 번역기 사용)."""
+        try:
+            from .chat_commands import humanize_command_error
+            return humanize_command_error(cmd, err, known)
+        except Exception:
+            name = cmd.split()[0].lstrip("/") if cmd.split() else ""
+            return f"§e'/{name}' 형식이 안 맞아요.§r  /help 로 확인하세요"
 
     def _ensure_chat_log(self):
         if getattr(self, '_chat_log', None) is None:

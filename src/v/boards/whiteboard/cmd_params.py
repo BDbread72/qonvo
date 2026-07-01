@@ -311,12 +311,17 @@ def value_suggestions(node_key: str, param: str, cc) -> List[str]:
 #    각 적용기: fn(plugin, node, value) ; 실패 시 ValueError(한글) raise
 # ---------------------------------------------------------------------------
 def _as_num(v) -> float:
+    import math
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         try:
-            return float(str(v))
+            n = float(str(v))
         except (TypeError, ValueError):
             raise ValueError("숫자가 필요합니다")
-    return float(v)
+    else:
+        n = float(v)
+    if not math.isfinite(n):        # inf/nan 거부(노드에 비유한 값 방지)
+        raise ValueError("유한한 숫자가 필요합니다")
+    return n
 
 
 def _chat_model(plugin, node, v):

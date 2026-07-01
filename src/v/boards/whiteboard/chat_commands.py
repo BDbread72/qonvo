@@ -454,14 +454,10 @@ def node_name_arg():
 
 
 class FunctionNameArgumentType(ArgumentType):
-    """저장된 함수 이름 하나. 자동완성은 저장된 함수 목록."""
+    """함수 이름 하나(따옴표로 공백 포함 가능). 자동완성은 저장된 함수 목록."""
 
     def parse(self, reader, source=None):
-        from mccmd.errors import CommandSyntaxError
-        raw = reader.read_unquoted_string()
-        if not raw:
-            raise CommandSyntaxError("함수 이름을 입력하세요", reader)
-        return raw
+        return _read_name_token(reader, "함수 이름을 입력하세요")
 
     def list_suggestions(self, context, builder):
         typed = builder.remaining_lower
@@ -1422,10 +1418,10 @@ class FunctionCommand(Command):
         root.then(edit)
         root.then(literal("remove").then(
             argument("name", function_name_arg()).executes(self.run_remove)))
-        set_ = literal("set").then(argument("name", word()).then(
+        set_ = literal("set").then(argument("name", function_name_arg()).then(
             argument("body", greedy_string()).executes(self.run_set)))
         root.then(set_)
-        add_ = literal("add").then(argument("name", word()).then(
+        add_ = literal("add").then(argument("name", function_name_arg()).then(
             argument("line", greedy_string()).executes(self.run_add)))
         root.then(add_)
         # 호출: /function <name> [ {args} ]
@@ -1443,6 +1439,9 @@ class FunctionCommand(Command):
         from .cmd_functions import set_function, split_commands
         name = (ctx.get_argument("name") or "").strip()
         body = ctx.get_argument("body") or ""
+        if not name:
+            ctx.source.send_message("§e함수 이름이 비었습니다")
+            return 0
         if name in self._reserved():
             ctx.source.send_message(f"§e'{name}' 은 예약어라 함수명으로 못 씁니다")
             return 0
@@ -1462,6 +1461,9 @@ class FunctionCommand(Command):
         from .cmd_functions import append_line, split_commands
         name = (ctx.get_argument("name") or "").strip()
         line = (ctx.get_argument("line") or "").strip()
+        if not name:
+            ctx.source.send_message("§e함수 이름이 비었습니다")
+            return 0
         if name in self._reserved():
             ctx.source.send_message(f"§e'{name}' 은 예약어입니다")
             return 0
@@ -1617,15 +1619,28 @@ class FunctionCommand(Command):
         return {"list", "show", "set", "add", "remove", "edit"}
 
 
+def _read_name_token(reader, empty_msg):
+    """따옴표 문자열 또는 공백 전까지 — 이름/키(공백 포함 가능)를 읽는다."""
+    from mccmd.errors import CommandSyntaxError
+    from mccmd.reader import _is_quoted_string_start
+    if not reader.can_read():
+        raise CommandSyntaxError(empty_msg, reader)
+    if _is_quoted_string_start(reader.peek()):
+        return reader.read_string()
+    start = reader.cursor
+    while reader.can_read() and reader.peek() != " ":
+        reader.skip()
+    raw = reader.string[start:reader.cursor]
+    if not raw:
+        raise CommandSyntaxError(empty_msg, reader)
+    return raw
+
+
 class DataKeyArgumentType(ArgumentType):
-    """저장된 데이터 키 하나. 자동완성은 저장된 키 목록."""
+    """데이터 키 하나(따옴표로 공백 포함 가능). 자동완성은 저장된 키 목록."""
 
     def parse(self, reader, source=None):
-        from mccmd.errors import CommandSyntaxError
-        raw = reader.read_unquoted_string()
-        if not raw:
-            raise CommandSyntaxError("데이터 키를 입력하세요", reader)
-        return raw
+        return _read_name_token(reader, "데이터 키를 입력하세요")
 
     def list_suggestions(self, context, builder):
         typed = builder.remaining_lower
@@ -1669,13 +1684,13 @@ class DataCommand(Command):
     description = "자체 데이터 저장소 — set/get/merge/remove/list (값=SNBT)"
 
     def build(self, root):
-        root.then(literal("set").then(argument("key", word()).then(
+        root.then(literal("set").then(argument("key", data_key_arg()).then(
             argument("value", greedy_string()).executes(self.run_set))))
         get_key = argument("key", data_key_arg())
         get_key.executes(self.run_get)
         get_key.then(argument("path", word()).executes(self.run_get))
         root.then(literal("get").then(get_key))
-        root.then(literal("merge").then(argument("key", word()).then(
+        root.then(literal("merge").then(argument("key", data_key_arg()).then(
             argument("compound", greedy_string()).executes(self.run_merge))))
         root.then(literal("remove").then(
             argument("key", data_key_arg()).executes(self.run_remove)))
@@ -1689,6 +1704,12 @@ class DataCommand(Command):
         from .cmd_data import data_set
         from .cmd_params import parse_value, TagSyntaxError
         key = (ctx.get_argument("key") or "").strip()
+        if not key:
+            ctx.source.send_message("§e데이터 키가 비었습니다")
+            return 0
+        if "." in key:
+            ctx.source.send_message("§e데이터 키에 '.' 는 못 씁니다 §7('.'는 get 경로 구분자)")
+            return 0
         raw = ctx.get_argument("value") or ""
         try:
             val = parse_value(raw)
@@ -1914,6 +1935,42 @@ CHAT_COMMANDS = [
 ]
 
 
+def humanize_command_error(cmd: str, error, known: set) -> str:
+    """mccmd 영문 문법 오류를 친절한 한글 안내로. 우리 인자타입의 한글 오류는 그대로 살린다.
+
+    뷰(_friendly_cmd_error)와 함수 실행 로그가 공유한다.
+    """
+    parts = (cmd or "").split()
+    name = parts[0].lstrip("/") if parts else ""
+    msg = str(error or "").strip()
+    low = msg.lower()
+    has_kr = any("가" <= ch <= "힣" for ch in msg)
+
+    if name and name not in known:
+        return f"§e'/{name}' 는 모르는 명령이에요.§r  §7/help 로 목록을 보세요"
+    if has_kr:                                  # 우리 인자타입이 낸 한글 오류
+        base = msg
+    elif "unknown command" in low:
+        return f"§e'/{name}' 는 모르는 명령이에요.§r  §7/help 로 목록을 보세요"
+    elif "trailing" in low or "whitespace" in low:
+        base = "인자가 너무 많거나 형식이 안 맞아요"
+    elif "incorrect argument" in low:
+        base = "인자가 맞지 않아요"
+    elif "expected integer" in low or "invalid integer" in low:
+        base = "정수가 필요해요"
+    elif "expected float" in low:
+        base = "숫자가 필요해요"
+    elif "expected bool" in low:
+        base = "true/false 가 필요해요"
+    elif "quote" in low:
+        base = "따옴표가 안 맞아요"
+    else:
+        base = msg or "형식이 안 맞아요"
+    if name and name in known:
+        return f"§e{base}.§r  §7/help {name} 로 사용법 확인"
+    return f"§e{base}"
+
+
 # ---------------------------------------------------------------------------
 # 컨트롤러 — 패널/뷰가 들고 쓰는 진입점
 # ---------------------------------------------------------------------------
@@ -1965,7 +2022,13 @@ class ChatCommandController:
 
     # --- 명령 처리 ---
     def execute(self, command_text: str):
-        return self.service.execute(command_text)
+        # 어떤 예외도 위로 전파시키지 않는다 — 원시 에러 노출/함수 실행 중단/앱 크래시 방지.
+        try:
+            return self.service.execute(command_text)
+        except Exception as e:
+            logger.debug("command execute crashed: %s", e)
+            from mccmd.service import ExecutionResult
+            return ExecutionResult(False, 0, [], f"명령 실행 오류: {e}")
 
     def suggest(self, command_text: str, cursor: Optional[int] = None):
         try:
