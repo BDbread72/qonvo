@@ -1528,8 +1528,10 @@ class FunctionCommand(Command):
             ctx.source.send_message("§7저장된 함수가 없습니다 §7(/function set <이름> <명령;명령>)")
             return 0
         ctx.source.send_message(f"§b◆ 함수 §7— {len(names)}개")
-        for nm in names:
+        for nm in names[:30]:
             ctx.source.send_message(f"  §b{nm}")
+        if len(names) > 30:
+            ctx.source.send_message(f"  §7… 외 {len(names) - 30}개")
         return 1
 
     def run_show(self, ctx):
@@ -1540,8 +1542,11 @@ class FunctionCommand(Command):
             ctx.source.send_message(f"§e함수 '{name}' 가 없습니다")
             return 0
         ctx.source.send_message(f"§b{name}§7:")
-        for ln in split_commands(body):
+        lines = split_commands(body)
+        for ln in lines[:40]:
             ctx.source.send_message("  §b" + ln)
+        if len(lines) > 40:
+            ctx.source.send_message(f"  §7… 외 {len(lines) - 40}줄")
         keys = macro_keys(body)
         if keys:
             ctx.source.send_message("  §7매크로 변수: §b" + ", ".join(keys))
@@ -1820,9 +1825,14 @@ class DataCommand(Command):
             ctx.source.send_message("§7저장된 데이터가 없습니다 §7(/data set <키> <값>)")
             return 0
         ctx.source.send_message(f"§b◆ 데이터 §7— {len(keys)}개")
-        for k in keys:
+        for k in keys[:30]:
             _, v = data_get(k)
-            ctx.source.send_message(f"  §b{k}§7 = §8{v}")
+            sv = str(v)
+            if len(sv) > 60:            # 값이 길면 잘라 표시(로그 도배 방지)
+                sv = sv[:60] + "…"
+            ctx.source.send_message(f"  §b{k}§7 = §8{sv}")
+        if len(keys) > 30:
+            ctx.source.send_message(f"  §7… 외 {len(keys) - 30}개")
         return 1
 
 
@@ -1865,6 +1875,9 @@ class ExecuteCommand(Command):
                         ctx.source.send_message("§e사용법: §bexecute store result data <키> run <명령>")
                         return 0
                     store_key = vals[i + 3]
+                    if not store_key.strip() or "." in store_key:
+                        ctx.source.send_message("§e store 키가 비었거나 '.' 를 포함합니다")
+                        return 0
                     i += 4
                 elif t == "run":
                     cmd_text = clause[toks[i][2]:].strip()   # run 토큰 이후 원문
@@ -2037,6 +2050,7 @@ class ChatCommandController:
         self.ctx.run_command = self.execute
         self.ctx.controller = self    # /function edit 가 에디터에 넘길 컨트롤러 핸들
         self._editors = []            # 열린 함수 에디터 다이얼로그(GC 방지)
+        self._exec_depth = 0          # 명령 중첩 깊이(execute+function 재귀 안전망)
 
     # --- 소스 팩토리 (실행/제안마다 새 소스) ---
     def _make_source(self) -> ChatSource:
@@ -2065,14 +2079,21 @@ class ChatCommandController:
         self.panel = panel
 
     # --- 명령 처리 ---
+    _MAX_EXEC_DEPTH = 64   # 명령 중첩(execute→function→execute…) 상한 — 재귀 폭주 안전망
+
     def execute(self, command_text: str):
         # 어떤 예외도 위로 전파시키지 않는다 — 원시 에러 노출/함수 실행 중단/앱 크래시 방지.
+        from mccmd.service import ExecutionResult
+        if self._exec_depth >= self._MAX_EXEC_DEPTH:
+            return ExecutionResult(False, 0, [], "§e명령 중첩이 너무 깊습니다 (재귀 의심)")
+        self._exec_depth += 1
         try:
             return self.service.execute(command_text)
         except Exception as e:
             logger.debug("command execute crashed: %s", e)
-            from mccmd.service import ExecutionResult
             return ExecutionResult(False, 0, [], f"명령 실행 오류: {e}")
+        finally:
+            self._exec_depth -= 1
 
     def suggest(self, command_text: str, cursor: Optional[int] = None):
         try:
