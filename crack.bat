@@ -1,7 +1,9 @@
 @echo off
 rem 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
-rem 주의: 과거의 redirect-first echo pipe set /p 형태는 echo 무인자 출력이 파일에 구워져
-rem 버전이 beta-X.Y.Z+ECHO is on. 으로 표시됐음. rem 줄에 파이프/리다이렉트 문자 금지 - cmd가 실행함.
+rem NOTE: keep these comments ASCII-only. cmd parses this file as cp949 while it is saved
+rem as UTF-8, and pipe/redirect chars inside rem lines get EXECUTED by cmd. The old
+rem redirect-first echo idiom burned "ECHO is on." into buildno.txt (version showed
+rem beta-X.Y.Z+ECHO is on.). Current form below is safe.
 set BUILDNO=
 for /f %%i in ('git rev-list --count HEAD') do set BUILDNO=%%i
 if "%BUILDNO%"=="" set BUILDNO=0
