@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QObject
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF, QObject, QEvent
 from PyQt6.QtGui import (QColor, QPolygonF, QPainterPath, QFont, QFontMetrics, QPen,
                          QPixmap, QCursor)
 from PyQt6.QtWidgets import QGraphicsItem, QGraphicsRectItem
@@ -233,10 +233,25 @@ class CursorLayer(QObject):
         self._self_skin_want = None      # 내 포인터가 원하는 스킨 해시(다운로드 대기)
         self._self_roles: dict = {}      # 내 스킨 역할별 {role: QPixmap}
         self._self_state = ""            # 내 커서 상태(역할 선택용)
+        self._self_cursors: dict = {}    # 역할별 QCursor 캐시 — 매번 새 HCURSOR 만들면 깜빡임
 
         self._timer = QTimer(self)
         self._timer.setInterval(16)  # ~60fps 보간
         self._timer.timeout.connect(self._tick)
+
+        # 뷰포트 커서 변경 감시 — 아이템 호버(OpenHand 등)/메뉴 닫기/팬 종료가 뷰포트
+        # 커서를 갈아치우는 **즉시** 스킨을 복원한다(120ms 폴링 대기 = 눈에 보이는 깜빡임).
+        try:
+            view.viewport().installEventFilter(self)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.CursorChange:
+            # reassert 는 멱등: 우리 커서면 no-op, 다르면 1회 재적용(재적용이 다시
+            # CursorChange 를 부르지만 그땐 cacheKey 일치 → 종료). 메뉴 중엔 스킵.
+            self.reassert_self_pointer()
+        return False
 
     def set_client(self, client):
         """스킨 다운로드/URL 구성을 위한 ServerClient 참조 설정."""
@@ -406,6 +421,7 @@ class CursorLayer(QObject):
         # 내 포인터가 이 스킨을 기다렸으면 적용
         if self._self_skin_want in (actual, expected) and self._self_skin_hash != actual:
             self._self_roles = roles
+            self._self_cursors = {}
             self._self_skin_hash = actual
             self._apply_self_pointer()
         self._invalidate()
@@ -422,6 +438,7 @@ class CursorLayer(QObject):
         roles = cache.get_roles(h)
         if roles:
             self._self_roles = roles
+            self._self_cursors = {}
             self._self_skin_hash = h
             self._apply_self_pointer()
         else:
@@ -440,35 +457,63 @@ class CursorLayer(QObject):
             self._apply_self_pointer()
 
     def reassert_self_pointer(self):
-        """내 포인터 스킨을 다시 강제 적용(자가복구).
+        """내 포인터 스킨을 다시 적용(자가복구, 멱등 — 이미 우리 커서면 no-op).
 
-        뷰의 다른 코드(팬 종료/방사형 메뉴 닫기 등)가 viewport 커서를 ArrowCursor 로
-        되돌려 스킨이 풀리는 일이 잦다. 폴 타이머가 매 틱 호출해 120ms 내 복구한다.
-        menu/away 상태에선 뷰가 커서를 직접 제어하므로 건드리지 않는다.
+        뷰의 다른 코드(아이템 호버/팬 종료/방사형 메뉴 닫기 등)가 viewport 커서를
+        갈아치우면 스킨이 풀린다. CursorChange 이벤트 필터가 즉시 + 폴 타이머가
+        백스톱으로 호출한다. menu/away 상태에선 뷰가 커서를 직접 제어(숨김 등)하므로
+        건드리지 않는다 — _self_state 는 폴링이라 늦을 수 있어 radial_menu 를 직접 본다.
         """
-        if self._self_roles and self._self_state not in ("menu", "away"):
-            self._apply_self_pointer()
+        if not self._self_roles or self._self_state in ("menu", "away"):
+            return
+        if getattr(self._view, "radial_menu", None):
+            return
+        self._apply_self_pointer()
 
     def _apply_self_pointer(self):
-        """현재 상태(_self_state)의 역할 스킨을 내 마우스 포인터에 적용."""
+        """현재 상태(_self_state)의 역할 스킨을 내 마우스 포인터에 적용.
+
+        폴 타이머(reassert)가 120ms 마다 부르므로 **멱등이어야** 한다:
+        역할별 QCursor 는 캐시해 재사용하고, 뷰포트가 이미 우리 커서면
+        setCursor 를 건너뛴다 — 매 틱 새 HCURSOR 로 교체하면 Windows 에서
+        마우스 포인터가 계속 깜빡인다(1.4.13 자가복구의 부작용).
+        """
         if self._view is None or not self._self_roles:
             return
-        pm = (self._self_roles.get(_role_for_state(self._self_state))
-              or self._self_roles.get("default"))
-        if pm is None or pm.isNull():
+        cur = self._cursor_for_role(_role_for_state(self._self_state))
+        if cur is None:
             return
         try:
-            disp = pm
-            if pm.width() > _SKIN_DISP or pm.height() > _SKIN_DISP:
-                disp = pm.scaled(int(_SKIN_DISP), int(_SKIN_DISP),
-                                 Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
-            self._view.viewport().setCursor(QCursor(disp, 0, 0))
+            vp = self._view.viewport()
+            # 이미 같은 커서면 재적용 금지(핸들 교체 = 깜빡임). 외부 코드가
+            # ArrowCursor 등으로 되돌렸으면 pixmap 이 달라져(shape 커서는 null)
+            # cacheKey 가 어긋나므로 그때만 다시 입힌다.
+            if vp.cursor().pixmap().cacheKey() == cur.pixmap().cacheKey():
+                return
+            vp.setCursor(cur)
         except Exception:
             pass
 
+    def _cursor_for_role(self, role: str) -> Optional[QCursor]:
+        """역할 스킨의 QCursor 를 만들어 캐시(스킨 세트가 바뀌면 캐시 비움)."""
+        cur = self._self_cursors.get(role)
+        if cur is not None:
+            return cur
+        pm = self._self_roles.get(role) or self._self_roles.get("default")
+        if pm is None or pm.isNull():
+            return None
+        disp = pm
+        if pm.width() > _SKIN_DISP or pm.height() > _SKIN_DISP:
+            disp = pm.scaled(int(_SKIN_DISP), int(_SKIN_DISP),
+                             Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+        cur = QCursor(disp, 0, 0)
+        self._self_cursors[role] = cur
+        return cur
+
     def _reset_self_pointer(self):
         self._self_roles = {}
+        self._self_cursors = {}
         if self._self_skin_hash is None:
             return
         self._self_skin_hash = None
