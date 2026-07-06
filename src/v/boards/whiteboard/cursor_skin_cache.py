@@ -37,7 +37,12 @@ def cached_file(h: str) -> Path:
 
 
 def slice_roles(pm: Optional[QPixmap]) -> Dict[str, QPixmap]:
-    """스프라이트 시트를 역할별 QPixmap 으로 자른다. 칸 부족 시 0번(기본)으로 폴백."""
+    """스프라이트 시트를 역할별 QPixmap 으로 자른다. 칸 부족 시 0번(기본)으로 폴백.
+
+    같은 칸을 쓰는 역할들은 **같은 QPixmap 객체**를 공유한다 — 단일칸(스킨 1장) 시트에서
+    point/text 가 default 와 동일 객체가 되므로, 핫스팟 계산이 '이 그림은 화살표'임을
+    identity 로 알 수 있다(화살표 그림에 손끝 휴리스틱을 적용하는 오류 방지).
+    """
     if pm is None or pm.isNull():
         return {}
     w, h = pm.width(), pm.height()
@@ -46,9 +51,12 @@ def slice_roles(pm: Optional[QPixmap]) -> Dict[str, QPixmap]:
     cells = max(1, round(w / h))
     cw = w / cells
     out: Dict[str, QPixmap] = {}
+    cell_pm: Dict[int, QPixmap] = {}
     for i, role in enumerate(ROLE_ORDER):
         idx = i if i < cells else 0
-        out[role] = pm.copy(QRect(int(round(idx * cw)), 0, int(round(cw)), h))
+        if idx not in cell_pm:
+            cell_pm[idx] = pm.copy(QRect(int(round(idx * cw)), 0, int(round(cw)), h))
+        out[role] = cell_pm[idx]
     return out
 
 
@@ -97,3 +105,72 @@ def put_pixmap(h: str, pm: QPixmap) -> None:
     if h and pm is not None and not pm.isNull():
         _mem[h] = pm
         _roles.pop(h, None)
+
+
+# ── 핫스팟(가리키는 지점) 감지 ────────────────────────────────────
+# QCursor 는 핫스팟 좌표가 실제 포인터 위치다. 지금까지 (0,0) 고정이라 손가락/I-beam
+# 커서에서 '보이는 손끝'과 '실제 클릭점'이 십수 px 어긋났다(리사이즈 핸들이 안 잡히는 체감).
+# 글리프 내용(알파)에서 역할별 지점을 찾는다: 화살표=최상단 행의 왼쪽 끝(팁),
+# 손=최상단 행의 중앙(손끝), I-beam=불투명 영역 중앙. 글로우 후광은 alpha<128 로 무시.
+_hotspots: dict = {}   # (pixmap cacheKey, role) -> (x, y) 원본 픽셀 좌표
+
+_ALPHA_MIN = 128
+_SCAN_MAX = 64   # 큰 스킨은 축소본에서 스캔(정밀도 충분, 속도 일정)
+
+
+def hotspot(role: str, pm: Optional[QPixmap]) -> tuple:
+    """역할 글리프의 '가리키는 지점'(원본 픽셀 좌표). 실패/빈 그림이면 (0,0)."""
+    if pm is None or pm.isNull():
+        return (0.0, 0.0)
+    key = (pm.cacheKey(), role)
+    got = _hotspots.get(key)
+    if got is not None:
+        return got
+    try:
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtGui import QImage
+        scan = pm
+        if pm.width() > _SCAN_MAX or pm.height() > _SCAN_MAX:
+            scan = pm.scaled(_SCAN_MAX, _SCAN_MAX, _Qt.AspectRatioMode.KeepAspectRatio,
+                             _Qt.TransformationMode.FastTransformation)
+        img = scan.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        w, h = img.width(), img.height()
+        minx, miny, maxx, maxy = w, h, -1, -1
+        top_y = -1
+        top_xs: list = []
+        for y in range(h):
+            for x in range(w):
+                if ((img.pixel(x, y) >> 24) & 0xFF) >= _ALPHA_MIN:
+                    if top_y < 0:
+                        top_y = y
+                    if y == top_y:
+                        top_xs.append(x)
+                    minx = min(minx, x); maxx = max(maxx, x)
+                    miny = min(miny, y); maxy = max(maxy, y)
+        if maxx < 0:                     # 전부 투명
+            pt = (0.0, 0.0)
+        elif role == "text":             # I-beam: 중앙이 캐럿 위치
+            pt = ((minx + maxx) / 2.0, (miny + maxy) / 2.0)
+        elif role == "point":            # 손가락: 최상단(손끝)의 중앙
+            pt = ((top_xs[0] + top_xs[-1]) / 2.0, float(top_y))
+        else:                            # 화살표: 최상단 행의 왼쪽 끝 = 팁
+            pt = (float(top_xs[0]), float(top_y))
+        f = pm.width() / float(w) if w else 1.0   # 축소 스캔 → 원본 좌표로 환산
+        pt = (pt[0] * f, pt[1] * f)
+    except Exception:
+        pt = (0.0, 0.0)
+    _hotspots[key] = pt
+    return pt
+
+
+def hotspot_for(roles: Dict[str, QPixmap], role: str) -> tuple:
+    """역할 dict 에서 실제 쓰일 픽스맵의 핫스팟. 단일칸 폴백(다른 역할이 default 와
+    같은 객체)이면 화살표(default) 휴리스틱을 적용한다."""
+    pm = roles.get(role) or roles.get("default")
+    if pm is None:
+        return (0.0, 0.0)
+    used_role = role
+    dflt = roles.get("default")
+    if role != "default" and dflt is not None and pm is dflt:
+        used_role = "default"
+    return hotspot(used_role, pm)

@@ -115,12 +115,14 @@ class _CursorItem(QGraphicsItem):
         s = self._scale
         m = 4.0  # 안티앨리어싱/빠른 이동 여유 — 뷰가 DontAdjustForAntialiasing 라 잔상 방지용으로 직접 확보
         if self._cur_skin() is not None:
-            # 스킨은 화살표보다 클 수 있어 글리프 영역을 _SKIN_DISP 까지 확보
-            w = max(_SKIN_DISP, 14.0 + self._lw)
-            h = max(_SKIN_DISP, 14.0 + self._lh)
-        else:
-            w = 18.0 + self._lw
-            h = 20.0 + self._lh
+            # 스킨은 화살표보다 클 수 있고, 핫스팟 오프셋만큼 좌상단으로도 그려질 수 있어
+            # 글리프 영역을 사방 _SKIN_DISP 까지 확보한다.
+            w = _SKIN_DISP + max(_SKIN_DISP, 14.0 + self._lw)
+            h = _SKIN_DISP + max(_SKIN_DISP, 14.0 + self._lh)
+            return QRectF((-_SKIN_DISP - 2) * s - m, (-_SKIN_DISP - 2) * s - m,
+                          w * s + 2 * m + 4, h * s + 2 * m + 4)
+        w = 18.0 + self._lw
+        h = 20.0 + self._lh
         return QRectF(-2 * s - m, -2 * s - m, w * s + 2 * m, h * s + 2 * m)
 
     def paint(self, p, opt, widget=None):
@@ -135,7 +137,12 @@ class _CursorItem(QGraphicsItem):
             bw, bh = skin.width(), skin.height()
             if bw > 0 and bh > 0:
                 f = min(_SKIN_DISP / bw, _SKIN_DISP / bh, 1.0)  # 축소만(작은 건 원본 크기)
-                p.drawPixmap(QRectF(0, 0, bw * f, bh * f), skin, QRectF(0, 0, bw, bh))
+                # 핫스팟(가리키는 지점)이 아이템 원점(=보고된 커서 위치)에 오도록 오프셋
+                # — 내 포인터의 QCursor 핫스팟과 동일한 기준. 손끝/팁이 정확한 곳을 가리킨다.
+                from . import cursor_skin_cache as cache
+                hx, hy = cache.hotspot_for(self._skins, _role_for_state(self._state))
+                p.drawPixmap(QRectF(-hx * f, -hy * f, bw * f, bh * f),
+                             skin, QRectF(0, 0, bw, bh))
         else:
             p.setPen(QColor(255, 255, 255, 230))
             p.setBrush(self._color)
@@ -495,19 +502,28 @@ class CursorLayer(QObject):
             pass
 
     def _cursor_for_role(self, role: str) -> Optional[QCursor]:
-        """역할 스킨의 QCursor 를 만들어 캐시(스킨 세트가 바뀌면 캐시 비움)."""
+        """역할 스킨의 QCursor 를 만들어 캐시(스킨 세트가 바뀌면 캐시 비움).
+
+        핫스팟 = 글리프가 실제로 가리키는 지점(화살표 팁/손끝/I-beam 중앙). (0,0) 고정이면
+        손가락 커서에서 보이는 손끝과 실제 클릭점이 어긋나 작은 UI(리사이즈 핸들)를 못 잡는다.
+        """
         cur = self._self_cursors.get(role)
         if cur is not None:
             return cur
         pm = self._self_roles.get(role) or self._self_roles.get("default")
         if pm is None or pm.isNull():
             return None
+        from . import cursor_skin_cache as cache
+        hx, hy = cache.hotspot_for(self._self_roles, role)
         disp = pm
         if pm.width() > _SKIN_DISP or pm.height() > _SKIN_DISP:
             disp = pm.scaled(int(_SKIN_DISP), int(_SKIN_DISP),
                              Qt.AspectRatioMode.KeepAspectRatio,
                              Qt.TransformationMode.SmoothTransformation)
-        cur = QCursor(disp, 0, 0)
+        f = disp.width() / pm.width() if pm.width() else 1.0
+        cur = QCursor(disp,
+                      max(0, min(disp.width() - 1, int(round(hx * f)))),
+                      max(0, min(disp.height() - 1, int(round(hy * f)))))
         self._self_cursors[role] = cur
         return cur
 

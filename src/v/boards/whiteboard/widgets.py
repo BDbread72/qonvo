@@ -676,6 +676,12 @@ class ResizeHandle(QFrame):
     def mouseMoveEvent(self, event):
         if self._resizing and self._resize_start_scene is not None:
             self._resized = True
+            # 사용자가 직접 크기를 정했다는 표식 — 자동 맞춤(_fit_height 류)이
+            # 이후 이 크기를 되돌리지 않도록 노드에 남긴다.
+            try:
+                self.parent_widget._user_resized = True
+            except Exception:
+                pass
             current_scene = self._cursor_to_scene()
             scene_delta = current_scene - self._resize_start_scene
 

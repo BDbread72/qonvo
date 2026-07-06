@@ -1046,12 +1046,17 @@ class ChatNodeWidget(QWidget, BaseNode):
         """최소 높이(짜부 방지)를 잡고, 현재 높이가 부족하면 콘텐츠 선호 높이로 키운다.
 
         옵션 수가 모델마다 달라 필요 높이가 바뀐다 → 모델 변경/최초 표시 때만 한 번 정리
-        (빈 공간/잘림 방지). 폭은 유지. 토글로 깜빡 늘었다 줄지 않음.
+        (빈 공간/잘림 방지). 폭은 유지.
+        ⚠️ 사용자가 핸들로 직접 정한 크기(또는 저장에서 복원한 크기)는 절대 덮어쓰지
+        않는다 — 예전엔 모델을 바꿀 때마다 sizeHint 로 스냅해 '크기를 바꿔도 자꾸
+        되돌아가는' 체감을 만들었다. 그 경우엔 짜부 방지 최소만 보정한다.
         """
         lay = self.layout()
         if lay is None:
             return
         self._apply_content_min()
+        if getattr(self, "_user_resized", False) or getattr(self, "_restored_geometry", False):
+            return
         target = max(self.minimumHeight(), lay.sizeHint().height())
         if self.height() != target:
             self.resize(self.width(), target)
