@@ -966,7 +966,10 @@ class ServerMixin:
 
         def _do_upload(b=board_id, n=name, p=path):
             try:
-                client.upload_attachment(b, n, p)
+                if not client.upload_attachment(b, n, p):
+                    from v.logger import get_logger
+                    get_logger("qonvo.plugin").warning(
+                        f"[IMG_UPLOAD] server upload failed: board={b} name={n}")
             except Exception:
                 pass
         threading.Thread(target=_do_upload, daemon=True).start()

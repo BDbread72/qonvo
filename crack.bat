@@ -1,8 +1,11 @@
 @echo off
 rem 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
+rem ⚠️ 과거 `> buildno.txt echo|set /p=...` 형태는 앞쪽 리다이렉션이 echo(무인자)에 붙어
+rem    파일에 "ECHO is on." 이 구워졌음(버전이 beta-X.Y.Z+ECHO is on. 으로 표시). 금지.
 set BUILDNO=
 for /f %%i in ('git rev-list --count HEAD') do set BUILDNO=%%i
-> buildno.txt echo|set /p="%BUILDNO%"
+if "%BUILDNO%"=="" set BUILDNO=0
+(echo %BUILDNO%)> buildno.txt
 python -m PyInstaller --noconfirm --onefile --noconsole --name qonvo --icon=icon.ico --distpath . ^
     --add-data "icon.ico;." ^
     --add-data "lang;lang" ^

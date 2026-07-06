@@ -839,6 +839,7 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         self._full_loaded = False
         self._loading = False
         self._load_failed = False
+        self._needs_server_resync = False  # set_image 동기 디코드 실패 → 늦은 로드 후 서버 정정
 
         if image_path and os.path.exists(image_path) and width <= 0:
             self._pixmap = QPixmap(image_path)
@@ -972,6 +973,27 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 self._aspect = self._pixmap.width() / self._pixmap.height() if self._pixmap.height() > 0 else 1.0
                 self._preview_b64 = self._generate_preview(self._pixmap)
                 self._preview_pixmap = None
+                if getattr(self, '_needs_server_resync', False):
+                    # set_image 의 동기 디코드가 실패한 카드: 그때 서버로 나간 node_prop
+                    # 은 preview 없이 기본 크기(200x150)였다. 이제 이미지를 얻었으니
+                    # 크기를 잡고 정정 prop(+재업로드)을 보낸다. (일반 lazy 로드는
+                    # 이 플래그가 없어 절대 타지 않음 — 대형 보드 join 시 스팸 방지)
+                    self._needs_server_resync = False
+                    if self._width == 200 and self._height == 150:
+                        pw, ph = self._pixmap.width(), self._pixmap.height()
+                        max_side = 300
+                        self.prepareGeometryChange()
+                        if pw > ph:
+                            self._width = min(pw, max_side)
+                            self._height = self._width * ph / pw
+                        else:
+                            self._height = min(ph, max_side)
+                            self._width = self._height * pw / ph
+                    if self.on_image_changed:
+                        try:
+                            self.on_image_changed(self)
+                        except Exception:
+                            _logger.warning("[IMG_LOAD] late resync callback failed", exc_info=True)
         else:
             self._load_failed = True
         self._full_loaded = True
@@ -1054,6 +1076,23 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             path = self._copy_to_managed(path)
         self.image_path = path
         self._pixmap = QPixmap(path) if path and os.path.exists(path) else QPixmap()
+        if self._pixmap.isNull() and path and os.path.exists(path):
+            # QPixmap 이 못 읽는 파일(확장자-내용 불일치, 포맷 플러그인 문제 등)
+            # → 내용 기반 감지로 한 번 더 시도하고, 그래도 실패면 원인을 남긴다.
+            from PyQt6.QtGui import QImageReader
+            reader = QImageReader(path)
+            reader.setAutoTransform(True)
+            reader.setDecideFormatFromContent(True)
+            img = reader.read()
+            if not img.isNull():
+                self._pixmap = QPixmap.fromImage(img)
+            if self._pixmap.isNull():
+                _logger.warning(f"[SET_IMAGE] decode failed: {path} "
+                                f"(format={bytes(reader.format()).decode(errors='replace')}, "
+                                f"err={reader.errorString()})")
+                # 서버모드 대비: 즉시 전송되는 node_prop 엔 preview 가 없다.
+                # 나중에 비동기 로더가 성공하면 서버에 정정 prop 을 재전송한다.
+                self._needs_server_resync = True
         self._load_failed = False
         _logger.info(f"[SET_IMAGE] id={getattr(self, 'node_id', '?')} final_path={path} pixmap_null={self._pixmap.isNull()}")
         if not self._pixmap.isNull():

@@ -340,7 +340,8 @@ class ServerClient(QObject):
             with urllib.request.urlopen(req, timeout=30) as r:
                 return r.status == 200
         except Exception as e:
-            logger.debug("attachment upload failed %s: %s", name, e)
+            # 업로드 실패는 보드 영속 실패(재접속 시 이미지 소실)로 이어짐 — 진단 가능하게 경고로.
+            logger.warning("attachment upload failed %s: %s", name, e)
             return False
 
     # ---- ping / presence / chat ---------------------------------------
