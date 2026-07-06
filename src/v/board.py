@@ -251,7 +251,8 @@ def _get_build_config() -> dict:
         toml_path = Path(__file__).resolve().parent.parent.parent / "build.toml"
     try:
         with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
+            # utf-8-sig: 편집 도구가 BOM 을 붙여도 파싱이 깨지지 않게(BOM 이면 tomllib 실패 → 버전 "")
+            data = tomllib.loads(f.read().decode("utf-8-sig"))
         return data.get("app", {})
     except Exception:
         return {}

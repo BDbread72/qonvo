@@ -56,7 +56,7 @@ def _get_version() -> str:
         toml_path = Path(__file__).resolve().parent.parent.parent / "build.toml"
     try:
         with open(toml_path, "rb") as f:
-            data = tomllib.load(f)
+            data = tomllib.loads(f.read().decode("utf-8-sig"))  # BOM 내성
         return data.get("app", {}).get("version", "")
     except Exception:
         return ""

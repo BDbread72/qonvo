@@ -1,7 +1,7 @@
 @echo off
 rem 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
-rem ⚠️ 과거 `> buildno.txt echo|set /p=...` 형태는 앞쪽 리다이렉션이 echo(무인자)에 붙어
-rem    파일에 "ECHO is on." 이 구워졌음(버전이 beta-X.Y.Z+ECHO is on. 으로 표시). 금지.
+rem 주의: 과거의 redirect-first echo pipe set /p 형태는 echo 무인자 출력이 파일에 구워져
+rem 버전이 beta-X.Y.Z+ECHO is on. 으로 표시됐음. rem 줄에 파이프/리다이렉트 문자 금지 - cmd가 실행함.
 set BUILDNO=
 for /f %%i in ('git rev-list --count HEAD') do set BUILDNO=%%i
 if "%BUILDNO%"=="" set BUILDNO=0
