@@ -995,6 +995,12 @@ class WhiteBoardPlugin(
                     card.set_image(raw)
                     self._mark_node_dirty(card.node_id)
                     return
+                elif self._looks_like_image_ref(raw):
+                    # 서버 재접속: 상대참조(attachments/xxx) → 해석(없으면 참조 그대로,
+                    # 카드가 다운로드 후 늦게 해석). base64 로 오인 디코드하던 버그 수정.
+                    card.set_image(self._resolve_attachment_ref(raw) or raw)
+                    self._mark_node_dirty(card.node_id)
+                    return
                 elif raw.startswith("data:image"):
                     _, encoded = raw.split(",", 1)
                     img_bytes = base64.b64decode(encoded)
@@ -1058,6 +1064,35 @@ class WhiteBoardPlugin(
         repo_node._scan_folder()
         self._emit_complete_signal(repo_node)
 
+    @staticmethod
+    def _looks_like_image_ref(s) -> bool:
+        """문자열이 base64 가 아니라 이미지 파일 참조(경로/상대참조)로 보이는지.
+        base64 는 보통 매우 길고 확장자가 없다."""
+        if not isinstance(s, str) or len(s) > 512:
+            return False
+        low = s.lower()
+        return (low.startswith("attachments/") or low.startswith("attachments\\")
+                or low.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")))
+
+    def _resolve_attachment_ref(self, ref):
+        """상대참조(attachments/<uuid>.png)/파일명을 보드 temp 의 실제 파일로 해석.
+        찾으면 절대경로, 못 찾으면 None(아직 다운로드 전일 수 있음 → 호출부가 참조 그대로
+        카드에 넘기면 카드가 늦게 해석한다)."""
+        import os
+        if not ref:
+            return None
+        if os.path.isabs(ref) and os.path.exists(ref):
+            return ref
+        from .items import ImageCardItem
+        td = ImageCardItem._board_temp_dir
+        if td:
+            base = os.path.basename(ref)
+            for sub in ("attachments", ""):
+                cand = os.path.join(td, sub, base) if sub else os.path.join(td, base)
+                if os.path.exists(cand):
+                    return cand
+        return None
+
     def _auto_create_next_node(self, source_node, images=None):
         proxy = source_node.proxy
         if not proxy:
@@ -1067,12 +1102,20 @@ class WhiteBoardPlugin(
         new_y = src_pos.y()
 
         if images:
-            # ⚠️ 문자열이라도 실제 파일 경로일 때만 경로로 취급한다. 서버 모드에선
-            # images[0] 이 base64 문자열이라 그대로 경로로 쓰면 빈 카드가 된다(파일 미존재)
-            # → 디코드 분기로 떨어뜨려 temp 에 써야 한다.
+            # ⚠️ images[0] 은 3가지 형태일 수 있다:
+            #  (1) 절대 파일경로(로컬 생성) (2) base64 문자열(서버 라이브 생성)
+            #  (3) 상대참조 attachments/<uuid>.png (서버 재접속 후 복원된 후보)
+            # 예전엔 (3)을 절대경로로도 base64로도 못 읽어 base64 디코드가 터지고 return →
+            # "선택했는데 아무것도 안 생김". (3)은 이미 보드 첨부이므로 참조 그대로 카드에
+            # 넘기면 카드(_resolve_local_path)가 temp 에서 해석한다.
             import os
             first = images[0]
-            img_path = first if (isinstance(first, str) and os.path.exists(first)) else None
+            img_path = None
+            if isinstance(first, str):
+                if os.path.exists(first):
+                    img_path = first                       # (1) 절대경로
+                elif self._looks_like_image_ref(first):
+                    img_path = self._resolve_attachment_ref(first) or first  # (3) 상대참조
             if not img_path:
                 import base64, uuid
                 from v.board import BoardManager
@@ -1201,6 +1244,13 @@ class WhiteBoardPlugin(
                 img_path = None
                 if isinstance(img_data, str) and os.path.isfile(img_data):
                     img_path = img_data
+                elif isinstance(img_data, str) and self._looks_like_image_ref(img_data):
+                    # 서버 재접속: 상대참조를 temp 에서 해석(못 찾으면 이 항목 스킵).
+                    resolved = self._resolve_attachment_ref(img_data)
+                    if resolved:
+                        img_path = resolved
+                    else:
+                        continue
                 else:
                     raw_bytes = None
                     if isinstance(img_data, bytes):
