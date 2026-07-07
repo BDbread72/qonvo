@@ -763,7 +763,10 @@ class QonvoServer:
             try:
                 rel_refs = self._persist_ai_images(board_id, result.get("images", []))
                 self.boards.get(board_id).append_assistant_message(
-                    node_id, result.get("text", ""), rel_refs
+                    node_id, result.get("text", ""), rel_refs,
+                    user=message, model=model,
+                    tokens_in=result.get("tokens_in", 0),
+                    tokens_out=result.get("tokens_out", 0),
                 )
             except Exception as e:
                 logger.warning("ai persist failed node=%s: %s", node_id, e)

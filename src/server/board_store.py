@@ -434,16 +434,31 @@ class Board:
             return True
         return False  # 알 수 없는 op_type
 
-    def append_assistant_message(self, node_id, text: str, images: list) -> None:
-        """AI 응답을 권위 문서의 채팅 노드 history 에 누적한다."""
+    def append_assistant_message(self, node_id, text: str, images: list,
+                                 user: str = "", model: str = "",
+                                 tokens_in: int = 0, tokens_out: int = 0) -> None:
+        """AI 응답을 권위 문서의 채팅 노드 history 에 누적한다(재접속 시 로그 복원용).
+
+        ⚠️ 클라 _history 포맷({user,response,model,...})으로 저장한다. 예전엔
+        {role,content} 로 저장해, 재접속하면 클라 렌더러(_create_entry_widget 이
+        entry['user']/['response']/['model'] 을 읽음)가 빈 줄로 그렸다.
+        ⚠️ _snap_cache 를 무효화한다. 이 변경은 op 이 아니라 seq 를 안 올리는데,
+        snapshot_for_join 이 seq 로 full-sync 를 캐시하므로 무효화하지 않으면
+        재접속(항상 full sync)이 이 history 가 빠진 옛 스냅샷을 그대로 돌려준다
+        → 실행했는데도 로그가 사라지고 '대기 중'으로 보이던 버그.
+        """
         with self._lock:
             n = self._find_node(node_id)
-            if n is not None:
-                entry = {"role": "assistant", "content": text}
-                if images:
-                    entry["images"] = list(images)
-                n.setdefault("history", []).append(entry)
-                self._dirty = True
+            if n is None:
+                return
+            entry = {
+                "user": user, "files": [], "response": text,
+                "images": list(images or []), "model": model,
+                "tokens_in": int(tokens_in or 0), "tokens_out": int(tokens_out or 0),
+            }
+            n.setdefault("history", []).append(entry)
+            self._dirty = True
+            self._snap_cache = None   # full sync 재생성 강제(새 history 포함)
 
 
 # ---- 헬퍼 ---------------------------------------------------------------

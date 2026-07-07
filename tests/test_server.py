@@ -376,6 +376,24 @@ async def run():
             ok("attachment access scoped to board membership")
             await w4.close()
 
+            # 25) AI 응답 history 가 재접속 full-sync 에 복원됨(캐시 무효화 + 클라 포맷)
+            #     — '1회 실행 후 껏다 키면 로그가 사라지고 대기중' 버그의 회귀 방지.
+            _ = board.snapshot_for_join(0)          # full-sync 캐시를 현재 seq 로 워밍
+            board.append_assistant_message("300", "resp-text", [],
+                                           user="prompt-text", model="m1")
+            snap = board.snapshot_for_join(0)       # 재접속(항상 full sync)
+            doc = snap.get("snapshot")
+            if doc is None and snap.get("snapshot_gz"):
+                import base64 as _b64, gzip as _gz
+                doc = json.loads(_gz.decompress(_b64.b64decode(snap["snapshot_gz"])).decode("utf-8"))
+            n300 = next((n for n in doc.get("nodes", [])
+                         if n.get("id") == 300 or n.get("node_id") == 300), None)
+            assert n300 is not None, "chat node 300 missing from full sync"
+            h = n300.get("history", [])
+            assert h and h[-1].get("user") == "prompt-text" \
+                and h[-1].get("response") == "resp-text", h
+            ok("AI history restored on rejoin (snap cache invalidated, client format)")
+
             # BOARD2 정리(테스트가 만든 보드 디렉토리)
             b2dir = board_store.get_boards_dir() / board_store.safe_board_id(BOARD2)
             if b2dir.exists():
@@ -390,7 +408,7 @@ async def run():
     return passed
 
 
-EXPECTED = 29
+EXPECTED = 30
 
 if __name__ == "__main__":
     result = asyncio.run(run())
