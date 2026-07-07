@@ -22,29 +22,55 @@ class _ImageLoader(QThread):
         self._max_px = max_px
         self._dpr = dpr
 
+    @staticmethod
+    def _resolve_local(data):
+        """서버모드 재접속 시 후보 이미지가 상대참조(attachments/<uuid>.png)로 복원된다.
+        절대경로가 아니면 보드 temp 에서 basename 으로 해석한다(로그뷰/이미지카드와 동일).
+        해석 실패 시 원본을 그대로 반환(base64 폴백이 처리)."""
+        import os
+        if not isinstance(data, str) or os.path.isfile(data):
+            return data
+        try:
+            from .chat_node import ChatNodeWidget
+            td = ChatNodeWidget._board_temp_dir
+        except Exception:
+            td = None
+        if td:
+            base = os.path.basename(data)
+            for sub in ("attachments", ""):
+                cand = os.path.join(td, sub, base) if sub else os.path.join(td, base)
+                if os.path.isfile(cand):
+                    return cand
+        return data
+
     def run(self):
         """백그라운드에서 이미지를 디코딩하고 스케일링한 뒤 로드 완료 시그널을 방출한다."""
         import os
         img = None
-        if isinstance(self._img_data, str) and os.path.isfile(self._img_data):
-            img = QImage(self._img_data)
+        data = self._resolve_local(self._img_data)
+        if isinstance(data, str) and os.path.isfile(data):
+            img = QImage(data)
         else:
             raw = None
             try:
-                if isinstance(self._img_data, bytes):
-                    raw = self._img_data
-                elif isinstance(self._img_data, str):
-                    if self._img_data.startswith("data:image"):
-                        _, encoded = self._img_data.split(",", 1)
+                if isinstance(data, bytes):
+                    raw = data
+                elif isinstance(data, str):
+                    if data.startswith("data:image"):
+                        _, encoded = data.split(",", 1)
                         raw = base64.b64decode(encoded)
                     else:
-                        raw = base64.b64decode(self._img_data)
+                        raw = base64.b64decode(data)
             except Exception:
-                return
+                raw = None
             if not raw:
+                # 로드 실패 — 신호를 안 보내면 "이미지 로딩 중..."에 영구히 멈춘다.
+                # 실패 시그널(빈 QImage, 0x0)로 플레이스홀더를 실패 상태로 갱신한다.
+                self.loaded.emit(self._index, QImage(), 0, 0)
                 return
             img = QImage.fromData(raw)
         if img is None or img.isNull():
+            self.loaded.emit(self._index, QImage(), 0, 0)
             return
         orig_w, orig_h = img.width(), img.height()
         max_px = int(self._max_px * self._dpr)
@@ -360,6 +386,10 @@ class PreferredResultsWindow(QWidget):
         placeholder = self._img_placeholders.get(index)
         size_lbl = self._size_placeholders.get(index)
         if placeholder is None:
+            return
+        if qimage is None or qimage.isNull():
+            # 로드 실패 — "로딩 중"에 멈추지 않게 실패 상태로 명확히 표시.
+            placeholder.setText("이미지를 불러올 수 없음")
             return
         dpr = self.devicePixelRatio() or 1.0
         pixmap = QPixmap.fromImage(qimage)
