@@ -733,6 +733,20 @@ class QonvoServer:
                         })
                     else:
                         candidates.append({"text": "", "images": [], "error": str(r)})
+                # 문서에 후보 저장(재접속 로그 복원). 클라로 보내는 candidates 는 즉시
+                # 표시용 base64 이미지, 문서에는 첨부 파일로 영속하고 상대참조로 기록한다.
+                try:
+                    doc_cands = [
+                        {"text": c.get("text", ""),
+                         "images": self._persist_ai_images(board_id, c.get("images", []))}
+                        for c in candidates
+                    ]
+                    self.boards.get(board_id).append_preferred_message(
+                        node_id, user=message, model=model, candidates=doc_cands,
+                        tokens_in=tin, tokens_out=tout,
+                    )
+                except Exception as e:
+                    logger.warning("preferred persist failed node=%s: %s", node_id, e)
                 await sess.send({"type": "ai_complete", "node_id": node_id,
                                  "result": {"candidates": candidates}})
                 return

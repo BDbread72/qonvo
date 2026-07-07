@@ -394,6 +394,23 @@ async def run():
                 and h[-1].get("response") == "resp-text", h
             ok("AI history restored on rejoin (snap cache invalidated, client format)")
 
+            # 26) preferred(N후보) 실행도 재접속 로그에 남는다(예전엔 문서에 아무것도 안 남김)
+            _ = board.snapshot_for_join(0)
+            board.append_preferred_message(
+                "300", user="pick one", model="m2",
+                candidates=[{"text": "cand-A", "images": []},
+                            {"text": "cand-B", "images": []}])
+            snap2 = board.snapshot_for_join(0)
+            doc2 = snap2.get("snapshot")
+            if doc2 is None and snap2.get("snapshot_gz"):
+                import base64 as _b64b, gzip as _gzb
+                doc2 = json.loads(_gzb.decompress(_b64b.b64decode(snap2["snapshot_gz"])).decode("utf-8"))
+            n300b = next((n for n in doc2.get("nodes", [])
+                          if n.get("id") == 300 or n.get("node_id") == 300), None)
+            h2 = (n300b or {}).get("history", [])
+            assert h2 and h2[-1].get("preferred_texts") == ["cand-A", "cand-B"], h2
+            ok("preferred run persists to rejoin log (candidates survive)")
+
             # BOARD2 정리(테스트가 만든 보드 디렉토리)
             b2dir = board_store.get_boards_dir() / board_store.safe_board_id(BOARD2)
             if b2dir.exists():
@@ -408,7 +425,7 @@ async def run():
     return passed
 
 
-EXPECTED = 30
+EXPECTED = 31
 
 if __name__ == "__main__":
     result = asyncio.run(run())

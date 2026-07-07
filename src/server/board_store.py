@@ -460,6 +460,34 @@ class Board:
             self._dirty = True
             self._snap_cache = None   # full sync 재생성 강제(새 history 포함)
 
+    def append_preferred_message(self, node_id, user: str, model: str,
+                                 candidates: list, tokens_in: int = 0,
+                                 tokens_out: int = 0) -> None:
+        """preferred(N후보) 실행을 문서 history 에 저장(재접속 로그 복원).
+
+        candidates: [{"text": str, "images": [rel_ref,...]}]. 예전엔 preferred 는
+        문서에 아무것도 안 남겨(요청자에게만 candidates 전송 후 return) 재접속 시
+        선택하든 버리든 로그가 통째로 사라졌다. 후보 자체를 남긴다 — 클라
+        _create_entry_widget 이 preferred_candidates/preferred_texts 를 읽어 렌더한다.
+        캐시 무효화 이유는 append_assistant_message 와 동일.
+        """
+        with self._lock:
+            n = self._find_node(node_id)
+            if n is None:
+                return
+            cands = [{"text": c.get("text", ""), "images": list(c.get("images") or [])}
+                     for c in (candidates or [])]
+            entry = {
+                "user": user, "files": [], "response": "",
+                "images": [], "model": model,
+                "preferred_candidates": cands,
+                "preferred_texts": [c["text"] for c in cands],
+                "tokens_in": int(tokens_in or 0), "tokens_out": int(tokens_out or 0),
+            }
+            n.setdefault("history", []).append(entry)
+            self._dirty = True
+            self._snap_cache = None
+
 
 # ---- 헬퍼 ---------------------------------------------------------------
 def _as_id(target):
