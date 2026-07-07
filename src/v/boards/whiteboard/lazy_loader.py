@@ -206,6 +206,67 @@ class LazyLoadManager:
                 return category, items[node_id]
         return None
 
+    # ── 원격 op → pending 반영 (서버모드) ─────────────────────
+    # 뷰포트 밖(미실체화) 노드로 온 원격 op 를 버리면, 나중에 실체화될 때
+    # join 시점의 낡은 데이터로 살아난다. 행과 공간 인덱스를 함께 갱신한다.
+
+    def update_pending_geometry(self, node_id: int, x=None, y=None, w=None, h=None) -> bool:
+        """pending 행의 좌표/크기를 갱신하고 공간 인덱스도 맞춘다.
+
+        인자 없이 호출하면(전부 None) 행에 이미 반영된 값으로 인덱스만 재동기화한다.
+        """
+        found = self.get_pending_item_by_id(node_id)
+        if found is None:
+            return False
+        _, row = found
+        if x is not None:
+            row["x"] = x
+        if y is not None:
+            row["y"] = y
+        if w is not None:
+            row["width"] = w
+        if h is not None:
+            row["height"] = h
+        for i, e in enumerate(self._spatial_entries):
+            if e[5] == node_id:
+                self._spatial_entries[i] = (
+                    row.get("x", e[0]), row.get("y", e[1]),
+                    row.get("width", e[2]) or e[2],
+                    row.get("height", e[3]) or e[3],
+                    e[4], node_id,
+                )
+                break
+        return True
+
+    def discard_pending(self, node_id: int) -> Optional[str]:
+        """pending 에서 노드를 제거(원격 삭제 반영). 있었으면 category 반환."""
+        found = self.get_pending_item_by_id(node_id)
+        if found is None:
+            return None
+        category, _ = found
+        cat_dict = self._pending.get(category, {})
+        cat_dict.pop(node_id, None)
+        if not cat_dict and category in self._pending:
+            del self._pending[category]
+        self._spatial_entries = [e for e in self._spatial_entries if e[5] != node_id]
+        return category
+
+    def add_pending_edge(self, edge: dict):
+        """한쪽 끝이 아직 pending 인 원격 엣지를 보관 — 실체화 시 자동 연결."""
+        self._pending_edges.append(edge)
+
+    def remove_pending_edge(self, s_id, t_id, s_name: str, t_name: str) -> bool:
+        """pending 엣지 중 일치하는 것을 제거(원격 엣지 삭제 반영)."""
+        before = len(self._pending_edges)
+        self._pending_edges = [
+            e for e in self._pending_edges
+            if not (e.get("source_node_id", e.get("start_node_id")) == s_id
+                    and e.get("target_node_id", e.get("end_node_id")) == t_id
+                    and e.get("source_port_name", e.get("start_key", "_default")) == s_name
+                    and e.get("target_port_name", e.get("end_key", "_default")) == t_name)
+        ]
+        return len(self._pending_edges) != before
+
     def get_all_pending_data(self) -> Dict[str, List[dict]]:
         """저장용: 미생성 아이템 JSON 반환."""
         result = {}

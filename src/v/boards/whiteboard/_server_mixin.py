@@ -4,8 +4,12 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 from PyQt6.QtCore import QPointF
 
+from v.logger import get_logger
+
 if TYPE_CHECKING:
     from .items import PortItem, EdgeItem
+
+logger = get_logger("qonvo.plugin")
 
 
 class ServerMixin:
@@ -244,6 +248,8 @@ class ServerMixin:
 
         # 스냅샷 prime 캐시는 비활성(일부 노드 비는 문제) — 항상 서버 full sync 로 복원.
         # 첨부(이미지)만 백그라운드로 증분 다운로드한다.
+        # prop dedupe 베이스라인 초기화 — 실체화되며 노드별로 다시 시딩된다.
+        self._last_prop_sent = {}
         self._applying_remote_op = True
         try:
             self.restore_data(snapshot)
@@ -318,6 +324,7 @@ class ServerMixin:
                 return 0
             data = json.loads(p.read_text(encoding='utf-8'))
             self._board_name = board_id
+            self._last_prop_sent = {}
             self._applying_remote_op = True
             try:
                 self.restore_data(data.get('doc', {}))
@@ -726,6 +733,10 @@ class ServerMixin:
         add_fn = add_map.get(category)
         if add_fn:
             add_fn(pos=pos, node_id=node_id)
+            # 원격이 만든 노드의 기본값을 '전송됨'으로 기록 — 안 하면 우리 쪽 주기
+            # 스캔이 기본 props 를 서버로 보내, 곧 도착할 원저자의 실제 props 와
+            # 경합해 doc 을 기본값으로 덮을 수 있다.
+            self._seed_prop_baseline(node_id)
         # 원격이 새 이미지/파일 노드를 추가 → 참조 첨부를 백그라운드로 받아온다.
         if category in ("image_cards", "file_nodes"):
             self._schedule_attach_resync()
@@ -734,6 +745,8 @@ class ServerMixin:
         node_id = int(target) if target.isdigit() else None
         if node_id is None:
             return
+        if hasattr(self, '_last_prop_sent'):
+            self._last_prop_sent.pop(node_id, None)
         for d in (self.proxies, self.function_proxies, self.round_table_proxies,
                   self.sticky_proxies, self.prompt_proxies, self.markdown_proxies, self.button_proxies, self.switch_proxies, self.latch_proxies, self.and_gate_proxies, self.or_gate_proxies, self.not_gate_proxies, self.xor_gate_proxies, self.bulb_proxies,
                   self.checklist_proxies, self.repository_proxies,
@@ -746,6 +759,10 @@ class ServerMixin:
             if node_id in d:
                 self._delete_scene_item(d[node_id], d)
                 return
+        # 미실체화(pending) 노드 → pending 저장소에서 제거(안 하면 나중에 유령으로 실체화)
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None:
+            lz.discard_pending(node_id)
 
     def _remote_move_node(self, target: str, data: dict):
         node_id = int(target) if target.isdigit() else None
@@ -764,20 +781,29 @@ class ServerMixin:
             if node_id in d:
                 d[node_id].setPos(QPointF(x, y))
                 return
+        # 미실체화(pending) 노드 → 행+공간 인덱스에 위치 반영(버리면 낡은 위치로 실체화)
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None:
+            lz.update_pending_geometry(node_id, x=x, y=y)
 
     def _remote_node_prop(self, target: str, data: dict):
         node_id = int(target) if target.isdigit() else None
         if node_id is None:
             return
+        full = data.get("data")
+        # 원격이 새 첨부 참조를 보냄(이미지 교체/파일 추가) → 증분 다운로드.
+        # 크기 조절 같은 경량 prop 마다 manifest 를 긁지 않게, 첨부 키가 있을 때만.
+        if isinstance(full, dict) and ("image_path" in full or "file_paths" in full):
+            self._schedule_attach_resync()
         node = self.app.nodes.get(node_id)
         if node is None:
+            # 미실체화(pending) 노드 → pending 행에 머지. 예전엔 여기서 조용히 버려져,
+            # 나중에 실체화되면 join 시점의 낡은 데이터로 살아났고 주기 동기화가 그
+            # 낡은 값을 서버로 되밀어 다른 멤버의 편집(크기 등)을 되돌렸다.
+            self._merge_pending_prop(node_id, data)
             return
-        # 원격이 이미지 카드 데이터를 보냄(드래그 추가/교체) → 새 첨부 증분 다운로드.
-        if node_id in getattr(self, 'image_card_items', {}) or node_id in getattr(self, 'file_node_items', {}):
-            self._schedule_attach_resync()
         # 신규: 전체 노드 데이터를 제자리 적용(텍스트/제목/색상 등 위젯 갱신).
         # apply_sync_data 가 있으면 제자리 갱신(부드러움), 없으면 데이터로 재생성(범용).
-        full = data.get("data")
         if isinstance(full, dict):
             if hasattr(node, "apply_sync_data"):
                 try:
@@ -798,15 +824,37 @@ class ServerMixin:
                     pass
             else:
                 self._recreate_node_from_data(node_id, full)
+        else:
+            # 레거시: 단일 key/value
+            key = data.get("key", "")
+            value = data.get("value")
+            if key and hasattr(node, key):
+                try:
+                    setattr(node, key, value)
+                except Exception:
+                    pass
+        # 적용 후 로컬 직렬화를 베이스라인으로 재기록 — 우리 위젯이 일부 필드를
+        # 다르게 표현해도(미적용/반올림 등) 그걸 서버로 되밀지 않게 한다(에코 루프 차단).
+        self._seed_prop_baseline(node_id)
+
+    def _merge_pending_prop(self, node_id, data: dict):
+        """원격 node_prop 을 아직 실체화되지 않은 노드의 pending 행에 반영한다."""
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is None:
             return
-        # 레거시: 단일 key/value
-        key = data.get("key", "")
-        value = data.get("value")
-        if key and hasattr(node, key):
-            try:
-                setattr(node, key, value)
-            except Exception:
-                pass
+        found = lz.get_pending_item_by_id(node_id)
+        if found is None:
+            return
+        _, row = found
+        full = data.get("data")
+        if isinstance(full, dict):
+            row.update(full)
+        else:
+            key = data.get("key", "")
+            if key:
+                row[key] = data.get("value")
+        # 크기 변경이 왔을 수 있으니 공간 인덱스 재동기화
+        lz.update_pending_geometry(node_id)
 
     def _recreate_node_from_data(self, node_id, data: dict):
         """범용 폴백: apply_sync_data 가 없는 노드를 데이터로 제자리 재생성 + 엣지 재연결.
@@ -873,6 +921,15 @@ class ServerMixin:
         tgt_port = self._find_port(tgt_id, tgt_port_name, PortItem.INPUT)
         if src_port and tgt_port:
             self.create_edge(src_port, tgt_port)
+            return
+        # 한쪽 끝이 미실체화(pending) → 보류 엣지로 보관, 실체화되면 자동 연결
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None and (lz.get_pending_item_by_id(src_id) is not None
+                               or lz.get_pending_item_by_id(tgt_id) is not None):
+            lz.add_pending_edge({
+                "source_node_id": src_id, "target_node_id": tgt_id,
+                "source_port_name": src_port_name, "target_port_name": tgt_port_name,
+            })
 
     def _remote_remove_edge(self, data: dict):
         src_id = data.get("source_node_id")
@@ -891,18 +948,31 @@ class ServerMixin:
                     and edge.target_port.port_name == tgt_port_name):
                 self.remove_edge(edge)
                 return
+        # 라이브 엣지에 없음 → 보류(pending) 엣지였을 수 있으니 거기서도 제거
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None:
+            lz.remove_pending_edge(src_id, tgt_id, src_port_name, tgt_port_name)
 
     def _remote_chat_append(self, target: str, data: dict):
         from .chat_node import ChatNodeWidget
         node_id = int(target) if target.isdigit() else None
         if node_id is None:
             return
+        message = data.get("message", {})
+        if not message:
+            return
         node = self.app.nodes.get(node_id)
         if node and isinstance(node, ChatNodeWidget) and hasattr(node, '_history'):
-            message = data.get("message", {})
-            if message:
-                node._history.append(message)
-                node._redraw_chat_area()
+            node._history.append(message)
+            node._redraw_chat_area()
+            return
+        # 미실체화(pending) 챗 노드 → 행의 history 에 직접 누적(실체화 시 복원됨)
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None and node is None:
+            found = lz.get_pending_item_by_id(node_id)
+            if found is not None:
+                _, row = found
+                row.setdefault("history", []).append(message)
 
     def _find_port(self, node_id, port_name: str, port_type: int):
         node = self.app.nodes.get(node_id)

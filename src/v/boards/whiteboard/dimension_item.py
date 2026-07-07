@@ -321,6 +321,41 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
                  title=self._title, board_data=copy.deepcopy(self._board_data))
         return d
 
+    def sync_props(self) -> dict:
+        """주기 prop 동기화용 경량 페이로드 — 크기/제목만.
+
+        예전엔 디멘션이 prop 동기화에서 통째로 제외돼(_PROP_SYNC_EXCLUDE)
+        리사이즈가 서버 doc 에 저장되지 않았다. 내부 보드(board_data)는 크기가
+        커서 여기 싣지 않는다(자체 경로/저장 시 직렬화가 담당).
+        """
+        return {
+            "type": "dimension", "node_id": self.node_id,
+            "x": self.pos().x(), "y": self.pos().y(),
+            "width": self._width, "height": self._height,
+            "title": self._title,
+        }
+
+    def apply_sync_data(self, data):
+        """원격 prop 을 제자리 반영(파괴-재생성 금지 — 내부 보드 데이터 보존)."""
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self._width != w or self._height != h):
+            self.prepareGeometryChange()
+            self._width, self._height = float(w), float(h)
+            self._cached_wave_path = None
+            self._cached_gradient = None
+            self._cached_gradient_height = -1.0
+            self.update()
+            self._reposition_own_ports()
+        title = data.get("title")
+        if title and title != self._title:
+            self._title = title
+            self.update()
+        bd = data.get("board_data")
+        if isinstance(bd, dict):
+            self._board_data = bd
+            self._node_count_dirty = True
+            self.update()
+
     @staticmethod
     def from_data(data: Dict[str, Any]) -> "DimensionItem":
         """역직렬화"""

@@ -526,34 +526,43 @@ class WhiteBoardPlugin(
     #   image_cards(첨부) / dimensions(서브보드). 채팅(nodes)은 sync_props 로 크기/옵션만 동기화
     _PROP_SYNC_EXCLUDE = {"image_cards", "dimensions"}
 
-    def _sync_node_if_changed(self, nid):
-        """노드 하나를 직렬화 → 동기화 대상 필드가 바뀌었으면 node_prop 전송.
+    def _prop_sync_payload(self, nid):
+        """노드의 동기화 페이로드와 dedupe 키를 계산한다(전송/베이스라인 공용).
 
         위치(x/y)는 node_move 가 담당하므로 dedupe 키에서 제외 → 이동만으론 prop 재전송/재생성 안 함.
         """
         owner = self._owner_by_id(nid)
         if owner is None:
-            return
+            return None
         w = owner.widget() if hasattr(owner, 'widget') else owner
         # 채팅 노드(nodes)는 크기/옵션만 동기화(내용·히스토리는 chat_append/AI 경로).
         # sync_props 가 가벼우므로 전체 직렬화(get_data, 히스토리 통째)를 건너뛴다.
         # ★ 주기 동기화가 매 틱 모든 채팅 노드를 풀 직렬화하던 비용 제거(렉 원인).
+        # 이미지카드/디멘션도 sync_props(크기 등 경량 필드만)로 여기 합류한다.
         if hasattr(w, 'sync_props'):
             data = w.sync_props()
         else:
             # 그 외 타입: 통합 직렬화로 전 타입 커버
             res = self._categorize_selected_item(owner)
             if not res:
-                return
+                return None
             category, _nid, data = res
             if category in self._PROP_SYNC_EXCLUDE:
-                return
+                return None
         try:
             import json as _json
             key = _json.dumps({k: v for k, v in data.items() if k not in ('x', 'y')},
                               sort_keys=True, ensure_ascii=False, default=str)
         except Exception:
             key = None
+        return data, key
+
+    def _sync_node_if_changed(self, nid):
+        """노드 하나를 직렬화 → 동기화 대상 필드가 바뀌었으면 node_prop 전송."""
+        payload = self._prop_sync_payload(nid)
+        if payload is None:
+            return
+        data, key = payload
         if key is not None:
             if not hasattr(self, '_last_prop_sent'):
                 self._last_prop_sent = {}
@@ -564,6 +573,29 @@ class WhiteBoardPlugin(
             self._send_op("node_prop", nid, {"data": data})
         except Exception:
             pass
+
+    def _seed_prop_baseline(self, nid):
+        """저장/원격 데이터로 방금 만들어진(또는 원격 op 를 적용한) 노드의 현재 직렬화를
+        '이미 전송된 상태'로 기록한다.
+
+        이게 없으면 join/원격추가 직후 첫 주기 스캔(_periodic_prop_sync)이 모든 노드를
+        node_prop 으로 재방송한다 — 각 클라의 렌더 차이·낡은 pending 값이 서버 권위
+        doc 을 덮어써 다른 멤버의 편집(크기 등)이 되돌아가는 원인이었다.
+        """
+        if not getattr(self, 'server_mode', False):
+            return
+        try:
+            payload = self._prop_sync_payload(nid)
+        except Exception:
+            return
+        if payload is None:
+            return
+        _, key = payload
+        if key is None:
+            return
+        if not hasattr(self, '_last_prop_sent'):
+            self._last_prop_sent = {}
+        self._last_prop_sent[nid] = key
 
     def _flush_prop_sync(self):
         """이벤트 기반(편집 즉시) 동기화 — 응답성용."""

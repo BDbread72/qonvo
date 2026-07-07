@@ -9,8 +9,8 @@ from pathlib import Path
 if os.name == 'nt':
     os.system('chcp 65001 > nul')
 
-# src를 path에 추가
-src_path = Path(__file__).parent / 'src'
+# src를 path에 추가 (이 파일은 tests/ 안에 있으므로 루트의 src 를 가리켜야 함)
+src_path = Path(__file__).parent.parent / 'src'
 sys.path.insert(0, str(src_path))
 
 print("=" * 60)

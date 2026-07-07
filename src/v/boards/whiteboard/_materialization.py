@@ -37,6 +37,9 @@ class MaterializationMixin:
             try:
                 self._materialize_single(category, node_id, row)
                 self._lazy_mgr.mark_materialized(node_id, category)
+                # 서버모드: 저장 데이터로 만든 노드는 '이미 동기화된 상태'로 기록 —
+                # 첫 주기 스캔이 전 노드를 서버로 재방송해 doc 을 덮어쓰는 것 방지.
+                self._seed_prop_baseline(node_id)
             except Exception as e:
                 logger.error(f"[LAZY] Failed to materialize {category} id={node_id}: {e}")
                 try:
@@ -634,6 +637,7 @@ class MaterializationMixin:
         category, row = result
         self._materialize_single(category, node_id, row)
         self._lazy_mgr.mark_materialized(node_id, category)
+        self._seed_prop_baseline(node_id)
 
         owner = self._owner_by_id(node_id)
         if owner:

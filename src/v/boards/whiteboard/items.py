@@ -1302,6 +1302,52 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             d["vision_results"] = self._vision_results
         return d
 
+    def sync_props(self) -> dict:
+        """주기 prop 동기화용 경량 페이로드 — 크기/가리기만.
+
+        예전엔 이미지카드가 prop 동기화에서 통째로 제외돼(_PROP_SYNC_EXCLUDE)
+        리사이즈가 서버 doc 에 영영 저장되지 않았다. 첨부 교체(image_path/preview)는
+        _upload_and_sync_image 가 전체 데이터로 따로 보낸다 — 여기 image_path 를
+        실으면 클라 로컬 절대경로가 doc 의 상대경로(attachments/…)를 오염시킨다.
+        """
+        return {
+            "type": "image_card", "node_id": self.node_id,
+            "x": self.pos().x(), "y": self.pos().y(),
+            "width": self._width, "height": self._height,
+            "hidden": self._hidden,
+        }
+
+    def apply_sync_data(self, data):
+        """원격 prop 을 제자리 반영 — 파괴-재생성 금지(로딩 중 _start_load 재진입 지뢰)."""
+        w, h = data.get("width"), data.get("height")
+        if w and h and (self._width != w or self._height != h):
+            self.prepareGeometryChange()
+            self._width, self._height = float(w), float(h)
+            self._scaled_pixmap = None
+            self._scaled_key = None
+            self.update()
+            self._reposition_own_ports()
+        if "hidden" in data and bool(data["hidden"]) != self._hidden:
+            self._hidden = bool(data["hidden"])
+            self.update()
+        # 이미지 교체(_upload_and_sync_image / 자가치유 정정 prop 등 전체 데이터 경로)
+        ip = data.get("image_path")
+        if ip and ip != self.image_path:
+            self.image_path = ip
+            if data.get("preview_b64"):
+                self._preview_b64 = data["preview_b64"]
+                self._preview_pixmap = None
+            self._pixmap = QPixmap()
+            self._scaled_pixmap = None
+            self._scaled_key = None
+            self._full_loaded = False
+            self._load_failed = False
+            if not self._loading:   # 로딩 중 재진입 금지(_load_signal 교체 → 세그폴트)
+                self._request_full_load()
+            self.update()
+        if data.get("vision_results"):
+            self._vision_results = data["vision_results"]
+
 
 class FileNodeItem(SceneItemMixin, QGraphicsItem):
     """파일 노드 — 임의 파일(PDF/HWP/docx/xlsx/txt …) 여러 개를 담아 AI에 전달.
