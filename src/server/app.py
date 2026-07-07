@@ -288,16 +288,30 @@ class QonvoServer:
         """쿼리 t= 토큰을 검증하고 (username, level) 반환. 실패 시 None."""
         return self._http_tokens.get(request.query.get("t", ""))
 
+    def _authorize_board(self, request: web.Request):
+        """토큰 검증 + 요청한 보드(bid)의 현재 멤버인지 확인. (username, level) 또는 None.
+
+        http_token 이 보드-스코프가 아니라, 예전엔 아무 보드 토큰으로 GET/PUT
+        /board/<다른보드>/attach 를 호출해 남의 보드 이미지를 읽거나(모든 레벨)
+        덮어쓸(Member) 수 있었다. 지금 그 보드에 들어와 있는 사용자로 제한한다."""
+        tok = self._check_http_token(request)
+        if tok is None:
+            return None
+        bid = request.match_info.get("bid", "")
+        if not self.registry.is_member(tok[0], bid):
+            return None
+        return tok
+
     async def _attach_manifest(self, request: web.Request) -> web.Response:
         """보드의 첨부 파일명 목록을 반환한다."""
-        if self._check_http_token(request) is None:
+        if self._authorize_board(request) is None:
             return web.json_response({"error": "unauthorized"}, status=401)
         board = self.boards.get(request.match_info["bid"])
         return web.json_response({"attachments": board.list_attachments()})
 
     async def _attach_get(self, request: web.Request) -> web.StreamResponse:
         """첨부 파일을 내려준다."""
-        if self._check_http_token(request) is None:
+        if self._authorize_board(request) is None:
             return web.Response(status=401, text="unauthorized")
         board = self.boards.get(request.match_info["bid"])
         path = board.attachment_path(request.match_info["name"])
@@ -307,7 +321,7 @@ class QonvoServer:
 
     async def _attach_put(self, request: web.Request) -> web.Response:
         """첨부 파일을 업로드 받는다(Member 이상)."""
-        tok = self._check_http_token(request)
+        tok = self._authorize_board(request)
         if tok is None:
             return web.Response(status=401, text="unauthorized")
         if tok[1] < MEMBER:
@@ -477,6 +491,13 @@ class QonvoServer:
             logger.warning("chat log write failed (board=%s): %s", board_id, e)
 
     async def _handle_auth(self, sess: Session, data: dict) -> None:
+        # 이미 인증된 세션의 재-auth 는 거부한다. 예전엔 매번 새 http_token 을 발급하고
+        # sess.http_token 만 교체해, 이전 토큰들이 _http_tokens 에 영구히 남아(누수+무한증가)
+        # 끊긴 뒤에도 첨부 접근이 유효했고, 세션 도중 신원(username/level)이 바뀔 수 있었다.
+        if sess.authed:
+            await sess.send({"type": "error", "code": "already_authed",
+                             "message": "already authenticated"})
+            return
         username = (data.get("user") or "").strip()
         password = data.get("pass") or ""
 
@@ -570,10 +591,18 @@ class QonvoServer:
         # 다른 세션의 WS ping 에 PONG 을 못 해 'ping/pong timed out' 으로 끊긴다
         # (대형 보드 join 시 특히). executor 로 빼서 루프가 계속 돌게 한다.
         board = await loop.run_in_executor(None, self.boards.get, board_id)
+        # 보드 전환이면 이전 보드 멤버들에게 떠남을 알린다(안 하면 유령 presence 가 남는다).
+        prev_board = sess.board_id
         # 멤버로 먼저 등록(이후 모든 op 를 빠짐없이 받게) → sync 전송. 등록과 sync
         # 사이/도중에 도달하는 op 는 클라가 sync 수신 전까지 버퍼링했다가 sync 의 seq
         # 보다 큰 것만 재생한다(server_client 의 _join_synced 버퍼). 발산/유실 방지.
         self.registry.join_board(sess, board.board_id)
+        if prev_board and prev_board != board.board_id:
+            await self.registry.broadcast(
+                prev_board,
+                {"type": "user_leave", "user": sess.username},
+            )
+            await self._broadcast_presence(prev_board)
         payload = await loop.run_in_executor(None, board.snapshot_for_join, last_seq)
         await sess.send(payload)
         if self.motd:
@@ -657,7 +686,9 @@ class QonvoServer:
             from v.model_plugin import is_image_model
             is_image = is_image_model(model)
         except Exception:
-            is_image = False
+            # fail-closed: 판정 실패 시 이미지로 간주해 allow_image 게이트를 적용한다.
+            # (fail-open 이면 진짜 이미지 모델이 판정 예외로 게이트를 우회할 수 있었다.)
+            is_image = True
         ok, reason, count = self.policy.authorize(sess.username, sess.level, model, count, is_image)
         if not ok:
             await sess.send({"type": "error", "code": "limit", "message": reason, "node_id": node_id})
@@ -834,11 +865,13 @@ class QonvoServer:
 
     # ---- 콘솔용 헬퍼 (루프 스레드에서 호출) -----------------------------
     async def kick_user(self, username: str) -> bool:
-        s = self.registry.find_user(username)
-        if not s:
+        # 같은 유저가 여러 번 접속했을 수 있다 — 세션 하나만 끊으면 나머지는 살아남는다.
+        sessions = [s for s in self.registry.all_sessions() if s.username == username]
+        if not sessions:
             return False
-        await s.send({"type": "server_msg", "text": "You were kicked by an operator."})
-        await s.ws.close()
+        for s in sessions:
+            await s.send({"type": "server_msg", "text": "You were kicked by an operator."})
+            await s.ws.close()
         return True
 
     async def say(self, text: str) -> None:
@@ -852,9 +885,9 @@ class QonvoServer:
 
     def set_user_level(self, username: str, level: int) -> None:
         """사용자 레벨 변경: 접속 중 세션 즉시 반영 + roles.json 에 영속(merri 포함 모든 인증방식)."""
-        s = self.registry.find_user(username)
-        if s:
-            s.level = level
+        for s in self.registry.all_sessions():   # 다중 세션 모두 반영(하나만 바꾸면 나머지 stale)
+            if s.username == username:
+                s.level = level
         from . import auth as _a
         _a.set_role(username, int(level))
 
@@ -916,8 +949,11 @@ class QonvoServer:
         """
         base = max(60, int(self.upnp_lease * 0.7)) if self.upnp_lease else 1800
         interval = min(base, 600)   # 드리프트를 빨리 잡도록 최소 10분 간격
-        try:
-            while True:
+        # ⚠️ 예외 처리는 반드시 루프 '안'에 둔다. 예전엔 try 가 while 을 감싸서, 갱신 중
+        # 단 한 번의 일시적 예외(네트워크/라우터)로 루프가 영영 종료 → 자가복구 불능이었다
+        # (=이 루프가 막으려던 바로 그 실패). 이제 한 사이클이 터져도 다음 사이클로 계속한다.
+        while True:
+            try:
                 await asyncio.sleep(interval)
                 if not self._upnp:
                     continue
@@ -940,10 +976,10 @@ class QonvoServer:
                     logger.info("UPnP re-established after re-discovery")
                 else:
                     logger.warning("UPnP re-discovery failed; retrying next cycle")
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning("UPnP renew loop error: %s", e)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("UPnP renew cycle error (계속 재시도): %s", e)
 
     async def stop(self) -> None:
         if getattr(self, "_autosave_task", None):

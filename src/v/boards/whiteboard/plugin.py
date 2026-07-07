@@ -751,6 +751,8 @@ class WhiteBoardPlugin(
         self.node_title_items.pop(node_id, None)  # 이름표는 proxy 자식이라 함께 제거됨
         self._node_data_cache.pop(node_id, None)
         self._dirty_node_ids.discard(node_id)
+        if hasattr(self, '_last_prop_sent'):  # prop dedupe 누수 방지(원격삭제 경로와 동일)
+            self._last_prop_sent.pop(node_id, None)
         if self.scene:
             self.scene.removeItem(proxy)
         self._notify_modified()
@@ -768,6 +770,8 @@ class WhiteBoardPlugin(
         self.node_title_items.pop(node_id, None)
         self._node_data_cache.pop(node_id, None)
         self._dirty_node_ids.discard(node_id)
+        if hasattr(self, '_last_prop_sent'):  # prop dedupe 누수 방지(원격삭제 경로와 동일)
+            self._last_prop_sent.pop(node_id, None)
         if hasattr(item, 'stop_animation'):
             item.stop_animation()
         if self.scene:

@@ -293,6 +293,8 @@ class DimensionItem(SceneItemMixin, QGraphicsItem):
             scene = self.scene()
             if scene and hasattr(scene, '_plugin'):
                 scene._plugin._notify_modified()
+                if moved:
+                    self._emit_server_move(throttled=False)
 
     # 데이터 관리
     def set_title(self, title: str):

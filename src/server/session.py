@@ -69,6 +69,17 @@ class Registry:
     def board_members(self, board_id: str) -> Set[Session]:
         return set(self._by_board.get(board_id, set()))
 
+    def is_member(self, username: str, board_id: str) -> bool:
+        """해당 username 의 인증된 세션이 이 보드에 현재 참가 중인지.
+
+        첨부/스킨 HTTP 접근을 '지금 그 보드에 들어와 있는 사용자'로 제한하는 데 쓴다
+        (http_token 이 보드-스코프가 아니라, 아무 보드 토큰으로 남의 보드 첨부를
+        읽던 문제를 막는다)."""
+        for s in self._by_board.get(board_id, set()):
+            if s.authed and s.username == username:
+                return True
+        return False
+
     def presence_list(self, board_id: str) -> list:
         """보드 참가자 목록(이름/레벨/핑/커서/색)을 반환한다."""
         out = []

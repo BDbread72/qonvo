@@ -223,10 +223,10 @@ class Console:
             print("usage: op|deop <user>")
             return
         username = args[0]
-        # 접속 중 세션 즉시 반영
-        sess = self._server.registry.find_user(username)
-        if sess:
-            sess.level = level
+        # 접속 중 세션 즉시 반영(같은 유저의 다중 세션 모두)
+        for sess in self._server.registry.all_sessions():
+            if sess.username == username:
+                sess.level = level
         # 로컬 계정이면 영속화
         from .auth import _save_users, _load_users
         data = _load_users()

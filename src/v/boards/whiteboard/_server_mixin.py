@@ -253,6 +253,14 @@ class ServerMixin:
         self._applying_remote_op = True
         try:
             self.restore_data(snapshot)
+        except Exception:
+            # Qt 슬롯 — 손상/예상밖 스냅샷으로 restore 가 터져도 앱을 죽이지 않는다.
+            # 부분 복원 상태로라도 남기고 아래 첨부 동기화/리포터 등록은 계속 진행한다.
+            logger.error("_on_server_sync: restore_data 실패 — 부분 복원 상태로 계속", exc_info=True)
+            try:
+                self._notify_server_status("보드 복원 중 오류 — 일부 노드가 누락될 수 있어요")
+            except Exception:
+                pass
         finally:
             self._applying_remote_op = False
 
@@ -438,15 +446,27 @@ class ServerMixin:
             self._applying_remote_op = False
 
     def _on_ai_progress(self, node_id_str: str, chunk: str):
-        from .chat_node import ChatNodeWidget
-        node_id = int(node_id_str) if node_id_str.isdigit() else None
-        if node_id is None:
-            return
-        node = self.app.nodes.get(node_id)
-        if node and isinstance(node, ChatNodeWidget):
-            node.set_response(chunk, done=False)
+        # Qt 슬롯 — 처리 중 예외가 밖으로 나가면 앱이 즉사한다(프로젝트 필수규칙). 전체 방어.
+        try:
+            from .chat_node import ChatNodeWidget
+            node_id = int(node_id_str) if node_id_str.isdigit() else None
+            if node_id is None:
+                return
+            node = self.app.nodes.get(node_id)
+            if node and isinstance(node, ChatNodeWidget):
+                node.set_response(chunk, done=False)
+        except Exception:
+            logger.warning("_on_ai_progress 실패 — 무시", exc_info=True)
 
     def _on_ai_complete(self, node_id_str: str, result: dict):
+        # Qt 슬롯 — set_image_response/_emit_complete_signal/_show_server_preferred 등에서
+        # 예외가 나면 앱이 즉사한다(프로젝트 필수규칙). 전체 방어.
+        try:
+            self._on_ai_complete_impl(node_id_str, result)
+        except Exception:
+            logger.warning("_on_ai_complete 실패 — 무시", exc_info=True)
+
+    def _on_ai_complete_impl(self, node_id_str: str, result: dict):
         from .chat_node import ChatNodeWidget
         from .checklist import ChecklistWidget
         node_id = int(node_id_str) if node_id_str.isdigit() else None
@@ -698,9 +718,26 @@ class ServerMixin:
         except Exception:
             pass
 
+    def _node_exists(self, node_id: int) -> bool:
+        """노드가 이미 실체화(app.nodes)됐거나 pending(lazy) 상태로 존재하는지."""
+        if node_id in getattr(self.app, 'nodes', {}):
+            return True
+        lz = getattr(self, '_lazy_mgr', None)
+        if lz is not None and hasattr(lz, 'get_pending_item_by_id'):
+            try:
+                if lz.get_pending_item_by_id(node_id) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _remote_add_node(self, target: str, data: dict):
         category = data.get("_category", "nodes")
         node_id = int(target) if target.isdigit() else self._next_id()
+        # 이미 존재하는 노드면(스냅샷으로 받아 실체화됨 + 구버전 클라의 node_add 재방송)
+        # 다시 만들지 않는다. 재생성하면 기존 위젯을 빈 노드로 덮어써 파괴한다(유령).
+        if self._node_exists(node_id):
+            return
         self.app._next_id = max(self.app._next_id, node_id + 1)
         pos = QPointF(data.get("x", 0), data.get("y", 0))
 
@@ -994,6 +1031,12 @@ class ServerMixin:
     def _send_node_add_op(self, node_id: int, node, pos: QPointF):
         if not self.server_mode or self._applying_remote_op:
             return
+        # ⚠️ 스냅샷/지연 실체화(lazy)로 노드를 '되그리는' 중에는 node_add 를 보내면 안 된다.
+        # _applying_remote_op 가드는 restore_data 의 동기 부분(첫 배치)만 덮고, 타이머·pan
+        # 으로 실체화되는 나머지 노드는 이 가드 밖이라 서버 doc 에 이미 있는 노드를
+        # node_add 로 재방송 → oplog 비대 + 타 멤버가 노드를 빈 노드로 덮어써 파괴한다.
+        if getattr(self, '_batch_loading', False):
+            return
         category = self._node_category(node)
         self._send_op("node_add", node_id, {
             "_category": category,
@@ -1070,12 +1113,16 @@ class ServerMixin:
     def _send_node_move_op(self, node_id: int, x: float, y: float):
         if not self.server_mode or self._applying_remote_op:
             return
+        if getattr(self, '_batch_loading', False):
+            return  # 실체화 중 setPos → itemChange 에코 방지(node_add 가드와 동일)
         self._send_op("node_move", node_id, {"x": x, "y": y})
 
     def _send_node_move_throttled(self, node_id: int, x: float, y: float):
         """드래그 중 위치를 throttle(약 25/s)로 전송 → 상대가 점프 없이 부드럽게 본다."""
         if not self.server_mode or self._applying_remote_op:
             return
+        if getattr(self, '_batch_loading', False):
+            return  # 실체화 중 setPos → itemChange 에코 방지
         import time
         if not hasattr(self, '_move_throttle'):
             self._move_throttle = {}

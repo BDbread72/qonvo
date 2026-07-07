@@ -63,9 +63,12 @@ def seed(qonvo_path: str, board_id: str) -> None:
             shutil.move(str(s), str(dest))
             extras += 1
 
-    # 스냅샷 기록 + oplog 초기화
-    (bdir / "snapshot.json").write_text(
-        json.dumps({"seq": 0, "doc": doc}, ensure_ascii=False), encoding="utf-8"
+    # 스냅샷 기록(원자적 — tmp→fsync→replace) + oplog 초기화. 직접 write_text 하면
+    # 쓰는 도중 중단 시 잘린 스냅샷이 남아 서버가 손상 보드로 로드한다(저장 규칙 위반).
+    from .board_store import _atomic_write_text
+    _atomic_write_text(
+        bdir / "snapshot.json.tmp", bdir / "snapshot.json",
+        json.dumps({"seq": 0, "doc": doc}, ensure_ascii=False),
     )
     oplog = bdir / "oplog.jsonl"
     if oplog.exists():

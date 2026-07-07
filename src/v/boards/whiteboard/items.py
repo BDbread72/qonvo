@@ -66,6 +66,10 @@ class SceneItemMixin:
                     pass
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
             self._reposition_own_ports()
+            # 서버모드: 씬 아이템(이미지카드/파일/디멘션/텍스트/그룹프레임)도 드래그 위치를
+            # throttle 로 전송한다. 예전엔 프록시 위젯만 node_move 를 보내고 씬 아이템은
+            # 아무 op 도 안 보내(주기 prop 은 x/y 제외) 위치가 협업에 반영되지 않았다.
+            self._emit_server_move(throttled=True)
             if not _group_moving and self.isSelected():
                 scene = self.scene()
                 pre = getattr(self, '_pre_move_pos', None)
@@ -80,6 +84,29 @@ class SceneItemMixin:
                         finally:
                             _group_moving = False
         return super().itemChange(change, value)
+
+    def _emit_server_move(self, throttled: bool):
+        """서버모드에서 이 씬 아이템의 위치를 node_move op 로 전송한다.
+
+        throttled=True 는 드래그 중(약 25/s), False 는 릴리스 시 최종 위치(확정).
+        원격 적용 중(_applying_remote_op)에는 _send_node_move* 가 자체적으로 막으므로
+        에코가 나지 않는다. node_id 가 없거나 서버모드가 아니면 무해하게 무시.
+        """
+        nid = getattr(self, 'node_id', None)
+        if nid is None:
+            return
+        scene = self.scene()
+        if scene is None or not hasattr(scene, '_plugin'):
+            return
+        plg = scene._plugin
+        if not getattr(plg, 'server_mode', False):
+            return
+        pos = self.pos()
+        if throttled:
+            if hasattr(plg, '_send_node_move_throttled'):
+                plg._send_node_move_throttled(nid, pos.x(), pos.y())
+        elif hasattr(plg, '_send_node_move_op'):
+            plg._send_node_move_op(nid, pos.x(), pos.y())
 
     # ── 포트 관리 ─────────────────────────────────────────
 
@@ -785,6 +812,8 @@ class TextItem(SceneItemMixin, QGraphicsTextItem):
             scene = self.scene()
             if scene and hasattr(scene, '_plugin'):
                 scene._plugin._notify_modified()
+                if moved:
+                    self._emit_server_move(throttled=False)
 
     def get_data(self) -> Dict[str, Any]:
         d = self._base_data()
@@ -921,21 +950,35 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
                 continue
             card._start_load()
 
-    def _start_load(self):
+    def _resolve_local_path(self):
+        """image_path 를 실제 존재하는 절대경로로 해석.
+
+        서버모드/복원된 보드에서 image_path 는 상대경로(attachments/<name>)로
+        남는다 — 절대경로가 아니면 보드별 temp 디렉토리에서 basename 으로 찾는다.
+        더블클릭 열기(mouseDoubleClickEvent)와 로드(_start_load)가 공유한다.
+        찾지 못하면 None.
+        """
         path = self.image_path
-        if not os.path.isabs(path) or not os.path.exists(path):
-            resolved = False
-            if ImageCardItem._board_temp_dir:
-                for sub in ['attachments', '']:
-                    candidate = os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path)) if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path))
-                    if os.path.exists(candidate):
-                        path = candidate
-                        resolved = True
-                        break
-            if not resolved and not os.path.exists(path):
-                _logger.warning(f"[IMG_LOAD] Failed to resolve: {self.image_path} (temp_dir={ImageCardItem._board_temp_dir})")
-                self._load_failed = True
-                return
+        if not path:
+            return None
+        if os.path.isabs(path) and os.path.exists(path):
+            return path
+        if ImageCardItem._board_temp_dir:
+            for sub in ['attachments', '']:
+                candidate = (os.path.join(ImageCardItem._board_temp_dir, sub, os.path.basename(path))
+                             if sub else os.path.join(ImageCardItem._board_temp_dir, os.path.basename(path)))
+                if os.path.exists(candidate):
+                    return candidate
+        if os.path.exists(path):
+            return path
+        return None
+
+    def _start_load(self):
+        path = self._resolve_local_path()
+        if path is None:
+            _logger.warning(f"[IMG_LOAD] Failed to resolve: {self.image_path} (temp_dir={ImageCardItem._board_temp_dir})")
+            self._load_failed = True
+            return
         self._loading = True
         ImageCardItem._load_active += 1
         from PyQt6.QtCore import QRunnable, QThreadPool, QObject, pyqtSignal
@@ -1192,10 +1235,13 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
         if self._pixmap.isNull():
             self._upload_image()
         else:
-            if self.image_path and os.path.exists(self.image_path):
+            # 서버모드/복원 보드는 image_path 가 상대경로라 os.path.exists 가 항상
+            # False → 예전엔 이미지 열기가 조용히 죽었다. temp 디렉토리에서 해석해 연다.
+            resolved = self._resolve_local_path()
+            if resolved:
                 from PyQt6.QtGui import QDesktopServices
                 from PyQt6.QtCore import QUrl
-                QDesktopServices.openUrl(QUrl.fromLocalFile(self.image_path))
+                QDesktopServices.openUrl(QUrl.fromLocalFile(resolved))
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event):
@@ -1233,6 +1279,8 @@ class ImageCardItem(SceneItemMixin, QGraphicsItem):
             scene = self.scene()
             if scene and hasattr(scene, '_plugin'):
                 scene._plugin._notify_modified()
+                if moved:
+                    self._emit_server_move(throttled=False)
 
     def _nanobanana_ratios(self) -> list[str]:
         """provider.py에서 비율을 가져오고 실패 시 fallback을 쓰며 클래스 캐시를 사용한다."""
@@ -1674,6 +1722,8 @@ class FileNodeItem(SceneItemMixin, QGraphicsItem):
             scene = self.scene()
             if scene and hasattr(scene, '_plugin'):
                 scene._plugin._notify_modified()
+                if moved:
+                    self._emit_server_move(throttled=False)
 
     def get_data(self) -> Dict[str, Any]:
         d = self._base_data()
@@ -2099,6 +2149,8 @@ class GroupFrameItem(SceneItemMixin, QGraphicsRectItem):
             scene = self.scene()
             if scene and hasattr(scene, '_plugin'):
                 scene._plugin._notify_modified()
+                if moved:
+                    self._emit_server_move(throttled=False)
 
     def _get_resize_corner(self, pos: QPointF) -> str:
         """리사이즈 코너 감지"""

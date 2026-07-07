@@ -119,7 +119,14 @@ class AIPolicy:
         제대로 먹는다(예전엔 항상 +1 이라 count=8 배치가 1슬롯으로만 잡혀 한도 우회).
         """
         with self._lock:
-            self._recent[user].append(time.time())
+            now = time.time()
+            # 60초 윈도우 밖은 버린다. 예전엔 pruning 이 authorize 의 `if rpm>0` 안에만
+            # 있어, 기본값 rate_per_min=0(무제한)에선 영영 안 지워져 _recent 가 요청마다
+            # 무한 증가(메모리 누수)했다. rpm 과 무관하게 여기서 항상 정리한다.
+            dq = self._recent[user]
+            dq.append(now)
+            while dq and now - dq[0] > 60:
+                dq.popleft()
             self._active[user] += max(1, int(count or 1))
 
     def end(self, user: str, model: str, tokens_in: int, tokens_out: int, count: int = 1) -> None:

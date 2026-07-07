@@ -194,12 +194,16 @@ async def run():
                 and edges[0]["target_node_id"] == 200, edges
             ok("edge_add applied + normalized")
 
-            # 10) edge_add 중복 → dedup (브로드캐스트는 되지만 doc 은 그대로)
+            # 10) edge_add 중복 → dedup. 무효 op(중복)은 이제 브로드캐스트되지 않는다
+            #     (no-op 억제 — pan 재실체화의 node_add 재방송 폭주를 막는 것과 동일 로직).
+            #     후속 유효 op(move)을 보내 순서 동기화 후 doc 이 그대로임을 확인한다.
             await send_op(wa, {"op_id": "e1b", "op_type": "edge_add",
                                "data": {"source_node_id": 100, "target_node_id": 200}})
-            await recv(wb)
+            await send_op(wa, {"op_id": "m0", "op_type": "node_move", "target": "100",
+                               "data": {"x": 999, "y": 1}})   # 기존 좌표 유지(test 20 보존)
+            await recv(wb)   # move 는 브로드캐스트됨 → 그때까진 중복 edge_add 도 처리 완료
             assert len(board.doc.get("edges", [])) == 1, board.doc.get("edges")
-            ok("edge_add dedup (no duplicate edge)")
+            ok("edge_add dedup (no duplicate edge, no-op not broadcast)")
 
             # 11) edge_remove
             await send_op(wa, {"op_id": "e2", "op_type": "edge_remove",
@@ -318,6 +322,66 @@ async def run():
             assert reloaded._find_node("100")["title"] == "hello", "node_prop not persisted"
             ok("snapshot persisted + reloaded from disk (incl. node_prop)")
 
+            # ── 섹션 E: 하드닝(재-auth 거부 / 보드전환 leave / id키 / 첨부 스코프) ──
+            sbid = board.board_id
+            BOARD2 = BOARD + "2"
+
+            # 21) 재-auth 거부(http_token 누수 방지, S2)
+            wg = await cs.ws_connect(URL)
+            assert (await recv(wg))["type"] == "auth_required"
+            await wg.send_str(json.dumps({"type": "auth", "user": "alice", "pass": "pw123"}))
+            assert (await recv(wg))["type"] == "auth_ok"
+            await wg.send_str(json.dumps({"type": "auth", "user": "alice", "pass": "pw123"}))
+            r = await recv(wg)
+            assert r["type"] == "error" and r["code"] == "already_authed", r
+            ok("re-auth rejected (no http_token leak)")
+            await wg.close()
+
+            # 22) 보드 전환 → 이전 보드 멤버에게 user_leave(유령 presence 방지, M5)
+            w1 = await cs.ws_connect(URL)
+            w2 = await cs.ws_connect(URL)
+            await auth_join(w1, "alice", "pw123", BOARD, last_seq=board.seq)
+            await auth_join(w2, "bob", "pw456", BOARD, last_seq=board.seq)
+            await recv(w1)  # bob user_join 소비
+            await w1.send_str(json.dumps({"type": "join_board", "board_id": BOARD2, "last_seq": 0}))
+            ul = await recv(w2)
+            assert ul["type"] == "user_leave" and ul["user"] == "alice", ul
+            ok("user_leave on board switch (no ghost presence)")
+            await w1.close(); await w2.close()
+            await asyncio.sleep(0.05)
+
+            # 23) node_add 가 id + node_id 두 키 모두 저장(18개 노드타입 드롭 방지, H1)
+            w3 = await cs.ws_connect(URL)
+            await auth_join(w3, "alice", "pw123", BOARD, last_seq=board.seq)
+            await send_op(w3, {"op_id": "na1", "op_type": "node_add", "target": "777",
+                               "data": {"_category": "sticky_notes", "x": 1, "y": 2}})
+            await asyncio.sleep(0.1)  # 단일 멤버 → 브로드캐스트 없음, doc 반영만 대기
+            n777 = board._find_node("777")
+            assert n777 is not None and n777.get("node_id") == 777 and n777.get("id") == 777, n777
+            ok("node_add stores both id + node_id (sticky/image/etc. not dropped)")
+            await w3.close()
+
+            # 24) 첨부 접근이 보드 멤버십으로 스코프됨(크로스보드 차단, S1)
+            w4 = await cs.ws_connect(URL)
+            assert (await recv(w4))["type"] == "auth_required"
+            await w4.send_str(json.dumps({"type": "auth", "user": "alice", "pass": "pw123"}))
+            tok = (await recv(w4))["http_token"]
+            await w4.send_str(json.dumps({"type": "join_board", "board_id": BOARD, "last_seq": 0}))
+            await recv(w4); await recv(w4)  # sync + motd
+            async with cs.get(f"http://127.0.0.1:{PORT}/board/{sbid}/manifest?t={tok}") as rr:
+                assert rr.status == 200, ("member manifest", rr.status)
+            other = board_store.safe_board_id(BOARD2)
+            async with cs.get(f"http://127.0.0.1:{PORT}/board/{other}/manifest?t={tok}") as rr:
+                assert rr.status == 401, ("cross-board must be denied", rr.status)
+            ok("attachment access scoped to board membership")
+            await w4.close()
+
+            # BOARD2 정리(테스트가 만든 보드 디렉토리)
+            b2dir = board_store.get_boards_dir() / board_store.safe_board_id(BOARD2)
+            if b2dir.exists():
+                import shutil
+                shutil.rmtree(b2dir, ignore_errors=True)
+
     finally:
         await server.stop()
 
@@ -326,7 +390,7 @@ async def run():
     return passed
 
 
-EXPECTED = 25
+EXPECTED = 29
 
 if __name__ == "__main__":
     result = asyncio.run(run())

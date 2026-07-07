@@ -63,6 +63,15 @@ sys.excepthook = _log_exc
 threading.excepthook = lambda a: _log_exc(a.exc_type, a.exc_value, a.exc_traceback)
 
 
+def _log_unraisable(unraisable):
+    # GC/__del__ 등에서 나는 '올릴 수 없는' 예외도 server_crash.log 로 잡는다
+    # (main.py 는 3개 훅 모두 등록 — 헤드리스 서버도 동일하게 맞춘다).
+    _log_exc(unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback)
+
+
+sys.unraisablehook = _log_unraisable
+
+
 def _cmd_run() -> int:
     import asyncio
 

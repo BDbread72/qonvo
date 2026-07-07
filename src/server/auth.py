@@ -242,10 +242,17 @@ class Authenticator:
         if r is not None:
             return r
         ov = self._config.get("users", {}).get(username)
+        if isinstance(ov, bool):   # TOML 의 true/false 를 정수로 오인하지 않게 먼저 거른다
+            return None
         if isinstance(ov, int):
             return ov
+        if isinstance(ov, str) and ov.strip().lstrip("-").isdigit():
+            return int(ov.strip())   # [users] admin = "2" 같은 문자열 레벨도 인정(예전엔 조용히 무시)
         if isinstance(ov, dict) and "level" in ov:
-            return int(ov["level"])
+            try:
+                return int(ov["level"])
+            except (TypeError, ValueError):
+                return None
         return None
 
     @property
@@ -270,8 +277,12 @@ class Authenticator:
 
         # 3) 게스트
         if self.allow_guests:
+            # ⚠️ 게스트는 비밀번호가 없어 username 을 신뢰할 수 없다. roles.json/[users] 의
+            # 레벨 오버라이드로 '승격'시키면 아무나 그 이름을 대고 Operator 가 될 수 있다.
+            # 오버라이드는 '강등'만 허용(min) — 절대 default_level 위로 못 올린다.
             ov = self._level_override(username)
-            return True, ov if ov is not None else self.default_level, "guest"
+            level = min(ov, self.default_level) if ov is not None else self.default_level
+            return True, level, "guest"
 
         return False, -1, "unknown user"
 

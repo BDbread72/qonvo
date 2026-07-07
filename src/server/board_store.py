@@ -296,10 +296,14 @@ class Board:
                     applied.append(op)
                     continue
                 try:
-                    self._apply_one(op)
+                    changed = self._apply_one(op)
                 except Exception as e:
                     logger.warning("op 적용 실패 — 제외: type=%s target=%s (%s)",
                                    op.get("op_type"), op.get("target"), e)
+                    continue
+                if not changed:
+                    # 무효 op(대상 없음/중복 node_add 재방송 등) — seq/oplog/브로드캐스트 제외.
+                    # oplog 비대와 타 멤버에서의 유령 재생성을 막는다.
                     continue
                 self.seq += 1
                 record = {"seq": self.seq, "op": op, "author": author}
@@ -327,7 +331,10 @@ class Board:
                     return n
         return None
 
-    def _apply_one(self, op: dict) -> None:
+    def _apply_one(self, op: dict) -> bool:
+        """op 을 doc 에 적용한다. 실제로 doc 을 바꿨으면 True, 무효(대상 없음/중복)면
+        False 를 반환한다. False 면 apply_ops 가 seq/oplog/브로드캐스트에서 제외한다
+        (이미 삭제된 노드로 온 move/prop, 이미 존재하는 노드의 node_add 재방송 등)."""
         t = op.get("op_type", "")
         target = op.get("target", "")
         data = op.get("data", {}) or {}
@@ -336,9 +343,16 @@ class Board:
             cat = data.get("_category", "nodes")
             tid = _as_id(target)
             lst = self._list_of(cat)
-            if not any(_node_id(n) == tid for n in lst):
-                node = {"id": tid, "x": data.get("x", 0), "y": data.get("y", 0)}
-                lst.append(node)
+            if any(_node_id(n) == tid for n in lst):
+                return False  # 이미 존재 — 재방송(pan 실체화 등)이라 무효 처리
+            # ⚠️ id 를 'id' 와 'node_id' 두 키로 모두 저장한다. 클라 lazy_loader.ID_KEY_MAP
+            # 은 카테고리마다 다른 키('id' 6종 / 'node_id' 18종)를 기대하는데, 예전엔 전부
+            # 'id' 로만 저장해 sticky/image/dimension/gate 등 18종이 클라 ingest 에서
+            # row.get('node_id')=None 으로 드롭됐다(생성직후 끊기면 영구 유실).
+            node = {"id": tid, "node_id": tid,
+                    "x": data.get("x", 0), "y": data.get("y", 0)}
+            lst.append(node)
+            return True
         elif t == "node_remove":
             tid = _as_id(target)
             for cat in _LIST_CATEGORIES:
@@ -359,23 +373,32 @@ class Board:
             names = self.doc.get("node_names")
             if isinstance(names, dict):
                 names.pop(str(tid), None)
+            return True
         elif t == "node_move":
             n = self._find_node(target)
-            if n is not None:
-                n["x"] = data.get("x", n.get("x", 0))
-                n["y"] = data.get("y", n.get("y", 0))
+            if n is None:
+                return False
+            n["x"] = data.get("x", n.get("x", 0))
+            n["y"] = data.get("y", n.get("y", 0))
+            return True
         elif t == "node_prop":
             n = self._find_node(target)
-            if n is not None:
-                full = data.get("data")
-                if isinstance(full, dict):
-                    # 전체 노드 데이터 머지(텍스트/제목/색상/크기 등) — 늦은 합류·영속용
-                    for k, v in full.items():
-                        n[k] = v
-                else:
-                    key = data.get("key")
-                    if key:
-                        n[key] = data.get("value")
+            if n is None:
+                return False
+            full = data.get("data")
+            if isinstance(full, dict):
+                # 전체 노드 데이터 머지(텍스트/제목/색상/크기 등) — 늦은 합류·영속용.
+                # ⚠️ x/y 는 제외 — 위치는 node_move 가 권위다. prop 이 낡은 x/y 를 실어
+                # 오면(다른 멤버의 주기 스캔) 동시 이동을 되돌린다(last-writer-wins 역행).
+                for k, v in full.items():
+                    if k in ("x", "y"):
+                        continue
+                    n[k] = v
+            else:
+                key = data.get("key")
+                if key and key not in ("x", "y"):
+                    n[key] = data.get("value")
+            return True
         elif t == "node_rename":
             # 통합 노드 이름 — doc 상단 node_names dict 에 보관(str id 키, 클라 포맷과 동일).
             # 늦게 합류한 멤버는 full sync 의 이 dict 로 이름을 복원한다.
@@ -388,18 +411,28 @@ class Board:
                 names[str(_as_id(target))] = nm
             else:
                 names.pop(str(_as_id(target)), None)
+            return True
         elif t == "edge_add":
             edges = self._list_of("edges")
-            if not _edge_exists(edges, data):
-                edges.append(_normalize_edge(data))
+            if _edge_exists(edges, data):
+                return False
+            edges.append(_normalize_edge(data))
+            return True
         elif t == "edge_remove":
             edges = self._list_of("edges")
-            self.doc["edges"] = [e for e in edges if not _edge_match(e, data)]
+            new_edges = [e for e in edges if not _edge_match(e, data)]
+            if len(new_edges) == len(edges):
+                return False
+            self.doc["edges"] = new_edges
+            return True
         elif t == "chat_append":
             n = self._find_node(target)
             msg = data.get("message")
-            if n is not None and msg:
-                n.setdefault("history", []).append(msg)
+            if n is None or not msg:
+                return False
+            n.setdefault("history", []).append(msg)
+            return True
+        return False  # 알 수 없는 op_type
 
     def append_assistant_message(self, node_id, text: str, images: list) -> None:
         """AI 응답을 권위 문서의 채팅 노드 history 에 누적한다."""
