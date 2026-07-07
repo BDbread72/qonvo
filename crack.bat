@@ -1,5 +1,6 @@
 @echo off
-rem 빌드 스탬프(누적 커밋 수)를 buildno.txt 에 구워서 번들 — frozen exe 타이틀바에 beta-X.Y.Z+N 표시
+rem Bake build stamp (cumulative commit count) into buildno.txt for the bundle
+rem so the frozen exe titlebar shows beta-X.Y.Z+N.
 rem NOTE: keep these comments ASCII-only. cmd parses this file as cp949 while it is saved
 rem as UTF-8, and pipe/redirect chars inside rem lines get EXECUTED by cmd. The old
 rem redirect-first echo idiom burned "ECHO is on." into buildno.txt (version showed
